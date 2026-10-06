@@ -1,0 +1,9 @@
+[package]
+name = "termwiz_probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = "1.0.151"
+termwiz = "0.23.3"
+unicode-width = "0.2.2"
