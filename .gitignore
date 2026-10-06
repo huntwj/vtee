@@ -1,4 +1,5 @@
 /target
+/.claude/
 docs/probe/rust/*/target
 docs/probe/__pycache__/
 *.pyc
