@@ -1,0 +1,62 @@
+{
+ "T1": [
+  "PASS",
+  "row3='    HELLO' row6='         X'"
+ ],
+ "T2": [
+  "PASS",
+  "reported=['bold', 'dim', 'italic', 'underline', 'blink', 'reverse', 'strike'] missing=[]"
+ ],
+ "T3": [
+  "PASS",
+  "fg=196 bg=21"
+ ],
+ "T4": [
+  "PASS",
+  "fg=(10, 200, 30) bg=(1, 2, 3)"
+ ],
+ "T5": [
+  "PASS",
+  "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+ ],
+ "T6": [
+  "PASS",
+  "all ok"
+ ],
+ "T7a": [
+  "PASS",
+  "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+ ],
+ "T7b": [
+  "PASS",
+  "while in alt: MAIN absent, ALT present"
+ ],
+ "T8": [
+  "PASS",
+  "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+ ],
+ "T9": [
+  "PASS",
+  "row1='┌──┐|' (want '┌──┐')"
+ ],
+ "T10": [
+  "PARTIAL",
+  "modes=['1'] found={'mouse1000': False, 'mouse1006': False, 'bpaste2004': False, 'decckm1': True, 'deckpam': False}"
+ ],
+ "T11": [
+  "NOT EXPOSED",
+  "{'title': 'NOT EXPOSED', 'osc8': 'NOT EXPOSED'} text='link done' | seq contains title? False, OSC8? False"
+ ],
+ "T12": [
+  "PARTIAL",
+  "cursor={'row': None, 'col': None, 'hidden': True, 'shape': None}"
+ ],
+ "T13": [
+  "PASS",
+  "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+ ],
+ "T14": [
+  "NOT EXPOSED",
+  "visible_ok=True, no scrollback API; visible='L39'..'L50'"
+ ]
+}

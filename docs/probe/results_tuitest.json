@@ -1,0 +1,272 @@
+{
+ "T1": {
+  "xtermjs": [
+   "PASS",
+   "row3='    HELLO' row6='         X'"
+  ],
+  "alacritty": [
+   "PASS",
+   "row3='    HELLO' row6='         X'"
+  ],
+  "ghostty": [
+   "PASS",
+   "row3='    HELLO' row6='         X'"
+  ],
+  "rio": [
+   "PASS",
+   "row3='    HELLO' row6='         X'"
+  ]
+ },
+ "T2": {
+  "xtermjs": [
+   "PASS",
+   "reported=['bold', 'dim', 'italic', 'underline', 'blink', 'reverse', 'strike'] missing=[]"
+  ],
+  "alacritty": [
+   "PARTIAL",
+   "reported=['bold', 'dim', 'italic', 'underline', 'reverse', 'strike'] missing=['blink']"
+  ],
+  "ghostty": [
+   "PASS",
+   "reported=['bold', 'dim', 'italic', 'underline', 'blink', 'reverse', 'strike'] missing=[]"
+  ],
+  "rio": [
+   "PARTIAL",
+   "reported=['bold', 'dim', 'italic', 'underline', 'reverse', 'strike'] missing=['blink']"
+  ]
+ },
+ "T3": {
+  "xtermjs": [
+   "PASS",
+   "fg=196 bg=21"
+  ],
+  "alacritty": [
+   "PASS",
+   "fg=196 bg=21"
+  ],
+  "ghostty": [
+   "PASS",
+   "fg=196 bg=21"
+  ],
+  "rio": [
+   "PASS",
+   "fg=196 bg=21"
+  ]
+ },
+ "T4": {
+  "xtermjs": [
+   "PASS",
+   "fg='#0ac81e' bg='#010203'"
+  ],
+  "alacritty": [
+   "PASS",
+   "fg='#0ac81e' bg='#010203'"
+  ],
+  "ghostty": [
+   "PASS",
+   "fg='#0ac81e' bg='#010203'"
+  ],
+  "rio": [
+   "PASS",
+   "fg='#0ac81e' bg='#010203'"
+  ]
+ },
+ "T5": {
+  "xtermjs": [
+   "PASS",
+   "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+  ],
+  "alacritty": [
+   "PASS",
+   "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+  ],
+  "ghostty": [
+   "PASS",
+   "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+  ],
+  "rio": [
+   "PASS",
+   "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+  ]
+ },
+ "T6": {
+  "xtermjs": [
+   "PASS",
+   "all ok"
+  ],
+  "alacritty": [
+   "PASS",
+   "all ok"
+  ],
+  "ghostty": [
+   "PASS",
+   "all ok"
+  ],
+  "rio": [
+   "PASS",
+   "all ok"
+  ]
+ },
+ "T7a": {
+  "xtermjs": [
+   "PASS",
+   "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+  ],
+  "alacritty": [
+   "PASS",
+   "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+  ],
+  "ghostty": [
+   "PASS",
+   "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+  ],
+  "rio": [
+   "PASS",
+   "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+  ]
+ },
+ "T7b": {
+  "xtermjs": [
+   "PASS",
+   "while in alt: MAIN absent, ALT present"
+  ],
+  "alacritty": [
+   "PASS",
+   "while in alt: MAIN absent, ALT present"
+  ],
+  "ghostty": [
+   "PASS",
+   "while in alt: MAIN absent, ALT present"
+  ],
+  "rio": [
+   "PASS",
+   "while in alt: MAIN absent, ALT present"
+  ]
+ },
+ "T8": {
+  "xtermjs": [
+   "PASS",
+   "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+  ],
+  "alacritty": [
+   "PASS",
+   "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+  ],
+  "ghostty": [
+   "PASS",
+   "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+  ],
+  "rio": [
+   "PASS",
+   "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+  ]
+ },
+ "T9": {
+  "xtermjs": [
+   "PASS",
+   "row1='┌──┐|' (want '┌──┐')"
+  ],
+  "alacritty": [
+   "PASS",
+   "row1='┌──┐|' (want '┌──┐')"
+  ],
+  "ghostty": [
+   "PASS",
+   "row1='┌──┐|' (want '┌──┐')"
+  ],
+  "rio": [
+   "PASS",
+   "row1='┌──┐|' (want '┌──┐')"
+  ]
+ },
+ "T10": {
+  "xtermjs": [
+   "PARTIAL",
+   "modes=['1', '1000', '2004', 'application_cursor_keys', 'application_keypad', 'bracketed_paste', 'cursor_visible', 'keypad', 'mouse:click', 'wraparound'] found={'mouse1000': True, 'mouse1006': False, 'bpaste2004': True, 'decckm1': True, 'deckpam': True}"
+  ],
+  "alacritty": [
+   "PARTIAL",
+   "modes=['1', '1000', '2004', 'application_cursor_keys', 'application_keypad', 'bracketed_paste', 'cursor_visible', 'keypad', 'mouse:click', 'wraparound'] found={'mouse1000': True, 'mouse1006': False, 'bpaste2004': True, 'decckm1': True, 'deckpam': True}"
+  ],
+  "ghostty": [
+   "PARTIAL",
+   "modes=['1', '1000', '2004', 'application_cursor_keys', 'application_keypad', 'bracketed_paste', 'cursor_visible', 'keypad', 'mouse:click', 'wraparound'] found={'mouse1000': True, 'mouse1006': False, 'bpaste2004': True, 'decckm1': True, 'deckpam': True}"
+  ],
+  "rio": [
+   "PARTIAL",
+   "modes=['1', '1000', '2004', 'application_cursor_keys', 'application_keypad', 'bracketed_paste', 'cursor_visible', 'keypad', 'mouse:click', 'wraparound'] found={'mouse1000': True, 'mouse1006': False, 'bpaste2004': True, 'decckm1': True, 'deckpam': True}"
+  ]
+ },
+ "T11": {
+  "xtermjs": [
+   "PASS",
+   "{'title': 'ok', 'osc8': 'ok'} text='link done'"
+  ],
+  "alacritty": [
+   "PASS",
+   "{'title': 'ok', 'osc8': 'ok'} text='link done'"
+  ],
+  "ghostty": [
+   "PASS",
+   "{'title': 'ok', 'osc8': 'ok'} text='link done'"
+  ],
+  "rio": [
+   "PASS",
+   "{'title': 'ok', 'osc8': 'ok'} text='link done'"
+  ]
+ },
+ "T12": {
+  "xtermjs": [
+   "PASS",
+   "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': 'bar'}"
+  ],
+  "alacritty": [
+   "PASS",
+   "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': 'bar'}"
+  ],
+  "ghostty": [
+   "PASS",
+   "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': 'bar'}"
+  ],
+  "rio": [
+   "PASS",
+   "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': 'bar'}"
+  ]
+ },
+ "T13": {
+  "xtermjs": [
+   "PASS",
+   "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+  ],
+  "alacritty": [
+   "PASS",
+   "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a\\t      b\\t      c', 'ac', 'line1', 'ZZne2']"
+  ],
+  "ghostty": [
+   "PASS",
+   "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+  ],
+  "rio": [
+   "PASS",
+   "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+  ]
+ },
+ "T14": {
+  "xtermjs": [
+   "PASS",
+   "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+  ],
+  "alacritty": [
+   "PASS",
+   "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+  ],
+  "ghostty": [
+   "PASS",
+   "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+  ],
+  "rio": [
+   "PASS",
+   "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+  ]
+ }
+}

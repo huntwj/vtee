@@ -1,0 +1,152 @@
+{
+ "T1": {
+  "direct": [
+   "PASS",
+   "row3='    HELLO' row6='         X'"
+  ],
+  "pty": [
+   "PASS",
+   "row3='    HELLO' row6='         X'"
+  ]
+ },
+ "T2": {
+  "direct": [
+   "PARTIAL",
+   "reported=['bold', 'italic', 'underline', 'blink', 'reverse', 'strike'] missing=['dim']"
+  ],
+  "pty": [
+   "PARTIAL",
+   "reported=['bold', 'italic', 'underline', 'blink', 'reverse', 'strike'] missing=['dim']"
+  ]
+ },
+ "T3": {
+  "direct": [
+   "PASS",
+   "fg='ff0000' bg='0000ff'"
+  ],
+  "pty": [
+   "PASS",
+   "fg='ff0000' bg='0000ff'"
+  ]
+ },
+ "T4": {
+  "direct": [
+   "PASS",
+   "fg='0ac81e' bg='010203'"
+  ],
+  "pty": [
+   "PASS",
+   "fg='0ac81e' bg='010203'"
+  ]
+ },
+ "T5": {
+  "direct": [
+   "PASS",
+   "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+  ],
+  "pty": [
+   "PASS",
+   "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+  ]
+ },
+ "T6": {
+  "direct": [
+   "PARTIAL",
+   "wrong: {3: 'L4'} (failed ops: ['IL/DL'])"
+  ],
+  "pty": [
+   "PARTIAL",
+   "wrong: {3: 'L4'} (failed ops: ['IL/DL'])"
+  ]
+ },
+ "T7a": {
+  "direct": [
+   "FAIL",
+   "after leaving alt: MAIN absent, ALT present (row1='ALT')"
+  ],
+  "pty": [
+   "FAIL",
+   "after leaving alt: MAIN absent, ALT present (row1='ALT')"
+  ]
+ },
+ "T7b": {
+  "direct": [
+   "FAIL",
+   "while in alt: MAIN present, ALT present"
+  ],
+  "pty": [
+   "FAIL",
+   "while in alt: MAIN present, ALT present"
+  ]
+ },
+ "T8": {
+  "direct": [
+   "PASS",
+   "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+  ],
+  "pty": [
+   "PASS",
+   "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+  ]
+ },
+ "T9": {
+  "direct": [
+   "FAIL",
+   "row1='lqqk|' (want '┌──┐')"
+  ],
+  "pty": [
+   "FAIL",
+   "row1='lqqk|' (want '┌──┐')"
+  ]
+ },
+ "T10": {
+  "direct": [
+   "PARTIAL",
+   "modes=['?1', '?1000', '?1006', '?2004', '?25', '?7'] found={'mouse1000': True, 'mouse1006': True, 'bpaste2004': True, 'decckm1': True, 'deckpam': False}"
+  ],
+  "pty": [
+   "PARTIAL",
+   "modes=['?1', '?1000', '?1006', '?2004', '?25', '?7'] found={'mouse1000': True, 'mouse1006': True, 'bpaste2004': True, 'decckm1': True, 'deckpam': False}"
+  ]
+ },
+ "T11": {
+  "direct": [
+   "PARTIAL",
+   "{'title': 'ok', 'osc8': 'NOT EXPOSED'} text='link done'"
+  ],
+  "pty": [
+   "PARTIAL",
+   "{'title': 'ok', 'osc8': 'NOT EXPOSED'} text='link done'"
+  ]
+ },
+ "T12": {
+  "direct": [
+   "PARTIAL",
+   "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': None}"
+  ],
+  "pty": [
+   "PARTIAL",
+   "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': None}"
+  ]
+ },
+ "T13": {
+  "direct": [
+   "PASS",
+   "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+  ],
+  "pty": [
+   "PASS",
+   "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+  ]
+ },
+ "T14": {
+  "direct": [
+   "PASS",
+   "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+  ],
+  "pty": [
+   "PASS",
+   "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+  ]
+ }
+}

@@ -1,0 +1,62 @@
+{
+ "T1": [
+  "PASS",
+  "row3='    HELLO' row6='         X'"
+ ],
+ "T2": [
+  "NOT EXPOSED",
+  "no per-cell attributes; text rows=['bold', 'dim', 'italic', 'underline', 'blink', 'reverse', 'strike']"
+ ],
+ "T3": [
+  "NOT EXPOSED",
+  "no per-cell color"
+ ],
+ "T4": [
+  "NOT EXPOSED",
+  "no per-cell color"
+ ],
+ "T5": [
+  "PASS",
+  "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+ ],
+ "T6": [
+  "PARTIAL",
+  "wrong: {2: 'ABXYEF'} (failed ops: ['IRM'])"
+ ],
+ "T7a": [
+  "PASS",
+  "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+ ],
+ "T7b": [
+  "PASS",
+  "while in alt: MAIN absent, ALT present"
+ ],
+ "T8": [
+  "PASS",
+  "{'cjk': True, 'emoji': True, 'combining': True} rows=['你好X', '😀Y', 'éZ']"
+ ],
+ "T9": [
+  "FAIL",
+  "row1='lqqk|' (want '┌──┐')"
+ ],
+ "T10": [
+  "NOT EXPOSED",
+  "tool exposes no mode state"
+ ],
+ "T11": [
+  "NOT EXPOSED",
+  "{'title': 'NOT EXPOSED', 'osc8': 'NOT EXPOSED'} text='link done'"
+ ],
+ "T12": [
+  "PARTIAL",
+  "cursor={'row': 0, 'col': 3, 'hidden': True, 'shape': None}"
+ ],
+ "T13": [
+  "PASS",
+  "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+ ],
+ "T14": [
+  "PASS",
+  "visible_ok=True scrollback_lines=38 first=['L01'] last=['L38']"
+ ]
+}
