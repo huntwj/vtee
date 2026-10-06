@@ -1,1 +1,6 @@
 /target
+docs/probe/rust/*/target
+docs/probe/__pycache__/
+*.pyc
+docs/probe/*_raw.jsonl
+docs/probe/*_stderr.log

@@ -1,0 +1,62 @@
+{
+ "T1": [
+  "PASS",
+  "row3='    HELLO' row6='         X'"
+ ],
+ "T2": [
+  "PASS",
+  "reported=['bold', 'dim', 'italic', 'underline', 'blink', 'reverse', 'strike'] missing=[]"
+ ],
+ "T3": [
+  "PASS",
+  "fg=196 bg=21"
+ ],
+ "T4": [
+  "PASS",
+  "fg='0ac81e' bg='010203'"
+ ],
+ "T5": [
+  "PASS",
+  "rows=['R01', 'R02', 'R03', 'R06', 'R07', 'R08', '', '', 'R09', 'R10', 'R11', 'R12']"
+ ],
+ "T6": [
+  "PASS",
+  "all ok"
+ ],
+ "T7a": [
+  "PASS",
+  "after leaving alt: MAIN present, ALT absent (row1='MAIN')"
+ ],
+ "T7b": [
+  "PASS",
+  "while in alt: MAIN absent, ALT present"
+ ],
+ "T8": [
+  "FAIL",
+  "{'cjk': False, 'emoji': False, 'combining': False} rows=['你好X', '😀Y', 'éZ']"
+ ],
+ "T9": [
+  "PASS",
+  "row1='┌──┐|' (want '┌──┐')"
+ ],
+ "T10": [
+  "PASS",
+  "modes=['?1', '?1000', '?1006', '?2004', 'DECKPAM'] found={'mouse1000': True, 'mouse1006': True, 'bpaste2004': True, 'decckm1': True, 'deckpam': True}"
+ ],
+ "T11": [
+  "PASS",
+  "{'title': 'ok', 'osc8': 'ok'} text='link done'"
+ ],
+ "T12": [
+  "PASS",
+  "cursor={'col': 3, 'hidden': True, 'row': 0, 'shape': 'bar'}"
+ ],
+ "T13": [
+  "PASS",
+  "{'tab': True, 'bs': True, 'crlf': True, 'cr': True} rows=['a       b       c', 'ac', 'line1', 'ZZne2']"
+ ],
+ "T14": [
+  "NOT EXPOSED",
+  "visible_ok=True, no scrollback API; visible='L39'..'L50'"
+ ]
+}
