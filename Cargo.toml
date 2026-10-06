@@ -1,0 +1,8 @@
+[package]
+name = "vtee"
+version = "0.0.0"
+edition = "2024"
+description = "A terminal multiplexer for AI and testing: tee for a TUI, with queryable terminal state."
+publish = false
+
+[dependencies]
