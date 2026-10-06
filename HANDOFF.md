@@ -48,7 +48,8 @@ Notes pages in `~/ai/mud/site/src/content/docs/`: `workflow/testing.md` (test de
   constantly. See `README.md`.
 - **Staged plan**: v0 the tap (read-only observer, raw byte log, snapshot queries), v1 input injection and
   wait-for-predicate, later MCP, Windows and multiple sessions.
-- **Not decided**: emulator crate, pty crate, wire protocol, how to merge human and agent input, licence.
+- **Not decided**: emulator crate (the probe ruled out pyte but did not test the Rust crates directly), pty crate, wire
+  protocol, how to merge human and agent input, licence.
 
 ## 3. What TinyFugue needs from a terminal
 
@@ -83,19 +84,41 @@ Not researched at all, only named as candidates: the Rust crates `avt`, `vte`, `
 **None of the tools above documented a transparent observer mode** where the human keeps their own terminal. That is
 the gap this crate fills.
 
-### Empirical probe, in progress
+### Empirical probe (measured 2026-10-06)
 
-A capability probe was started 2026-10-06 in a throwaway Docker container (nothing installed on the host). It runs
-`sh -c 'cat PROBE_N.bin; sleep 20'` under each candidate's pty at 40x12, `TERM=xterm-256color`, and reads the screen
-state back. Tests: T1 cursor positioning; T2 each SGR attribute; T3 256-colour; T4 truecolour; T5 scroll region;
-T6 insert/delete line and char; T7 alternate screen (write MAIN, switch to ALT and back, expect MAIN); T8 wide and
-combining characters; T9 DEC special graphics; T10 whether mode state is exposed (mouse, bracketed paste, keypad);
-T11 OSC title and hyperlink; T12 cursor visibility and shape; T13 tabs and backspace; T14 scrollback. Candidates in
-order: pyte, tui-test, ht, pilotty, then agent-tui and NPCterm.
+Full matrix, evidence and reproduce commands: `docs/probe-results.md`, with the byte files and drivers in `docs/probe/`.
+Four candidates were run in throwaway containers against 15 probe files at 40x12, `TERM=xterm-256color`. agent-tui and
+NPCterm were not run. Condensed (all measured):
 
-The results were not available when this was written. They will be at `docs/probe-results.md` in this repo once
-copied over (if that file does not exist yet, the probe has not been written up). The matrix will mark each cell as
-measured or untested. Nothing in section 4 above is measured except the coverage numbers in section 1.
+| | pyte | tui-test (xterm.js, alacritty, ghostty, rio) | ht (avt) | pilotty |
+|---|---|---|---|---|
+| Text, scroll region, IL/DL/ICH/DCH/IRM | partial (a `delete_lines` bug) | pass | pass | partial (IRM ignored) |
+| SGR attributes, 256-colour, truecolour | no dim | pass (alacritty and rio cannot report blink) | pass, but only as escape text in `seq` | not exposed |
+| Alternate screen | **fail** | pass | pass | pass |
+| DEC special graphics | fail by default | pass | pass | fail |
+| Mode state (mouse, paste, keypad...) | 4 of 5 | 4 of 5 (no `?1006`) | 1 of 5 | not exposed |
+| Title and OSC 8 hyperlink | title only | both | neither | neither |
+| Cursor visibility and shape | partial | pass | partial | partial |
+| Scrollback | pass | pass | not exposed | pass |
+
+What matters for this project:
+
+- **pyte is ruled out as the emulator.** No alternate screen at all, a `delete_lines` bug that leaves stale text unless
+  `screen.display` is read between feeds, DEC graphics ignored in its default UTF-8 mode, no dim attribute.
+- **tui-test is the only tool that passed the broad-emulation, full-state bar on every backend**, and its multiple
+  backends allow differential runs (the same bytes through two engines). It exposes `State.modes`, `mouse_mode`, cursor
+  shape, title and hyperlinks. Gaps: version 0.1.0, no raw byte capture (its recordings are re-rendered screen history,
+  not the program's bytes), and it is untested against a long-running program like TinyFugue.
+- **ht has real raw capture**: its `output` events were byte-identical to the program's output. Thin state otherwise, no
+  wait primitive, Unix only.
+- **pilotty's snapshot is only text, cursor and a hash.** Too thin for tests.
+
+**Measured only through tools.** The engines were exercised via tui-test's backends (Alacritty, Ghostty, Rio, xterm.js)
+and via ht (`avt`). The Rust crates themselves (`alacritty_terminal`, `avt`, `vte`, `termwiz`) were **not** fed the probes
+directly, so how much state each crate exposes through its own API is still unknown.
+
+**Not measured:** repeated-run determinism, Windows/ConPTY (tui-test only claims it), resize reflow, mouse input, and the
+real behaviour of every wait primitive (read from help text only).
 
 ## 5. Design notes (proposals, not decisions)
 
@@ -119,9 +142,10 @@ measured or untested. Nothing in section 4 above is measured except the coverage
 
 ## 6. Suggested first steps
 
-1. **Choose the emulator by measuring.** Write a small program that feeds the probe's byte files into each candidate
-   crate and prints the resulting state, then compare with `docs/probe-results.md`. Decide against requirements 2 and 3
-   in `README.md`. Do not pick from reputation.
+1. **Choose the emulator by measuring.** Write a small program that feeds `docs/probe/T*.bin` straight into each
+   candidate crate (`alacritty_terminal`, `avt`, and whatever else looks viable) and prints the state its own API
+   exposes, then compare with `docs/probe-results.md`. The probe measured engines only through tui-test and ht, so
+   this step fills the gap. Decide against requirements 2 and 3 in `README.md`. Do not pick from reputation.
 2. **The tap.** Spawn, forward both ways, restore the terminal on exit, handle resize.
 3. **The snapshot API** (cells, attributes, cursor, modes, offset) and the raw byte log.
 4. **Replay.** Rebuild a snapshot from a log, and check it matches the live one.
@@ -156,6 +180,9 @@ These come from the user's other repos and standing preferences; they are not in
 
 - Which emulator crate meets requirements 2 and 3? Does it expose enough state (modes, both buffers, scrollback)?
 - Can the human's input and an agent's input be merged safely, and what should simultaneous input do?
+- Build on `tui-test`'s Rust crate (`tui-test-rs`, 0.1.0, which already wraps several engines), or on an emulator crate
+  directly plus our own pty layer? The first is less work and gets differential backends; the second keeps control and
+  gives us the raw-byte capture and transparent observer mode that tui-test lacks.
 - One session per process, or a daemon that manages several?
 - Does the snapshot "as of byte N" need the emulator to be re-runnable from a checkpoint, or is replay from the
   start fast enough?

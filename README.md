@@ -64,5 +64,5 @@ thin live-watching tap.
 Surveyed 2026-10-06, from READMEs unless stated: `ht` (Rust, JSON over stdin/stdout, built on `avt`; owns a virtual
 terminal, not a transparent proxy), `pilotty`, `agent-tui`, `NPCterm` (agent-oriented, daemon or MCP), `tui-test`
 (Microsoft, multiple emulator backends, Windows), `pyte` and `pexpect` (Python), `Hecate` (tmux-based, old). None
-documented a transparent observer mode, which is the gap this fills. An empirical probe of several of them is in
-progress in `~/ai/mud` and will be linked here when it is written up.
+documented a transparent observer mode, which is the gap this fills. An empirical probe of four of them (pyte, tui-test, ht, pilotty) is in `docs/probe-results.md`: pyte lacks the alternate
+screen, and tui-test was the only one to pass the broad-emulation and full-state bar on every backend.
