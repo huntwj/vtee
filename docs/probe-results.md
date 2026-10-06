@@ -64,6 +64,17 @@ pyte gave identical results fed directly and via a stdlib `pty` running `cat`. t
 | Raw byte capture | yes, we own the pty | no (re-rendered cast only) | yes (`output` events, measured) | no (rendered text only) |
 | Platforms (Read) | pty module is Unix-only; pyte itself portable | Windows, Linux, macOS (README) | Linux, macOS | Linux, macOS |
 
+## Rust emulator crates, probed directly (2026-10-06)
+
+This matrix only covers the four candidates above, which were exercised through wrappers (tui-test's Python
+bindings, ht's JSON protocol), not through their own Rust API. A follow-up probe fed the same `T1`-`T14` files
+straight into four Rust emulator/parser crates (`avt`, `vte`, `alacritty_terminal`, `termwiz`) and graded them with
+the same `probe_eval.py` judge. Full matrix, evidence and the decision made from it are in `docs/decisions.md`;
+raw results are `docs/probe/results_{avt,vte,alacritty,termwiz}.json`, source in `docs/probe/rust/`. Short version:
+`alacritty_terminal` won (14/15 PASS, only gap is a structurally absent blink flag), confirmed robust to chunked
+feeds and malformed input. `avt` was close behind but missing mode state/title/OSC8/cursor shape; `vte` and
+`termwiz` are parsers, not emulators, and needed a hand-rolled state layer to grade at all.
+
 ## Not run / not measured
 
 - **agent-tui and npcterm:** not run (time box; the four above were the priority).
@@ -85,3 +96,16 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$D:/p" -w /p node:22-slim sh -c "npm i -g
 
 Files not copied from the original run: the raw pilotty output captures (`pt_*.json`, `pt_out_*.txt`), run logs, and the `ht`
 binary. The drivers may still name those paths. The summaries are in `probe/results_*.json`.
+
+The Rust crate probes run directly with `cargo`, no Docker needed:
+
+```sh
+cd docs/probe/rust/<crate>   # avt, vte, alacritty_terminal, termwiz
+cargo run --quiet > ../../<crate>_raw.jsonl
+cd ../..
+python3 run_rust_adapter.py <crate> <crate>_raw.jsonl results_<crate>.json
+```
+
+(`alacritty_terminal`'s probe dir also has `cargo run --bin stress` for the chunked-feed and malformed-input
+checks in `docs/decisions.md`; those print straight to stdout, no grading step.) The `*_raw.jsonl` files are not
+committed, regenerate them if needed.

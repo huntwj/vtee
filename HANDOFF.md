@@ -48,8 +48,10 @@ Notes pages in `~/ai/mud/site/src/content/docs/`: `workflow/testing.md` (test de
   constantly. See `README.md`.
 - **Staged plan**: v0 the tap (read-only observer, raw byte log, snapshot queries), v1 input injection and
   wait-for-predicate, later MCP, Windows and multiple sessions.
-- **Not decided**: emulator crate (the probe ruled out pyte but did not test the Rust crates directly), pty crate, wire
-  protocol, how to merge human and agent input, licence.
+- **Emulator crate decided 2026-10-06: `alacritty_terminal`.** See `docs/decisions.md` for the measured comparison
+  against `avt`, `vte` and `termwiz`, plus follow-up checks (chunked-feed equivalence, malformed-input robustness).
+- **Not decided**: pty crate (`portable-pty` is the candidate, unmeasured), wire protocol, how to merge human and
+  agent input, licence.
 
 ## 3. What TinyFugue needs from a terminal
 
@@ -113,9 +115,9 @@ What matters for this project:
   wait primitive, Unix only.
 - **pilotty's snapshot is only text, cursor and a hash.** Too thin for tests.
 
-**Measured only through tools.** The engines were exercised via tui-test's backends (Alacritty, Ghostty, Rio, xterm.js)
-and via ht (`avt`). The Rust crates themselves (`alacritty_terminal`, `avt`, `vte`, `termwiz`) were **not** fed the probes
-directly, so how much state each crate exposes through its own API is still unknown.
+**This section's engines were measured only through tools**: tui-test's backends (Alacritty, Ghostty, Rio, xterm.js)
+and ht (`avt`). The Rust crates themselves were fed the same probes directly in a follow-up round, 2026-10-06 —
+see `docs/decisions.md` for that matrix and the emulator-crate decision it produced.
 
 **Not measured:** repeated-run determinism, Windows/ConPTY (tui-test only claims it), resize reflow, mouse input, and the
 real behaviour of every wait primitive (read from help text only).
@@ -139,13 +141,17 @@ real behaviour of every wait primitive (read from help text only).
 - **Details that bite.** Propagate `SIGWINCH` and keep the child pty, the emulator and the real terminal the same
   size. Restore the user's terminal mode on crash or Ctrl-C. Mouse, bracketed paste and the alternate screen must
   reach the real terminal untouched, which raw forwarding gives for free. On Windows the equivalent is ConPTY.
+- **Split the agent-query layer into its own crate (brainstorm, 2026-10-06, not a requirement).** The "snapshot/wait/
+  modes" query protocol is logically separable from the "spawn in a pty and tap the bytes" layer. If they're two
+  crates, an app that already owns its own screen state (TinyFugue parses its own display) could expose the same
+  query protocol in-process, with no pty and no emulator involved, while `vtee` composes that query crate on top
+  of its own emulator for the general "wrap anything" case. Premature to act on: we don't know what the query API
+  needs to look like until v0's snapshot API exists and has been used once. Revisit then; don't split crates before.
 
 ## 6. Suggested first steps
 
-1. **Choose the emulator by measuring.** Write a small program that feeds `docs/probe/T*.bin` straight into each
-   candidate crate (`alacritty_terminal`, `avt`, and whatever else looks viable) and prints the state its own API
-   exposes, then compare with `docs/probe-results.md`. The probe measured engines only through tui-test and ht, so
-   this step fills the gap. Decide against requirements 2 and 3 in `README.md`. Do not pick from reputation.
+1. ~~**Choose the emulator by measuring.**~~ **Done, 2026-10-06.** `docs/decisions.md` has the comparison and the
+   follow-up chunked-feed/garbage-input checks. `alacritty_terminal` won.
 2. **The tap.** Spawn, forward both ways, restore the terminal on exit, handle resize.
 3. **The snapshot API** (cells, attributes, cursor, modes, offset) and the raw byte log.
 4. **Replay.** Rebuild a snapshot from a log, and check it matches the live one.
@@ -178,11 +184,11 @@ These come from the user's other repos and standing preferences; they are not in
 
 ## 8. Open questions
 
-- Which emulator crate meets requirements 2 and 3? Does it expose enough state (modes, both buffers, scrollback)?
 - Can the human's input and an agent's input be merged safely, and what should simultaneous input do?
 - Build on `tui-test`'s Rust crate (`tui-test-rs`, 0.1.0, which already wraps several engines), or on an emulator crate
   directly plus our own pty layer? The first is less work and gets differential backends; the second keeps control and
-  gives us the raw-byte capture and transparent observer mode that tui-test lacks.
+  gives us the raw-byte capture and transparent observer mode that tui-test lacks. (Leaning toward the second, now that
+  `alacritty_terminal` is chosen and measured as robust — see `docs/decisions.md` — but not yet decided.)
 - One session per process, or a daemon that manages several?
 - Does the snapshot "as of byte N" need the emulator to be re-runnable from a checkpoint, or is replay from the
   start fast enough?

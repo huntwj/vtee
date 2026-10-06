@@ -50,11 +50,17 @@ replacement.
 If v0 turns out harder than it looks, the fallback is to adopt an existing tool for the test side and keep only a
 thin live-watching tap.
 
+## Decisions
+
+- **Emulator crate: `alacritty_terminal`**, decided 2026-10-06 by measuring all four candidates directly against
+  requirements 2 and 3 (`docs/decisions.md` has the evidence). `avt`, `vte` and `termwiz` were ruled out: `avt`
+  confirmed (from source) to expose no mouse/paste/keypad mode state, no title, no OSC 8 and no cursor shape; `vte`
+  and `termwiz` are parsers, not emulators, and would need a VT100+ state machine built and maintained from scratch.
+
 ## Open decisions
 
-- **Emulator crate.** Candidates, none chosen: `avt` (asciinema's, used by `ht`), `vte` (a parser, not a full
-  emulator), `alacritty_terminal`, `termwiz`. Each needs measuring against requirements 2 and 3 before we pick.
-- **pty crate.** `portable-pty` is the obvious candidate for requirement 8.
+- **pty crate.** `portable-pty` is the obvious candidate for requirement 8, not yet measured against a real
+  spawn/forward/resize loop.
 - **Protocol.** Probably line-delimited JSON over a Unix socket first, like `ht`.
 - **Input merging** when both a human and an agent can type.
 - **Licence.** Not chosen. `publish = false` in `Cargo.toml` until it is.

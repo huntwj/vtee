@@ -1,0 +1,68 @@
+# Decisions
+
+Dated, one-way-door choices. See `HANDOFF.md` for the research behind each and `README.md` for the requirements
+each is judged against.
+
+## 2026-10-06: emulator crate is `alacritty_terminal`
+
+**Measured**, not read. Four Rust crates were probed directly (not through a wrapper) against the same `T1`-`T14`
+byte files already used for pyte/tui-test/ht/pilotty in `docs/probe-results.md`, fed straight into each crate's own
+API at 40x12, graded by the same `docs/probe/probe_eval.py` judge. Full per-crate detail, evidence and raw results
+are in `docs/probe/results_*.json` and `docs/probe/rust/*/`.
+
+| | `vte` 0.15.0 | `avt` 0.18.0 | `alacritty_terminal` 0.26.0 | `termwiz` 0.23.3 |
+|---|---|---|---|---|
+| Category | parser only | full emulator | full emulator | parser + rendering toolkit |
+| Score (of 15) | 13 PASS, 1 FAIL (T8), 1 NOT EXPOSED (T14) | 10 PASS, 3 PARTIAL, 1 NOT EXPOSED, 1 FAIL-free overall | **14 PASS, 1 PARTIAL** | 15 PASS, but that's our own ~450-line emulator on top of its parser |
+| Mode state (mouse/paste/keypad/DECCKM) | hand-rolled | DECCKM only (confirmed absent from source) | full `TermMode` bitflags, all 5 | hand-rolled |
+| Title / OSC 8 | hand-rolled | absent from source | yes (`EventListener` for title, `Cell::hyperlink()`) | hand-rolled |
+| Cursor shape | hand-rolled | absent from source | yes | hand-rolled |
+| Scrollback | not implemented (scoped out) | yes (`Vt::lines()` vs `Vt::view()`) | yes (`grid.history_size()`) | hand-rolled |
+| Known gap | needed ~430 lines of our own state layer first | blink absent; combining chars shift a column | **blink absent from `Flags` entirely** (structural, confirmed in source) | needed ~450 lines of our own state layer first |
+
+`alacritty_terminal` is the only one of the four that satisfies README requirements 2 and 3 (broad emulation, full
+state exposure) through its own public API, with no emulator of our own to write or maintain. Its one gap — no
+blink attribute — is a rare SGR code and is accepted as a known limitation rather than a blocker. `vte` and
+`termwiz` are parsers, not emulators: both would require building and maintaining a real VT100+ state machine
+ourselves, which the `vte` probe's own fork called "a multi-week undertaking, not a probe-sized one," duplicating
+work these crates have already hardened. `avt` is close behind `alacritty_terminal` but confirmed (by source, not
+just testing) to expose no mouse/paste/keypad mode state, no title, no OSC 8, and no cursor shape — all required by
+README requirement 3.
+
+**Decision: build on `alacritty_terminal`.** Revisit only if it proves unworkable in practice (e.g. API instability,
+licensing surprise, or a real-program integration — TinyFugue — exposing a gap the probe didn't catch).
+
+### Follow-up: what T1-T14 didn't cover, checked before committing
+
+T1-T14 all feed one byte file in a single call, which doesn't exercise `vtee`'s real usage (reading a pty in
+arbitrary OS-sized chunks) or robustness to malformed input (a raw pty stream can contain anything). Measured
+2026-10-06, `docs/probe/rust/alacritty_terminal/src/bin/stress.rs`:
+
+- **Chunked-feed equivalence**: all 15 tests, fed via `Processor::advance()` split into 1, 3, 7 and 64-byte chunks
+  (60 cases total) instead of one call, gave byte-for-byte identical final screen text and cursor position to the
+  single-shot feed every time. Includes multi-byte UTF-8 and escape sequences deliberately split across chunk
+  boundaries at chunk_size=1. **0 mismatches.**
+- **Malformed-input robustness**: 12 adversarial inputs (truncated CSI, truncated OSC with no terminator, truncated
+  UTF-8 at every byte-width, invalid continuation bytes, a nonsense-huge numeric SGR parameter, 10,000 bytes of bare
+  ESC, pseudo-random 4KB of binary garbage), each fed both whole and byte-at-a-time. **0 panics.**
+
+**Code-review finding, not just testing**: `avt`'s Rust API only accepts `&str` (`Vt::feed_str`), not raw bytes — the
+avt probe had to convert the `.bin` files with `String::from_utf8_lossy` before feeding. A real consumer reading
+raw bytes off a pty would have to buffer and validate UTF-8 itself before calling in, and naive lossy conversion
+would silently mangle a multi-byte sequence split across a read boundary. `alacritty_terminal`'s `Processor::advance`
+takes `&[u8]` directly and assembles UTF-8 internally, which is exactly what the chunked-feed check above exercised
+and confirmed correct. Another point in `alacritty_terminal`'s favor, found by reading the probe source rather than
+by a failing test.
+
+Not yet checked (deferred to the v0 tap build itself, since they're about vtee's own code more than the crate):
+resize/reflow, and whether `Term::resize()` behaves sanely mid-stream. Also still open, as rubric gaps rather than
+candidate-disqualifiers: SGR attribute-off/reset codes (22/23/24/25/27/29, DECSTR) aren't exercised by T2, and T2/T9
+don't distinguish underline *styles* even though `alacritty_terminal`'s `Flags::ALL_UNDERLINES` suggests it tracks
+more than one. Bell (`bl`) isn't tested at all despite being in TinyFugue's own termcap list (HANDOFF §3). None of
+these are blockers; they're candidates for probe_eval.py additions if a real gap bites later.
+
+## Open
+
+- **pty crate.** `portable-pty` is still the candidate named in README/HANDOFF, not yet measured against a real
+  spawn/forward/resize loop. First v0 implementation work will settle this empirically.
+- **Protocol**, **input merging**, **licence**: unchanged from README's "Open decisions."
