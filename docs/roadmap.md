@@ -17,15 +17,34 @@ all 15 probe files (`tests/replay.rs`).
    and alacritty's own upstream `main` (`decisions.md`). Revisit by vendoring a trivial local patch if TF's first
    real snapshot shows TF actually uses the alternate screen and the content underneath needs inspecting - not
    before, and not by any other workaround (the alternatives considered are worse than waiting).
-2. **`SIGTERM`-safe shutdown.** Catchable, straightforward: a signal handler (`signal_hook`, Unix) that disables
-   raw mode before exiting, same as `RawModeGuard` already does for normal exit and panic unwind.
-3. **`SIGKILL`-safe terminal restoration.** `SIGKILL` cannot be caught by the dying process - no handler, no
-   exception, that's a Unix guarantee, not a gap in this code. The only way to survive it is a second process: a
-   small watchdog that blocks reading a pipe whose write end only the main process holds. When the main process
-   dies for *any* reason, including `-9`, the OS closes that fd automatically (process death always closes a
-   process's fds, with no cooperation needed from the dying process), the watchdog's blocking read returns EOF,
-   and it restores the terminal and exits. This is the standard technique other terminal-wrapping tools use for
-   exactly this problem.
+2. ~~**`SIGTERM`-safe shutdown.**~~ **Done, 2026-10-07** (`Tap::watch_sigterm`, `architecture.md`). Catchable, so
+   no second process needed: a `signal_hook` handler disables raw mode (a safe no-op if it was never enabled)
+   and kills the child via `ChildKiller::clone_killer` - deliberately not `Tap::kill`, since this runs from its
+   own thread and the thread holding `&mut Tap` may be blocked in `wait()` when the signal arrives. Verified on
+   a real pty: `SIGTERM` to a running `vtee` restores cooked mode (`ICANON`) and exits, both in interactive
+   mode and mid-way through a batch script.
+3. ~~**`SIGKILL`-safe terminal restoration.**~~ **Done, 2026-10-07** (`RawModeGuard`'s watchdog, `architecture.md`).
+   `SIGKILL` cannot be caught by the dying process - no handler, no exception, a Unix guarantee, not a gap in
+   this code - so this needed a second process: a watchdog that blocks reading a socketpair whose other end only
+   the main process holds, restoring the terminal and exiting once that read sees EOF (which happens whether the
+   main process exited cleanly or was killed with `-9` - process death always closes its file descriptors, with
+   no cooperation needed from the dying process). Two real, non-obvious failure modes found and fixed by actually
+   testing this on a real pty (`python3`'s `pty.fork()` + inspecting `termios` from the master side), not by
+   reasoning about it in the abstract - see `architecture.md` for both:
+   - `crossterm::terminal::disable_raw_mode()` can't be called from the watchdog at all; it only works via a
+     process-local static populated by `enable_raw_mode` in the *same* process, so calling it from a different
+     process silently no-ops. Fixed by capturing the real termios with `libc::tcgetattr` before enabling raw
+     mode and sending it to the watchdog directly.
+   - Even with that fix, restoring still failed the first time: opening `/dev/tty` *after* the main process died
+     returned `ENXIO`, because POSIX disassociates the controlling terminal from a session once its leader
+     exits - even though the watchdog itself is still alive and still part of that session. Fixed by opening
+     `/dev/tty` immediately at watchdog startup, while the session leader is still alive, and holding that fd
+     rather than reopening it after the fact.
+   - A third race (the watchdog itself being killed by the `SIGHUP` the kernel sends to the terminal's
+     foreground process group when a session leader dies, before it could react to the EOF) was caught and
+     fixed the same way, before the two above were even found - see `architecture.md`.
+   Verified on a real pty, 5 consecutive runs: `SIGKILL` to the main process restores cooked mode every time, and
+   a normal clean exit leaves no orphaned watchdog process behind.
 
 ## TinyFugue's answers, 2026-10-06 (asked via cross-session message, see `decisions.md`-style provenance: these
 are TF's own judgments from their harness design and source, not measurements - they haven't run TF under any

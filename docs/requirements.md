@@ -44,7 +44,8 @@ status to track per-requirement rather than as one blob.
 7. **Transparent observer mode.** The human keeps their own terminal and sees exactly what they would without the
    tool. Output is forwarded raw; the emulator only watches.
    **Met.** Raw bidirectional forwarding, `RawModeGuard` for the human's own terminal mode, confirmed not to alter
-   anything forwarded (the emulator reads a copy, never the original bytes).
+   anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
+   `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
    **Linux: met.** **Windows: blocked on an upstream bug** (`wezterm/wezterm#7025`), not just unimplemented -
    see `decisions.md`.

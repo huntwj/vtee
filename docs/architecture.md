@@ -147,13 +147,56 @@ so calling it while a `Tap` is still alive would bypass this no matter how caref
 mechanism - it covers any future caller (library or CLI) that drops a `Tap` through a path this file didn't
 anticipate.
 
+## Surviving signals: `SIGTERM` and `SIGKILL` (2026-10-07)
+
+`SIGTERM` is catchable, so `Tap::watch_sigterm` just needs a handler: a `signal_hook` thread that, on receipt,
+disables raw mode (a safe no-op if it was never enabled) and kills the child via `self.child.clone_killer()`
+rather than through `&mut Tap` - this runs on its own thread, and whatever thread holds `&mut Tap` may be
+blocked inside `Tap::wait()` when the signal arrives, so it can't be reached that way. Called from both
+`run_interactive` and `run_script` (`main.rs`) unconditionally - harmless in script mode, which never enables
+raw mode in the first place.
+
+`SIGKILL` cannot be caught, full stop - no handler, no exception, a Unix guarantee. The only way to survive it
+is a second, independent process. `RawModeGuard` spawns one (Unix only; `requirement 8` defers Windows) using a
+`UnixStream::pair()` dead-man's-switch: one end becomes the watchdog's stdin, the other is held by the guard for
+its lifetime. When the main process dies for *any* reason - clean exit, panic, or `SIGKILL` - the OS closes all
+its file descriptors with no cooperation needed from the dying process, the watchdog's blocking read on its end
+returns EOF, and it restores the terminal and exits. On a clean drop this fires too, just not because of a
+crash - harmless.
+
+Getting this right took three rounds of measuring against a real pty (`python3`'s `pty.fork()`, inspecting
+`termios` from the master side), not reasoning about it in the abstract - each of the three bugs below looked
+plausible-and-done until it was actually tested:
+
+1. **First attempt just called `crossterm::terminal::disable_raw_mode()` from the watchdog.** It silently did
+   nothing. `crossterm`'s raw-mode functions remember the pre-raw termios in a process-local static that only
+   `enable_raw_mode` populates - the watchdog never called that, in that process, so its copy of the static is
+   empty and `disable_raw_mode` no-ops rather than erroring, which is what made this look like it worked (`Ok`
+   return) right up until the measurement showed the terminal was still raw. Fixed by capturing the real termios
+   with `libc::tcgetattr` in `RawModeGuard::new` *before* enabling raw mode, and sending those bytes to the
+   watchdog as the first thing written to the socketpair - it reads them before blocking on EOF, and restores
+   that exact snapshot itself with `libc::tcsetattr`, independent of anything crossterm remembers.
+2. **With that fixed, the watchdog still never got far enough to run it.** A session leader dying sends
+   `SIGHUP` to the terminal's foreground process group, and the watchdog - unless moved - is in that same group;
+   its default `SIGHUP` disposition (terminate) was killing it before it ever saw the pipe's EOF. Fixed by
+   registering `SIGHUP` with `signal_hook` at the very start of `run_tty_guard` - even though nothing ever reads
+   from the resulting `Signals`, registering it at all replaces the default disposition, the same mechanism
+   `watch_resize`/`watch_sigterm` use for their own signals.
+3. **With *that* fixed too, restoring still failed**: opening `/dev/tty` after detecting EOF returned `ENXIO`.
+   POSIX disassociates the controlling terminal from a session once its leader exits, even for processes still
+   alive and still part of that session - the watchdog survives the first two bugs' fixes, but by the time it
+   tries to open the terminal, that association is already gone. Fixed by opening `/dev/tty` immediately at
+   watchdog startup, while the session leader is still alive, and holding that fd for later rather than
+   reopening it after the fact.
+
+Verified, not assumed: 5 consecutive real-pty runs of both `SIGTERM` and `SIGKILL` restoring cooked mode
+(`ICANON`) every time, plus a check that a normal clean exit leaves no orphaned watchdog process behind.
+
 ## Known rough edges (tracked, not silently ignored)
 
 - `Tap::wait()` doesn't block forever waiting for the pty master's reader to see EOF, because it isn't guaranteed
   to happen promptly on every platform (measured: it doesn't on Windows ConPTY) - it waits up to 500ms via a
   channel and moves on. On Linux this is a non-issue in practice (EOF arrives essentially immediately); the
   timeout exists for robustness against platforms/situations where it doesn't, not because Linux needs it.
-- Terminal restoration (`RawModeGuard`) only covers normal exit and panic unwind. `SIGKILL` and `SIGTERM`
-  survival are real gaps - see `roadmap.md`.
-- Only the active screen buffer is exposed by `Snapshot`, not both - see `roadmap.md`.
+- Only the active screen buffer is exposed by `Snapshot`, not both - deferred, see `roadmap.md`/`decisions.md`.
 - `Tap::spawn` doesn't let a caller set `TERM` or other environment variables on the child yet (requirement 6).
