@@ -161,8 +161,8 @@ by the user explicitly, in this order, after hardening:
    wire protocol (now decided: a Unix socket, settling that open decision too). Verified end to end: a snapshot
    query, a write-command rejection, a `wait_for` match, and multiple commands over one persistent connection,
    all against a real running session.
-3. **Full duplex**: splits into two genuinely different cases once actually scoped out. 3a is done; 3b is the
-   real policy question and still needs the user's call, not an engineering one, before it's built.
+3. **Full duplex**: splits into two genuinely different cases once actually scoped out. 3a is done; 3b (exclusive
+   handoff, both `HumanPriority` settings) is also done, 2026-10-07.
 
 ### Full duplex
 
@@ -192,15 +192,28 @@ user's call rather than an engineering one since it depends on how this actually
   and an agent injecting at the same moment could still produce confusing, uncoordinated screen output (not
   corrupted, just badly timed). Simplest to build - it's what exists today minus the gate. Fine if the real use
   is cooperative and low-frequency, wrong if it's "compete for the keyboard."
-- **(b) Exclusive/advisory handoff ("take the pen").** A client must send an explicit acquire-write command
-  before `Send`/`SendKey` are accepted; the server tracks one current holder, auto-released on disconnect. New
-  protocol: an `AcquireWrite`/`ReleaseWrite` pair of `Command` variants, reusing `CommandResult::Error` for a
-  denied request. Matches how pair-programming/screen-sharing tools usually handle "who's driving" - whoever
-  asked first keeps it until they let go. **Has its own sub-setting, also decided to be a choice rather than one
-  fixed answer (2026-10-07)**: does the human's own typing ever need to hold this same lock, or does it always
-  pass through unconditionally regardless of who (if anyone) currently holds it? `WritePolicy::Exclusive` carries
-  a `HumanPriority` (`AlwaysWins` - the lock only arbitrates among remote clients, the human is never gated; or
-  `Participant` - the human is just another holder that can be preempted) rather than picking one.
+- **(b) Exclusive/advisory handoff ("take the pen").** ~~A client must send an explicit acquire-write command
+  before `Send`/`SendKey` are accepted~~ **Done, 2026-10-07** (`vtee --listen <path> --writable=exclusive` or
+  `--writable=exclusive-shared`, `ExclusiveLock`, `Command::AcquireWrite`/`ReleaseWrite`, `architecture.md`). The
+  server tracks one current holder (`ExclusiveLock { holder: Mutex<Option<u64>> }`, keyed by a per-connection id
+  handed out by `Tap::serve`'s accept loop), auto-released on disconnect (`serve_connection` calls
+  `release_if_held_by` on every exit path, not just a clean `ReleaseWrite`). `AcquireWrite`/`ReleaseWrite` reuse
+  `CommandResult::WriteAccess { acquired }` for both a grant and a denial, and `CommandResult::Error` is reserved
+  for a structurally-disallowed command instead. Matches how pair-programming/screen-sharing tools usually handle
+  "who's driving" - whoever asked first keeps it until they let go. **Has its own sub-setting, also decided to be
+  a choice rather than one fixed answer (2026-10-07)**: does the human's own typing ever need to hold this same
+  lock, or does it always pass through unconditionally regardless of who (if anyone) currently holds it?
+  `WritePolicy::Exclusive` carries a `HumanPriority` (`AlwaysWins` - the lock only arbitrates among remote
+  clients, the human is never gated; or `Participant` - the human is just another holder that can be preempted)
+  rather than picking one. Both are built and verified end to end, including `Participant`'s actual revoke path:
+  a remote client acquires the lock (`write_access: true`), a human keystroke arrives on the real stdin-forwarding
+  thread, and the remote client's next `Send` is rejected (`write access not held`) without it ever sending
+  `ReleaseWrite` - confirming the keystroke itself revokes the lock rather than merely racing to be re-granted it.
+  A `--connect` client can then reacquire once the human's own typing isn't actively holding it. Verified via a
+  real pty (Python's `pty.fork()`, the same technique as the SIGTERM/SIGKILL watchdog tests) rather than named
+  pipes - a FIFO-based harness hit two real ordering bugs of its own (opening the writer side too late, and
+  insufficient settle time after unblocking it) before this project switched approaches; those were bugs in the
+  test script, not in `vtee`.
 - **(c) Human always wins.** A remote write is only accepted when the interactive stdin-forwarding thread hasn't
   seen a byte in the last N ms - an idle-based heuristic. **Not recommended**: this is the same shape of fragile
   primitive requirement 4 already rejected for *output* ("wait until the screen settles is the wrong primitive")
@@ -219,7 +232,8 @@ sounds like a single policy call turns out to be a choice to expose, not a defau
 into "make it a setting" as its default answer to this category of question. This argues for shaping the
 mechanism as an enum of write-policy modes from the start, even though 3a (no competing human) only exercises
 the simplest one - so that 3b's remaining modes, and their own sub-settings, are additions to that enum later,
-not a rework of it.
+not a rework of it. (a) and (d) remain unbuilt - (b) was the mode actually asked for once scoped, and nothing
+about `WritePolicy`'s shape as an enum needs either built before it's useful.
 
 **Not new plumbing, whichever modes end up built**: the write mechanism (`Tap::send_bytes`, the shared writer
 lock) already tolerates any number of concurrent callers; `Send`/`SendKey`/`Resize` already exist as `Command`
@@ -266,8 +280,11 @@ not decided).
   free-for-all, exclusive handoff, and no-simultaneous-access should all be selectable modes rather than one
   fixed policy, and that exclusive handoff's own `HumanPriority` (always-wins vs. the human as just another
   participant) is likewise a setting, not a built-in answer (idle-based priority stays excluded on its merits
-  either way). Not yet decided: the mode/setting selector's actual shape (a CLI flag's value syntax, a
-  per-connection protocol choice, something else) or which mode and which `HumanPriority` are the defaults.
+  either way). Exclusive handoff (both `HumanPriority` settings) is built and verified; free-for-all and
+  no-simultaneous-access remain unbuilt until something actually needs them. Still not decided: which mode and
+  which `HumanPriority` are the defaults when none is requested (today: `ReadOnly` if `--writable` is absent at
+  all, otherwise whatever `--writable=<mode>` names explicitly - there is no implicit default *among* the
+  writable modes yet, since every caller so far has said which one it wants).
 - **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
   fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
   pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.

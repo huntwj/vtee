@@ -250,6 +250,52 @@ plausible-and-done until it was actually tested:
 Verified, not assumed: 5 consecutive real-pty runs of both `SIGTERM` and `SIGKILL` restoring cooked mode
 (`ICANON`) every time, plus a check that a normal clean exit leaves no orphaned watchdog process behind.
 
+## Full duplex, stage 3b: exclusive handoff (`--writable=exclusive`/`exclusive-shared`, 2026-10-07)
+
+`WritePolicy::Exclusive { human_priority: HumanPriority }` adds the "take the pen" mode scoped in `roadmap.md`:
+only one connection may `Send`/`SendKey`/`Resize` at a time, via a new `ExclusiveLock` (`src/lib.rs`) - a
+`Mutex<Option<u64>>` holding the id of whichever connection currently holds write access, or `None`. `Tap` owns
+one `Arc<ExclusiveLock>`, created once per `Tap` regardless of whether `serve` is ever called with `Exclusive` at
+all (inert otherwise - nothing ever checks it under `ReadOnly`/`Open`). `Tap::serve`'s accept loop hands each
+connection a fresh id from `next_connection_id` (an `AtomicU64`), so `ExclusiveLock` only ever has to compare
+small integers, not track connections or sockets itself.
+
+`Command::AcquireWrite`/`ReleaseWrite` (new `Command` variants, `src/command.rs`) are handled entirely inside
+`serve_connection`, not `Command::execute` - unlike every other command, the right behaviour here depends on
+*which connection* is asking, something `execute`'s `&Tap` signature has no way to express. `authorize` only
+checks that these two are structurally reachable under `WritePolicy::Exclusive` at all (rejected under
+`ReadOnly`/`Open` - they mean nothing there); `serve_connection` then does the actual arbitration:
+`AcquireWrite` calls `ExclusiveLock::try_acquire(id)` and replies with `CommandResult::WriteAccess { acquired }`
+either way (a losing acquire is a well-formed reply, not an `Error` - asking and being told no is a normal
+outcome, not a malformed request); `Send`/`SendKey`/`Resize` additionally check `is_held_by(id)` before
+`execute`, replying `Error` if the caller doesn't currently hold the lock. `release_if_held_by(id)` runs
+unconditionally when a connection's loop ends, on *every* exit path (clean `ReleaseWrite`, disconnect, or an I/O
+error) - a holder that vanishes without saying so doesn't leave the lock stuck.
+
+`HumanPriority` is the sub-setting scoped in `roadmap.md` ("I think that's just one more setting/option, right?"):
+whether the interactive stdin-forwarding thread's own writes are exempt from this lock (`AlwaysWins`) or
+participate in it by revoking whoever currently holds it (`Participant`). Implemented as a second piece of shared
+state, `human_revokes_lock: Arc<AtomicBool>`, set once by `Tap::serve` (`true` only for
+`Exclusive { human_priority: Participant }`) and read by `forward_input` after every chunk it forwards - human
+keystrokes are *never* delayed or blocked either way, only `Participant` additionally calls
+`ExclusiveLock::revoke()` once the bytes are already on their way to the child. This reacts to a real event (a
+keystroke arrived) rather than inferring intent from idle time, the same reasoning that excluded option (c) in
+`roadmap.md`. A remote holder finds out it lost the lock the next time it tries to write (`Error`, not a push
+notification - there is no mechanism for the server to tell an idle connection anything unprompted), and can
+`AcquireWrite` again once the human isn't actively holding it.
+
+Verified end to end against a real pty (`python3`'s `pty.fork()`, same technique as the signal-handling tests
+above, not named pipes - see below): a remote client sends `acquire_write` and gets `{"acquired":true}`; a
+simulated human keystroke is written directly to the pty master; the same remote client's next `send` gets
+`{"cmd":"error","message":"write access not held - send acquire_write first"}` without ever sending
+`release_write`, confirming the keystroke itself revoked the lock rather than the remote client merely losing a
+race to be re-granted it; a subsequent `acquire_write` from the same client succeeds again. A FIFO-based test
+harness was tried first and abandoned after two real bugs in the *script*, not `vtee`: opening the FIFO's write
+end after the server process was already blocked inside its own `< fifo` redirection (so the server never
+reached the point of listening on its socket), and, after fixing that, insufficient settle time between
+unblocking the FIFO and asserting on the result. Switching to a real pty removed the whole class of ordering
+hazard at once, the same win `pty.fork()` already gave the `SIGTERM`/`SIGKILL` tests.
+
 ## Known rough edges (tracked, not silently ignored)
 
 - `Tap::wait()` doesn't block forever waiting for the pty master's reader to see EOF, because it isn't guaranteed

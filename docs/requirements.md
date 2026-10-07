@@ -12,9 +12,11 @@ status to track per-requirement rather than as one blob.
    non-interactively and dumps structured results, built for and verified with TinyFugue's testing needs. "Usable
    by an agent across many calls" against an ongoing, out-of-process session is also met, read-only and
    read-write: `vtee --listen`/`--connect` (`architecture.md`) lets a separate process query live state, and
-   - with `--writable`, when no human is competing for input - inject it too (`WritePolicy::Open`). What's still
-   open is write access *while a human is also typing* (full duplex stage 3b, a policy decision, `roadmap.md`)
-   and multiple sessions behind one process/daemon.
+   inject input too - with `--writable` when no human is competing (`WritePolicy::Open`), or with
+   `--writable=exclusive`/`exclusive-shared` when one is, via an explicit `acquire_write`/`release_write` handoff
+   (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). What's still open: free-for-all
+   and mutually-exclusive-with-a-human remain unbuilt modes of the same `WritePolicy` enum (nobody's needed them
+   yet), and multiple sessions behind one process/daemon.
 2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
    256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
    and combining characters. We should not cap the target at what one program uses today.

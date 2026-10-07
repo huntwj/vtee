@@ -142,4 +142,7 @@ needed; closing the loop here rather than leaving it as a live risk.
 
 ## Open
 
-- **Protocol**, **input merging**, **licence**: unchanged from README's "Open decisions."
+- **Protocol**, **licence**: unchanged from README's "Open decisions."
+- **Input merging**: substantially decided and built 2026-10-07 (exclusive handoff, both `HumanPriority`
+  settings - `roadmap.md`/`architecture.md`). Still open: free-for-all and mutually-exclusive-with-a-human as
+  unbuilt modes of the same enum, and which mode/`HumanPriority` is the default when none is requested.
