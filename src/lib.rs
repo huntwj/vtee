@@ -198,6 +198,15 @@ impl Tap {
         Ok(status)
     }
 
+    /// Terminate the child. Used by the batch CLI, which doesn't assume a script leaves the
+    /// program in a state where it'll exit on its own - deterministic over hoping a `wait()`
+    /// eventually returns. Safe to call on an already-exited child (the underlying error is
+    /// swallowed, not propagated, since "already gone" isn't a failure from a caller's
+    /// perspective).
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
     /// The full current state (cells, attributes, cursor, modes, offset - requirement 3 and
     /// 4), atomically with respect to the output-forwarding thread.
     pub fn snapshot(&self) -> Snapshot {
@@ -292,6 +301,18 @@ impl Tap {
     pub fn watch_resize(&self) {
         // TODO(requirement 8): Windows resize watching (ConPTY has no SIGWINCH equivalent;
         // needs polling console size or a console resize event).
+    }
+}
+
+/// A safety net, not the primary cleanup path: whatever causes a `Tap` to be dropped -
+/// including an early return or a `?` after the child was spawned - this stops the child from
+/// being silently orphaned. Harmless if the child already exited (the error from killing an
+/// already-dead process is swallowed, same as `kill()`). This only runs on a normal drop, not
+/// through `std::process::exit()` (which skips destructors entirely) - callers that might call
+/// `std::process::exit` while a `Tap` is still alive need to drop or kill it explicitly first.
+impl Drop for Tap {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
     }
 }
 
