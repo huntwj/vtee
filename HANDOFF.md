@@ -1,8 +1,9 @@
 # Handoff: research and context for vtee
 
-Written 2026-10-06 so a fresh agent can start without the conversation that produced it. Read `README.md` first
-(goals, requirements, staged plan). This file is the background: why the project exists, what we learned, what is
-decided, what is not, and how to work in this repo.
+Written 2026-10-06 so a fresh agent can start without the conversation that produced it. This file is the
+background: why the project exists, what we learned getting here, and how to work in this repo. For the current
+state of the project - requirements, architecture, roadmap, decisions - read `docs/` instead; this file doesn't
+duplicate it and won't be kept in sync with it hunk-by-hunk the way the early history below is frozen.
 
 Provenance matters here. Every claim about an external tool below was read from its README, docs or source through a
 summarising fetch tool on 2026-10-06 and **not run**, unless it says "measured". Treat them as claims to verify.
@@ -36,27 +37,13 @@ full-screen program, and a third is letting an agent watch while a human uses on
 Notes pages in `~/ai/mud/site/src/content/docs/`: `workflow/testing.md` (test design and the coverage section),
 `project/ideas.md` (idea 8 is this tool), `project/todo.md`.
 
-## 2. Decisions made
+The requirements (now in `docs/requirements.md`) were deliberately broadened by the user, who rejected an earlier
+draft that capped them at what TF uses today: broad VT100/VT220/xterm emulation, full state exposure, a daemon or
+MCP server is acceptable (a trade-off, not a gate), and "wait until the screen settles" is the wrong primitive
+because a server may stream constantly. Transparent observer mode - the human keeps their own terminal, output is
+forwarded raw, the emulator only watches - came from the user directly: "kind of a TUI version of tee".
 
-- **The tool is a Rust crate at `~/ai/vtee`** (the user, 2026-10-06). Working name, may change.
-- **Reuse an emulator; do not write one.** The pty plumbing is small. Terminal emulation is the hard part.
-- **Transparent observer mode is a core requirement**: the human keeps their own terminal, output is forwarded raw,
-  the emulator only watches. This came from the user: "kind of a TUI version of tee".
-- **The requirements were deliberately broadened by the user**, who rejected an earlier draft that capped them at
-  what TF uses today: broad VT100/VT220/xterm emulation, full state exposure, a daemon or MCP server is acceptable
-  (a trade-off, not a gate), and "wait until the screen settles" is the wrong primitive because a server may stream
-  constantly. See `README.md`.
-- **Staged plan**: v0 the tap (read-only observer, raw byte log, snapshot queries), v1 input injection and
-  wait-for-predicate, later MCP, Windows and multiple sessions.
-- **Emulator crate decided 2026-10-06: `alacritty_terminal`.** See `docs/decisions.md` for the measured comparison
-  against `avt`, `vte` and `termwiz`, plus follow-up checks (chunked-feed equivalence, malformed-input robustness).
-- **pty crate decided 2026-10-06: `portable-pty`.** Built v0's tap on it; works on Linux (all 15 probe files
-  through a real pty, survives `SIGWINCH`), found and fixed two real bugs in the process (zero-size grid panic,
-  an EOF-doesn't-always-follow-child-exit assumption). Windows (ConPTY) isn't usable from this MSYS2/Git-Bash host
-  yet, cause not isolated - see `docs/decisions.md`.
-- **Not decided**: wire protocol, how to merge human and agent input, licence.
-
-## 3. What TinyFugue needs from a terminal
+## 2. What TinyFugue needs from a terminal
 
 From `tinyfugue/src/output.c`, lines 510-550 (read, not run): it queries termcap for `cl ce cd` (clear),
 `ti`/`te` (**enter and exit the alternate screen**, so the emulator must honour it), `cm` (cursor addressing), `cs`
@@ -66,9 +53,10 @@ From `tinyfugue/src/output.c`, lines 510-550 (read, not run): it queries termcap
 
 The harness chooses `TERM`, so it decides which of those are active. `TERM=dumb` today means none. Screen tests need
 a terminfo with cursor addressing, for example `xterm`, `xterm-256color`, `vt100` or `linux`. TF's status line may
-contain a clock, so a screen golden needs it disabled or masked.
+contain a clock, so a screen golden needs it disabled or masked - see `docs/roadmap.md`'s open questions, which asks
+whether that's actually true of TF's own display or just a general concern from this early draft.
 
-## 4. Research
+## 3. Research
 
 ### Existing tools
 
@@ -84,7 +72,8 @@ contain a clock, so a screen golden needs it disabled or masked.
 | tmux (`send-keys`, `capture-pane -e`) | The classic way to share a terminal with an agent | **Not researched here**, from the model's own knowledge | Unix only. |
 
 Not researched at all, only named as candidates: the Rust crates `avt`, `vte`, `alacritty_terminal`, `termwiz`,
-`portable-pty`. Conformance suites such as `vttest` and `esctest` are mentioned from memory and unverified.
+`portable-pty` - all later measured directly, see `docs/decisions.md`. Conformance suites such as `vttest` and
+`esctest` are mentioned from memory and unverified.
 
 **None of the tools above documented a transparent observer mode** where the human keeps their own terminal. That is
 the gap this crate fills.
@@ -125,59 +114,7 @@ see `docs/decisions.md` for that matrix and the emulator-crate decision it produ
 **Not measured:** repeated-run determinism, Windows/ConPTY (tui-test only claims it), resize reflow, mouse input, and the
 real behaviour of every wait primitive (read from help text only).
 
-## 5. Design notes (proposals, not decisions)
-
-- **Shape.** Spawn the child in a pty (`portable-pty` is the obvious candidate). Two-way forward bytes between the
-  child and the user's real terminal, raw, so the human sees exactly what they would without the tool. A copy of the
-  child's output also goes to an emulator that keeps the state. The emulator is a passive observer and must never
-  alter what is forwarded.
-- **Snapshots tied to a byte offset.** Number the output stream. A snapshot is "state after byte N", so a query
-  cannot see a half-drawn frame and two runs can be compared.
-- **Raw log and replay.** Write the child's output to a file (with timestamps, asciicast-like). Replaying it into an
-  emulator reproduces the state with no timing involved, which is what makes golden tests stable.
-- **Wait primitives.** Wait for a predicate on the screen with a timeout. Synchronise on markers a test controls
-  (TF's harness already prints `@@BEGIN@@`/`@@END@@`). Allow masking regions that change on their own.
-- **Observer protocol.** Probably line-delimited JSON over a Unix socket first, as `ht` does. Commands such as
-  `snapshot`, `wait_for`, `stream(from_offset)`, `modes`, later `send_keys` and `resize`. An MCP front end can wrap it.
-- **Input.** v0 is read-only for the observer. With both a human and an agent able to type, one merged stream is
-  needed with a stated policy for simultaneous input.
-- **Details that bite.** Propagate `SIGWINCH` and keep the child pty, the emulator and the real terminal the same
-  size. Restore the user's terminal mode on crash or Ctrl-C. Mouse, bracketed paste and the alternate screen must
-  reach the real terminal untouched, which raw forwarding gives for free. On Windows the equivalent is ConPTY.
-- **Split the agent-query layer into its own crate (brainstorm, 2026-10-06, not a requirement).** The "snapshot/wait/
-  modes" query protocol is logically separable from the "spawn in a pty and tap the bytes" layer. If they're two
-  crates, an app that already owns its own screen state (TinyFugue parses its own display) could expose the same
-  query protocol in-process, with no pty and no emulator involved, while `vtee` composes that query crate on top
-  of its own emulator for the general "wrap anything" case. Premature to act on: we don't know what the query API
-  needs to look like until v0's snapshot API exists and has been used once. Revisit then; don't split crates before.
-
-## 6. Suggested first steps
-
-1. ~~**Choose the emulator by measuring.**~~ **Done, 2026-10-06.** `docs/decisions.md` has the comparison and the
-   follow-up chunked-feed/garbage-input checks. `alacritty_terminal` won.
-2. ~~**The tap.** Spawn, forward both ways, restore the terminal on exit, handle resize.~~ **Done, 2026-10-06** on
-   Linux (`src/lib.rs`, `Tap`): spawns via `portable-pty`, forwards both ways, feeds a copy of the child's output
-   into `alacritty_terminal`, restores the real terminal's mode on exit (`RawModeGuard`), watches `SIGWINCH`.
-   Windows not working yet from this host, and it's a real upstream bug, not just this host - see
-   `docs/decisions.md`. Still open: a true `kill -9`/`SIGTERM`-safe terminal restoration (only normal exit and
-   panic-unwind are covered).
-3. ~~**The snapshot API** (cells, attributes, cursor, modes, offset) and the raw byte log.~~ **Done, 2026-10-06**
-   (`src/snapshot.rs`, `Tap::snapshot()`; `src/log.rs`, `RawLog`). Cells carry colour (indexed/rgb/default), all
-   SGR attributes except blink (the accepted `alacritty_terminal` gap), and OSC 8 hyperlinks; the snapshot also
-   carries cursor shape/visibility, active modes, alt-screen state, title and scrollback. The byte offset and the
-   emulator state it describes are locked together (`TapState`) so they can never disagree. The log is asciicast
-   v2 (one `[time, "o", text]` event per chunk, as `ht`/`avt` already use), with the known accepted limitation that
-   non-UTF8 bytes in it get replaced lossily (the forwarded bytes themselves are never touched).
-4. ~~**Replay.** Rebuild a snapshot from a log, and check it matches the live one.~~ **Done, 2026-10-06**
-   (`vtee::replay()`; `tests/replay.rs` asserts it against the live snapshot for all 15 probe files).
-5. ~~**Tests that need no TinyFugue**: run `cat` on sequence files~~ **Done, 2026-10-06** (`tests/replay.rs`, same
-   as step 4 - one test covers both). Conformance cases beyond the existing probe files, and the TF harness
-   integration (`~/ai/mud/tests/harness.py`), are still open.
-
-If step 2 or 3 turns out much harder than expected, say so rather than push on: the fallback in the README is to adopt
-an existing tool for the test side and keep only a thin live-watching tap.
-
-## 7. Working conventions
+## 4. Working conventions
 
 These come from the user's other repos and standing preferences; they are not inherited automatically.
 
@@ -190,22 +127,16 @@ These come from the user's other repos and standing preferences; they are not in
 - **Branches.** One branch per unit of work, `type/short-name`, off `main`, merged with a no-ff merge commit titled
   `Merge branch '<name>'`.
 - **Privacy.** The repo is private and has no remote yet. Push nothing anywhere, and create no remote, without asking.
+  This extends beyond git: nothing about this project gets posted anywhere public (issue trackers, forums, etc.)
+  without showing the exact content and getting explicit confirmation first, every time - not just treating an
+  instruction that sounds like authorization as license to publish immediately. Learned the hard way, 2026-10-06.
 - **Build and test with `cargo` only.** The host is Windows 11 with Git Bash, Rust 1.98 is installed, and Docker
-  Desktop provides Linux for anything Unix-specific. Git Bash rewrites paths in Docker commands: use
-  `MSYS_NO_PATHCONV=1` and `C:/...` style mount paths.
+  Desktop provides Linux for anything Unix-specific - including running `vtee` itself now, not just TF's own
+  Unix-specific test needs, since Windows (ConPTY) has a real upstream bug (`docs/decisions.md`). `docker run`
+  works fine invoked from any Windows shell (PowerShell, Git Bash, cmd.exe) without needing WSL directly - Docker
+  Desktop's backend handles the Linux execution transparently regardless of which shell issued the command. Git
+  Bash rewrites paths in Docker commands: use `MSYS_NO_PATHCONV=1` and `C:/...` style mount paths.
 - **Verify, do not assume.** The user repeatedly prefers claims checked against the source or by running something.
   Say plainly whether a statement was measured or read.
-- **Record decisions** with a date when they are made (for example in a `docs/decisions.md`), and keep this file
-  current when facts change instead of only noting it elsewhere.
-
-## 8. Open questions
-
-- Can the human's input and an agent's input be merged safely, and what should simultaneous input do?
-- Build on `tui-test`'s Rust crate (`tui-test-rs`, 0.1.0, which already wraps several engines), or on an emulator crate
-  directly plus our own pty layer? The first is less work and gets differential backends; the second keeps control and
-  gives us the raw-byte capture and transparent observer mode that tui-test lacks. (Leaning toward the second, now that
-  `alacritty_terminal` is chosen and measured as robust — see `docs/decisions.md` — but not yet decided.)
-- One session per process, or a daemon that manages several?
-- Does the snapshot "as of byte N" need the emulator to be re-runnable from a checkpoint, or is replay from the
-  start fast enough?
-- Licence, and whether the name `vtee` is free to use.
+- **Record decisions** with a date when they are made (`docs/decisions.md`), and keep `docs/` current when facts
+  change instead of only noting it elsewhere.
