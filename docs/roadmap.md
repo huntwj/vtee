@@ -161,23 +161,63 @@ by the user explicitly, in this order, after hardening:
    wire protocol (now decided: a Unix socket, settling that open decision too). Verified end to end: a snapshot
    query, a write-command rejection, a `wait_for` match, and multiple commands over one persistent connection,
    all against a real running session.
-3. **Full duplex** (not built): the watcher can also inject input (`send`/`send_key`) into the live session.
-   This is where the input-merging policy question (below) actually has to be answered, not deferred - a human
-   at the real terminal and a remote writer can now genuinely collide. The mechanism (`Tap::send_bytes`'s shared,
-   lock-guarded writer) already exists and already serves both the batch CLI and interactive stdin forwarding
-   without conflict - stage 3 is "allow a *third* writer (a remote `--connect` client) at the same time," which
-   is a policy decision about priority, not new plumbing.
+3. **Full duplex** (scoped 2026-10-07, not built - see "Full duplex" below): splits into two genuinely different
+   cases once actually scoped out. One (3a) has no open question blocking it and could be built now; the other
+   (3b) is the real policy question and needs the user's call, not an engineering one, before it's built.
 
-### Input merging policy
+### Full duplex
 
-The mechanism is already built: `Tap`'s pty-master writer is `Arc<Mutex<Box<dyn Write + Send>>>`, shared between
-the interactive-mode stdin-forwarding thread and `Command::Send`/`SendKey` (`architecture.md`), so a script's
-injected input and (in interactive mode) a human's own typing can't corrupt each other - each write is one
-atomic chunk under the lock. What's still open is *policy*, not mechanism: once something drives `Command`s
-live against a `Tap` that also has a human typing, when a human is typing and an agent also wants to inject, who
-goes first, and does one block the other? That needs a real answer from how this actually gets used, not a
-guessed-at default, and neither consumer has resolved it yet: TF's use is batch-only with no human in the loop,
-and the user's "connect and watch" (stage 2) is read-only and doesn't exercise it either. Blocks stage 3 only.
+Splits into two cases that sound like one feature ("let a remote connection write too") but aren't, because only
+one of them has an open question attached to it.
+
+**3a. Remote-only control - no human competing, no policy question, buildable now.** When nothing else is
+writing to the pty (a headless session kept alive instead of exiting after a script, or an interactive session
+where no human happens to be typing at that moment), a `--connect` client writing has no one to collide with.
+This is HANDOFF.md §1's *second* use case, finally served live rather than only as a fixed batch script: "an AI
+agent see and drive a full-screen program." Mechanically almost free - `Tap::send_bytes`'s shared, lock-guarded
+writer already handles any number of concurrent callers without corruption (`architecture.md`); this is just
+lifting `Command::is_read_only()`'s gate for connections that asked for write access. New pieces: a server-side
+opt-in (`--listen <path> --writable`, default off - keeping today's read-only behaviour as the safe default and
+requiring an explicit flag to widen it matches this project's pattern everywhere else: `interactive` defaults to
+the narrower/safer behaviour too). `Resize` needs its own rule even here: if the session is *also* interactive
+with a human whose real terminal drives `watch_resize`, a remote `Resize` should lose or be rejected outright -
+there's only one real screen size that means anything once an actual human is looking at one.
+
+**3b. Human and remote both writing at once - the real open question.** Four shapes, not decided, genuinely the
+user's call rather than an engineering one since it depends on how this actually gets used:
+
+- **(a) Free-for-all.** No arbitration; the existing lock already guarantees one write-call's bytes can't
+  literally interleave with another's *bytes*, but says nothing about *order* or *intent* - a human mid-keystroke
+  and an agent injecting at the same moment could still produce confusing, uncoordinated screen output (not
+  corrupted, just badly timed). Simplest to build - it's what exists today minus the gate. Fine if the real use
+  is cooperative and low-frequency, wrong if it's "compete for the keyboard."
+- **(b) Exclusive/advisory handoff ("take the pen").** A client must send an explicit acquire-write command
+  before `Send`/`SendKey` are accepted; the server tracks one current holder, auto-released on disconnect. New
+  protocol: an `AcquireWrite`/`ReleaseWrite` pair of `Command` variants, reusing `CommandResult::Error` for a
+  denied request. Matches how pair-programming/screen-sharing tools usually handle "who's driving" - whoever
+  asked first keeps it until they let go.
+- **(c) Human always wins.** A remote write is only accepted when the interactive stdin-forwarding thread hasn't
+  seen a byte in the last N ms - an idle-based heuristic. **Not recommended**: this is the same shape of fragile
+  primitive requirement 4 already rejected for *output* ("wait until the screen settles is the wrong primitive")
+  applied to *input* instead - what counts as "idle enough" is just as arbitrary, and a human who pauses to think
+  looks identical to a human who's finished typing.
+- **(d) No simultaneous access at all.** `--writable` and a human typing become mutually exclusive *modes* of one
+  `Tap`, not something that can both be true - starting with `--writable` disables stdin forwarding entirely.
+  Simplest of all, but drops the "both at once" scenario completely; might be the honest answer if that scenario
+  turns out to be nobody's actual need and (a)/(b)/(c) are solving a problem nobody has.
+
+Leaning toward (b) - it fits "an agent watches/helps a human" as inherently cooperative rather than adversarial,
+matching how a human would expect to hand off control, without (c)'s timing fragility or (a)'s collision risk.
+Not a decision - stated as a recommendation to react to, not something to build from without confirming it.
+
+**Not new plumbing, whichever of 3b's options gets picked**: the write mechanism (`Tap::send_bytes`, the shared
+writer lock) already tolerates any number of concurrent callers; `Send`/`SendKey`/`Resize` already exist as
+`Command` variants. **New regardless of which option**: the `--writable` opt-in itself, whatever state tracks
+"who's allowed to write right now" (nothing, for (a); one `Option<ConnectionId>`, for (b); a last-write timestamp,
+for (c); a boolean mode switch, for (d)), and `Resize`'s own sub-rule once a human's terminal is in the picture.
+
+3a doesn't need 3b resolved first and could be built independently, the same way observation (stage 2) didn't
+need this question answered either - worth doing regardless of which way 3b eventually goes.
 
 ### Wait-for-predicate, beyond "text appears"
 
@@ -207,9 +247,11 @@ not decided).
 
 ## Open decisions
 
-- **Input merging** when both a human and an agent can type. See "Input merging policy" above - a real policy
-  decision, not yet made, and neither consumer's use so far (TF's batch, the user's read-only observation)
-  exercises it.
+- **Input merging** when both a human and an agent can type (stage 3b, "Full duplex" above): free-for-all,
+  exclusive handoff, idle-based priority, or no simultaneous access at all. Leaning exclusive handoff, not
+  decided - the user's call, not an engineering one.
+- **Whether to build 3a (remote-only control, no human competing) now**, independent of 3b - it has no open
+  question blocking it.
 - **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
   fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
   pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.
