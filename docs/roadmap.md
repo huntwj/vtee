@@ -1,8 +1,8 @@
 # Roadmap
 
-Staged plan, what v1 actually requires (scoped, not built), the standing open decisions, and the open questions -
-including the ones only the TinyFugue side can answer. See `requirements.md` for what each stage is aiming at and
-`architecture.md` for how the done parts work.
+Staged plan, what's being built now, what v1 still needs beyond that, the standing open decisions, and what
+TinyFugue's testing side told us about its actual near-term needs. See `requirements.md` for what each stage is
+aiming at and `architecture.md` for how the done parts work.
 
 ## v0 - done, 2026-10-06 (Linux; Windows blocked, see `decisions.md`)
 
@@ -16,7 +16,8 @@ Three concrete gaps found by actually testing, not yet closed:
 
 1. **Both screen buffers in the snapshot** (requirement 3). Currently `Snapshot` only reads `term.grid()` (the
    active buffer); `alacritty_terminal` also tracks an inactive one. Needs exposing both, with a flag for which
-   is currently active (already have `alt_screen` for that).
+   is currently active (already have `alt_screen` for that). TinyFugue's own answer below confirms this is
+   needed, not just theoretically nice - they don't yet know if TF uses the alternate screen.
 2. **`SIGTERM`-safe shutdown.** Catchable, straightforward: a signal handler (`signal_hook`, Unix) that disables
    raw mode before exiting, same as `RawModeGuard` already does for normal exit and panic unwind.
 3. **`SIGKILL`-safe terminal restoration.** `SIGKILL` cannot be caught by the dying process - no handler, no
@@ -27,85 +28,115 @@ Three concrete gaps found by actually testing, not yet closed:
    and it restores the terminal and exits. This is the standard technique other terminal-wrapping tools use for
    exactly this problem.
 
-## v1 (scoped, not built)
+## TinyFugue's answers, 2026-10-06 (asked via cross-session message, see `decisions.md`-style provenance: these
+are TF's own judgments from their harness design and source, not measurements - they haven't run TF under any
+terminal emulator yet)
 
-### Input injection
+1. **Live wait-for-predicate: not needed yet.** TF's tests are deterministic scripts against a fake MUD server.
+   Feed a script, take one snapshot, done. Live predicates only matter for interactive agent use (the "other
+   half" of this project's purpose - see below), not for TF's first integration.
+2. **A non-interactive CLI is enough for the first integration** - run a script of steps (send bytes or keys,
+   resize, wait N ms, snapshot) and dump JSON; their Python harness (`tests/harness.py`) can call it as a
+   subprocess. Defer `send_keys`-over-a-live-protocol until an agent needs to watch a live session.
+3. **No key-name-to-escape table exists on their side.** They want one shipped in `vtee`: Up/Down/Left/Right,
+   Home/End/PgUp/PgDn, F1-F12, Ctrl-x, Alt-x - and it needs to be mode-aware, since application-cursor mode
+   changes arrow keys from `ESC [ A` to `ESC O A` and TF reads that distinction via termcap/terminfo. We already
+   track that mode in `Snapshot.modes` (`?1`/DECCKM), so this is a lookup against state we already have, not new
+   plumbing.
+4. **Marker sync needs rethinking, not dropping.** `@@BEGIN@@`/`@@END@@` would land as literal on-screen text
+   now, not captured stdout. Their suggested cheap fix: a `wait_for <text>` *step inside the script itself* -
+   not a live protocol, just a blocking step within one batch run.
+5. **Both screen buffers**: confirmed needed (see Hardening above) - they don't know yet whether TF uses the
+   alternate screen and want to find out from a first real snapshot.
+6. **Clock masking: probably needed**, not confirmed (TF's status line can show a clock field, default not yet
+   checked). Wants cell-region or regex row masking so goldens can ignore it. A snapshot-comparison concern, not
+   core `Tap`.
 
-`Tap` currently has one writer to the pty master, owned by the internal thread that forwards our own `stdin`
-(`forward_input`, `architecture.md`). Letting an external caller (`send_keys`-style) inject input too means that
-writer needs to be shared - likely `Arc<Mutex<Box<dyn Write + Send>>>`, with both `forward_input`'s loop and a new
-`Tap::send_input(&self, bytes: &[u8])` locking it per write. Each call already writes one complete chunk under
-the lock, so individual injections and individual stdin reads can't interleave *within* themselves - what's
-still an open policy question, not a data-corruption risk, is *when* an agent should be allowed to inject while a
-human is also typing (steal focus immediately? queue behind the human? make it configurable?). That's the
-"input merging" open decision below, and it needs a real answer from how this actually gets used, not a
-guessed-at default.
+Their stated next step: once the CLI exists, point them at the binary path and script format and they'll try a
+first TF startup snapshot.
 
-### Wait-for-predicate
+## Now: a shared command core, driving both the batch CLI and (later) the live protocol
 
-`Tap::wait_for(predicate: impl Fn(&Snapshot) -> bool, timeout) -> Result<Snapshot, Timeout>`. Cheapest correct
-design: pair `TapState`'s `Mutex` with a `Condvar`; `forward_output` calls `notify_all()` after each chunk's
-state update (it already holds the lock there), and `wait_for` loops on `condvar.wait_timeout()` re-checking the
-predicate - no polling, wakes up exactly when there's new state to check. Marker synchronisation (watching for
-TF's own `@@BEGIN@@`/`@@END@@`-style output) is just `wait_for` with a "does the text contain this marker"
-predicate, not a separate primitive. Masking volatile regions (a clock in a status line) is a snapshot-comparison
-concern, not a `Tap` one - probably a small helper that takes two `Snapshot`s and a set of masked regions, usable
-by whatever eventually does golden-testing against this.
+TF's answers describe *half* of what this project exists for (HANDOFF.md §1): scripted, non-interactive testing.
+The other half - an agent driving or watching a *live* session - still needs the same primitives eventually
+(send input, resize, wait for a condition, snapshot), just driven from a different place and running
+indefinitely instead of to completion. Building the batch CLI as a one-off, TF-shaped tool would mean
+redesigning all of this when the live half gets built. Building it on a shared core instead means the live
+protocol (whenever it happens) is "the same commands, read from a socket instead of a script file" - not a
+second design.
+
+**The core**: a `Command` enum, one variant per primitive TF asked for, each executable against a running `Tap`:
+
+```rust
+enum Command {
+    Send(Vec<u8>),                              // raw bytes
+    SendKey(KeyName),                           // resolved via the mode-aware key table
+    Resize(u16, u16),
+    WaitMs(u64),
+    WaitFor { text: String, timeout_ms: u64 },   // blocks; the wait-for-predicate design from before,
+                                                  // scoped down to "text appears", which is all that's
+                                                  // asked for right now
+    Snapshot,                                    // the only variant that produces output
+}
+```
+
+**Driver 1, now: the batch CLI.** Reads a script as newline-delimited JSON (one `Command` per line - the same
+convention this project already uses for the raw log and the probes), runs each one in order against one `Tap`,
+and writes one JSON `Snapshot` line to stdout per `Snapshot` command. This is exactly what TF asked for in
+answer 2, and needs nothing beyond what's already built except the `Command` execution loop and the key table.
+
+**Driver 2, later (v1): the live protocol.** The same `Command` JSON objects, read from a socket connection
+instead of a static file, executed against a `Tap` that keeps running instead of exiting after the script ends,
+with `Snapshot` results streamed back over the same connection as they're produced. The "wire protocol" question
+below is now really just "what carries these bytes" (a Unix socket is still the leading option), not "what
+commands does it need to support" - that part's answered by the same enum the CLI already uses.
+
+This doesn't retire "Input injection" or "Wait-for-predicate" as v1 line items - the *policy* questions under
+them (human/agent input merging; whether `WaitFor` needs to grow into a full arbitrary predicate rather than
+just "text appears") are still open and still only matter once something drives this live. It does mean that
+work, whenever it happens, extends the same `Command` core rather than inventing a second one.
+
+## v1 (scoped, not built - the live/interactive half)
+
+### Input injection and merging policy
+
+Once something drives `Command`s live instead of from a finished script, `Tap`'s pty-master writer (currently
+owned solely by the internal thread that forwards our own `stdin`, `architecture.md`) needs to be shared -
+likely `Arc<Mutex<Box<dyn Write + Send>>>`, with both that thread and live `Command::Send`/`SendKey` execution
+locking it per write. Each write is already one atomic chunk under the lock, so interleaving can't corrupt a
+single write - what's still open is *policy*: when a human is typing and an agent also wants to inject, who
+goes first, and does one block the other? That needs a real answer from how this actually gets used, not a
+guessed-at default, and TF's answers don't resolve it since TF's use is batch-only with no human in the loop.
+
+### Wait-for-predicate, beyond "text appears"
+
+`Command::WaitFor` as scoped above only checks for a substring. A live/interactive use might want an arbitrary
+predicate over a full `Snapshot` (cursor position, a mode, a cell's colour), not just text. Cheapest correct
+design when that's needed: pair `TapState`'s `Mutex` with a `Condvar`; `forward_output` calls `notify_all()`
+after each chunk's state update (already holds the lock there), and a general `wait_for` loops on
+`condvar.wait_timeout()` re-checking an arbitrary predicate - no polling. Masking volatile regions (a clock) for
+golden comparisons stays a separate, `Tap`-independent helper either way (see TinyFugue's answer 6).
 
 ### Wire protocol
 
-No process boundary exists yet (`architecture.md`) - everything is in-process. Options, roughly in order of how
-much they fit what's already decided: a Unix domain socket with line-delimited JSON (what `ht` does, and what
-the original design notes already leaned toward) - simple, and a Python harness needs nothing but `socket` +
-`json` to speak it; stdio-based JSON-RPC - doesn't need a socket path, but conflicts with stdin/stdout already
-being raw-forwarding channels to the human/child, so it'd need its own fd, which is extra plumbing for no clear
-win over a socket; an HTTP/WebSocket server - more flexible, but nothing here needs that flexibility yet. Leaning
-socket, not decided. Core commands it would need to carry: `snapshot`, `wait_for`, `send_keys`, `resize`, maybe
-`stream(from_offset)` for tailing raw output live. Windows equivalent (named pipes) is later, same as ConPTY
-itself.
-
-**Before building any of this**, it's worth checking whether the first real use (TinyFugue) even needs a
-protocol at all - see "Open questions for TinyFugue" below. A non-interactive CLI that runs a script through
-`Tap` and dumps one final JSON snapshot might cover the actual near-term need with none of this.
+What carries live `Command`s/`Snapshot`s between processes. Leaning Unix domain socket with line-delimited JSON
+(what `ht` does, and what the `Command` design above already assumes) - a Python client needs nothing but
+`socket` + `json`. Considered and set aside: stdio-based JSON-RPC (conflicts with stdin/stdout already being
+raw-forwarding channels, would need its own fd for no clear win); HTTP/WebSocket (more flexible than anything
+here needs yet). Not decided. Windows equivalent (named pipes) is later, same as ConPTY itself.
 
 ## Later
 
 An MCP front end (wraps whichever protocol v1 picks), Windows (ConPTY, blocked on an upstream bug - see
-`decisions.md`), multiple sessions (one process managing several `Tap`s, vs. one process per `Tap` - not decided,
-see open questions).
+`decisions.md`), multiple sessions (one process managing several `Tap`s, vs. one process per `Tap` - affects the
+protocol: a socket per process is simplest, a daemon multiplexing several needs session IDs in every message -
+not decided).
 
 ## Open decisions
 
-- **Protocol.** See v1 scoping above. Leaning Unix socket + line-delimited JSON, not decided.
-- **Input merging** when both a human and an agent can type. See "Input injection" above - a real policy
-  decision, not yet made.
-- **One process per session, or a daemon managing several?** Affects the protocol design (a socket per process is
-  simplest; a daemon multiplexing several `Tap`s needs session IDs in every message). Not decided.
+- **Protocol.** See "Wire protocol" above. Leaning Unix socket + line-delimited JSON, not decided.
+- **Input merging** when both a human and an agent can type. See "Input injection and merging policy" above - a
+  real policy decision, not yet made, and TF's batch-only use doesn't answer it.
+- **One process per session, or a daemon managing several?** Not decided.
 - **Licence.** Not chosen. `publish = false` in `Cargo.toml` until it is.
 - **Whether the name `vtee` is free to use.** Not checked.
-
-## Open questions for TinyFugue
-
-Grounded in the actual gap between what v0 already does and what v1 is scoped to add - worth asking the session
-working on TinyFugue testing before building any of v1, since the answers would change its shape or priority:
-
-1. Does the TF test harness need *live* wait-for-predicate at all, or does "feed a scripted sequence, then take
-   one final snapshot" (which v0 already supports, replay included) cover the display/status-line/input-editing
-   cases you have in mind? This is the single biggest thing v1 adds over v0 - worth knowing if it's actually
-   needed before it gets built.
-2. TF's existing harness synchronises via printed markers (`@@BEGIN@@`/`@@END@@`) in a non-interactive run - does
-   testing with a terminal attached change that, or would the same marker-based approach still work, just with a
-   screen to inspect afterward instead of (or alongside) captured stdout text?
-3. For a first integration, would a non-interactive CLI - run a script through `Tap`, dump one final JSON
-   snapshot - actually be enough, or does the harness need a live, out-of-process protocol (`send_keys` etc.)
-   from day one? This determines whether any of the v1 wire-protocol work needs to happen before TF can use this
-   at all.
-4. For input-editing/`/bind` tests specifically: does the harness need to send literal special keys (arrows,
-   function keys) as their escape sequences programmatically? If so, is there already a key-name-to-escape-
-   sequence table on the TF testing side, or would `vtee` need to provide one?
-5. The snapshot currently only exposes the *active* screen buffer, not both (a known v0 gap, being fixed now) -
-   does anything about testing TF's status line or display actually depend on inspecting state while TF is in
-   its alternate screen, or is the main screen what matters for the tests you're picturing?
-6. Does TF's status line (or anything else in its display) include something that changes on its own, like a
-   clock, that would need masking for a text-comparison golden test - or was that a general concern from the
-   original design notes that doesn't actually apply to TF's real output?
