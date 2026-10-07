@@ -130,6 +130,9 @@ What TinyFugue actually asked for first (`roadmap.md`): spawn `program` non-inte
 clean for structured output), read `<path>` as newline-delimited JSON, run each line as a `Command` in order, and
 write one `CommandResult` JSON line to stdout for every `Snapshot`/`WaitFor` command. `--log <path>` still works
 the same way in this mode, for anyone who also wants the raw byte log alongside the script's structured output.
+`--text` (added 2026-10-07, requested by TinyFugue while developing scripts by hand) swaps that JSON for just
+`snapshot.lines`, prefixed with which command produced it and the byte offset - quicker to read, not meant to be
+parsed by anything; a harness wants the JSON form.
 
 **Cleanup is deterministic, not hopeful.** `run_script` always calls `Tap::kill()` once the script finishes -
 whether it ran to completion or stopped partway on an error - rather than assuming the program being tested will

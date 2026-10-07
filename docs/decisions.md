@@ -134,6 +134,12 @@ unmodified upstream crate avoids taking on a fork to maintain for a need that ha
 the fork route (b) specifically - not (c) - if TF's first real snapshot shows TF actually uses the alternate
 screen and the main-screen content underneath genuinely needs inspecting.
 
+**Confirmed right, 2026-10-07, by TF's first real run** (`roadmap.md`): `alt_screen` was `True` with TF's own
+startup banner and status line rendered in it. TF does use the alternate screen - but that's exactly the buffer
+this project already exposes, and TF's own read of the result was "the unexposed main buffer is not a blocker."
+The gap this entry defers turned out not to be in the way of the thing it was theoretically about. No patch
+needed; closing the loop here rather than leaving it as a live risk.
+
 ## Open
 
 - **Protocol**, **input merging**, **licence**: unchanged from README's "Open decisions."

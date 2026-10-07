@@ -54,6 +54,28 @@ terminal emulator yet)
 Their stated next step: once the CLI exists, point them at the binary path and script format and they'll try a
 first TF startup snapshot.
 
+## TinyFugue's first real run, 2026-10-07 - confirms two of the answers above, measured not guessed
+
+Ran `vtee --script s.jsonl -- tf -L<libdir> -n -f` (Linux container, `TERM=xterm-256color`): resize, wait,
+snapshot, send a command, `wait_for` its echo, snapshot again. "Build, spawn, send, wait_for and snapshot all
+behaved. It covers the first integration."
+
+- **Q5 (both screen buffers) answered, and the deferral holds**: `alt_screen` was `True` - TF's banner and
+  status line render in the alternate screen - but TF's own read was "the unexposed main buffer is not a
+  blocker." The thing being deferred (`decisions.md`) turned out not to be in the way.
+- **Q6 (clock masking) confirmed needed**: the status row ends `...19:12` - a live clock, in the last 5 cells,
+  exactly as suspected. TF will need row/regex masking for golden comparisons.
+- **Two requests, handled differently, not both built in**:
+  1. Plain-text `lines`-only output for quick eyeballing - small, clearly in scope, added: `--text` on the
+     batch CLI (`architecture.md`).
+  2. Row/regex masking - deliberately left as "a snapshot-comparison concern, not core `Tap`'s job" earlier in
+     this document, and that holds: TF's harness already gets full structured `lines`/`cells` JSON, so masking a
+     row range or regex against it is plain Python on their side, not a new `vtee` feature. Recommended that
+     instead of building it in.
+- **Not yet tried** (TF's own words): `send_key` (arrows, function keys, `/bind`), `resize` after the initial
+  one, and the per-cell attribute fields (bold, colour) for attribute goldens - all built and unit/integration
+  tested on this side, just not yet exercised against real TF.
+
 ## Done, 2026-10-07: a shared command core, driving the batch CLI now and (later) the live protocol
 
 TF's answers describe *half* of what this project exists for (HANDOFF.md §1): scripted, non-interactive testing.
