@@ -54,35 +54,44 @@ terminal emulator yet)
 Their stated next step: once the CLI exists, point them at the binary path and script format and they'll try a
 first TF startup snapshot.
 
-## Now: a shared command core, driving both the batch CLI and (later) the live protocol
+## Done, 2026-10-07: a shared command core, driving the batch CLI now and (later) the live protocol
 
 TF's answers describe *half* of what this project exists for (HANDOFF.md §1): scripted, non-interactive testing.
 The other half - an agent driving or watching a *live* session - still needs the same primitives eventually
 (send input, resize, wait for a condition, snapshot), just driven from a different place and running
-indefinitely instead of to completion. Building the batch CLI as a one-off, TF-shaped tool would mean
-redesigning all of this when the live half gets built. Building it on a shared core instead means the live
+indefinitely instead of to completion. Building the batch CLI as a one-off, TF-shaped tool would have meant
+redesigning all of this when the live half gets built, so it wasn't: built on a shared core instead, so the live
 protocol (whenever it happens) is "the same commands, read from a socket instead of a script file" - not a
 second design.
 
-**The core**: a `Command` enum, one variant per primitive TF asked for, each executable against a running `Tap`:
+**The core** (`src/command.rs`): a `Command` enum, one variant per primitive TF asked for, each executable
+against a running `Tap` via `Command::execute`:
 
 ```rust
 enum Command {
-    Send(Vec<u8>),                              // raw bytes
-    SendKey(KeyName),                           // resolved via the mode-aware key table
-    Resize(u16, u16),
-    WaitMs(u64),
-    WaitFor { text: String, timeout_ms: u64 },   // blocks; the wait-for-predicate design from before,
-                                                  // scoped down to "text appears", which is all that's
-                                                  // asked for right now
-    Snapshot,                                    // the only variant that produces output
+    Send { text: String },
+    SendKey { key: String },                     // resolved via the mode-aware key table, src/keys.rs
+    Resize { cols: u16, rows: u16 },
+    WaitMs { ms: u64 },
+    WaitFor { text: String, timeout_ms: u64 },    // the wait-for-predicate design from before, scoped
+                                                   // down to "text appears", which is all that's asked
+                                                   // for right now
+    Snapshot,
 }
 ```
 
-**Driver 1, now: the batch CLI.** Reads a script as newline-delimited JSON (one `Command` per line - the same
-convention this project already uses for the raw log and the probes), runs each one in order against one `Tap`,
-and writes one JSON `Snapshot` line to stdout per `Snapshot` command. This is exactly what TF asked for in
-answer 2, and needs nothing beyond what's already built except the `Command` execution loop and the key table.
+`Send`/`SendKey` needed `Tap`'s pty-master writer to become shareable (`Arc<Mutex<...>>`) rather than owned
+solely by the interactive-mode stdin-forwarding thread - see `architecture.md` for why that doesn't introduce a
+corruption risk, only an open *policy* question (still listed under "Open decisions" below).
+
+**Driver 1, done: the batch CLI.** `vtee --script <path> -- <program> [args...]` (`architecture.md`). Reads
+the script as newline-delimited JSON (one `Command` per line - the same convention this project already uses
+for the raw log and the probes), runs each one in order against a non-interactive `Tap`
+(`SpawnOptions::interactive = false`), and writes one `CommandResult` JSON line to stdout per `Snapshot`/
+`WaitFor` command. Verified end to end against a real Linux pty: `send`/`send_key` (mode-aware arrow-key
+resolution confirmed via the pty's own echo), `resize`, `wait_ms`, and `wait_for` in both outcomes (text found
+before timeout, and genuinely timing out without hanging). TinyFugue has the binary path and script format now
+(answer to their stated next step above) and can try a first TF startup snapshot.
 
 **Driver 2, later (v1): the live protocol.** The same `Command` JSON objects, read from a socket connection
 instead of a static file, executed against a `Tap` that keeps running instead of exiting after the script ends,
@@ -97,24 +106,25 @@ work, whenever it happens, extends the same `Command` core rather than inventing
 
 ## v1 (scoped, not built - the live/interactive half)
 
-### Input injection and merging policy
+### Input merging policy
 
-Once something drives `Command`s live instead of from a finished script, `Tap`'s pty-master writer (currently
-owned solely by the internal thread that forwards our own `stdin`, `architecture.md`) needs to be shared -
-likely `Arc<Mutex<Box<dyn Write + Send>>>`, with both that thread and live `Command::Send`/`SendKey` execution
-locking it per write. Each write is already one atomic chunk under the lock, so interleaving can't corrupt a
-single write - what's still open is *policy*: when a human is typing and an agent also wants to inject, who
+The mechanism is already built: `Tap`'s pty-master writer is `Arc<Mutex<Box<dyn Write + Send>>>`, shared between
+the interactive-mode stdin-forwarding thread and `Command::Send`/`SendKey` (`architecture.md`), so a script's
+injected input and (in interactive mode) a human's own typing can't corrupt each other - each write is one
+atomic chunk under the lock. What's still open is *policy*, not mechanism: once something drives `Command`s
+live against a `Tap` that also has a human typing, when a human is typing and an agent also wants to inject, who
 goes first, and does one block the other? That needs a real answer from how this actually gets used, not a
 guessed-at default, and TF's answers don't resolve it since TF's use is batch-only with no human in the loop.
 
 ### Wait-for-predicate, beyond "text appears"
 
-`Command::WaitFor` as scoped above only checks for a substring. A live/interactive use might want an arbitrary
-predicate over a full `Snapshot` (cursor position, a mode, a cell's colour), not just text. Cheapest correct
-design when that's needed: pair `TapState`'s `Mutex` with a `Condvar`; `forward_output` calls `notify_all()`
-after each chunk's state update (already holds the lock there), and a general `wait_for` loops on
-`condvar.wait_timeout()` re-checking an arbitrary predicate - no polling. Masking volatile regions (a clock) for
-golden comparisons stays a separate, `Tap`-independent helper either way (see TinyFugue's answer 6).
+`Tap::wait_for_text`/`Command::WaitFor` only checks for a substring (built, `architecture.md`). A live/interactive
+use might eventually want an arbitrary predicate over a full `Snapshot` (cursor position, a mode, a cell's
+colour), not just text. The plumbing for that already exists too - `TapState`'s `Mutex` is already paired with a
+`Condvar` that `forward_output` notifies after every chunk - so generalizing just means accepting a closure
+instead of a fixed string, not new infrastructure. Not done because nothing's asked for it yet. Masking volatile
+regions (a clock) for golden comparisons stays a separate, `Tap`-independent helper either way (TinyFugue's
+answer 6).
 
 ### Wire protocol
 
@@ -134,8 +144,8 @@ not decided).
 ## Open decisions
 
 - **Protocol.** See "Wire protocol" above. Leaning Unix socket + line-delimited JSON, not decided.
-- **Input merging** when both a human and an agent can type. See "Input injection and merging policy" above - a
-  real policy decision, not yet made, and TF's batch-only use doesn't answer it.
+- **Input merging** when both a human and an agent can type. See "Input merging policy" above - a real policy
+  decision, not yet made, and TF's batch-only use doesn't answer it.
 - **One process per session, or a daemon managing several?** Not decided.
 - **Licence.** Not chosen. `publish = false` in `Cargo.toml` until it is.
 - **Whether the name `vtee` is free to use.** Not checked.
