@@ -161,27 +161,28 @@ by the user explicitly, in this order, after hardening:
    wire protocol (now decided: a Unix socket, settling that open decision too). Verified end to end: a snapshot
    query, a write-command rejection, a `wait_for` match, and multiple commands over one persistent connection,
    all against a real running session.
-3. **Full duplex** (scoped 2026-10-07, not built - see "Full duplex" below): splits into two genuinely different
-   cases once actually scoped out. One (3a) has no open question blocking it and could be built now; the other
-   (3b) is the real policy question and needs the user's call, not an engineering one, before it's built.
+3. **Full duplex**: splits into two genuinely different cases once actually scoped out. 3a is done; 3b is the
+   real policy question and still needs the user's call, not an engineering one, before it's built.
 
 ### Full duplex
 
 Splits into two cases that sound like one feature ("let a remote connection write too") but aren't, because only
 one of them has an open question attached to it.
 
-**3a. Remote-only control - no human competing, no policy question, buildable now.** When nothing else is
-writing to the pty (a headless session kept alive instead of exiting after a script, or an interactive session
-where no human happens to be typing at that moment), a `--connect` client writing has no one to collide with.
-This is HANDOFF.md §1's *second* use case, finally served live rather than only as a fixed batch script: "an AI
-agent see and drive a full-screen program." Mechanically almost free - `Tap::send_bytes`'s shared, lock-guarded
-writer already handles any number of concurrent callers without corruption (`architecture.md`); this is just
-lifting `Command::is_read_only()`'s gate for connections that asked for write access. New pieces: a server-side
-opt-in (`--listen <path> --writable`, default off - keeping today's read-only behaviour as the safe default and
-requiring an explicit flag to widen it matches this project's pattern everywhere else: `interactive` defaults to
-the narrower/safer behaviour too). `Resize` needs its own rule even here: if the session is *also* interactive
-with a human whose real terminal drives `watch_resize`, a remote `Resize` should lose or be rejected outright -
-there's only one real screen size that means anything once an actual human is looking at one.
+**3a. Remote-only control - no human competing.** ~~No policy question, buildable now~~ **Done, 2026-10-07**
+(`vtee --listen <path> --writable`, `Command::authorize`, `WritePolicy`, `architecture.md`). When nothing else
+is writing to the pty, a `--connect` client writing has no one to collide with. This is HANDOFF.md §1's *second*
+use case, finally served live rather than only as a fixed batch script: "an AI agent see and drive a full-screen
+program." Mechanically was almost free, as scoped: `Tap::send_bytes`'s shared, lock-guarded writer already
+handled any number of concurrent callers without corruption; this was lifting the gate for connections that
+asked for write access, behind a new server-side opt-in (`--writable`, default off, matching this project's
+pattern everywhere else of defaulting to the narrower/safer behaviour). `Resize` got its own rule as scoped: a
+remote `Resize` is rejected whenever the session is also interactive with a human whose real terminal drives
+`watch_resize` (`resize_owned_by_terminal` in `ServeOptions`, set from the same `is_terminal()` check
+`RawModeGuard` already uses) - there's only one real screen size that means anything once an actual human is
+looking at one. Verified end to end: write rejected without `--writable`, accepted with it (text appeared on
+screen), and a remote `Resize` actually changing the live session's size (80x24 to 100x40) when nothing else
+owned it.
 
 **3b. Human and remote both writing at once - the real open question.** Four shapes, not decided, genuinely the
 user's call rather than an engineering one since it depends on how this actually gets used:
@@ -206,18 +207,25 @@ user's call rather than an engineering one since it depends on how this actually
   Simplest of all, but drops the "both at once" scenario completely; might be the honest answer if that scenario
   turns out to be nobody's actual need and (a)/(b)/(c) are solving a problem nobody has.
 
-Leaning toward (b) - it fits "an agent watches/helps a human" as inherently cooperative rather than adversarial,
-matching how a human would expect to hand off control, without (c)'s timing fragility or (a)'s collision risk.
-Not a decision - stated as a recommendation to react to, not something to build from without confirming it.
+**Decided, 2026-10-07: not a single policy - all of (a)/(b)/(d) should be selectable modes** (the user's call,
+made explicitly: "I think those should all be options"). (c) stays excluded on its merits (the idle-detection
+fragility argument above still holds regardless of this), but which of the rest governs a given session is a
+per-invocation choice, not something this project bakes in once. This argues for shaping the mechanism as an
+enum of write-policy modes from the start, even though 3a (no competing human) only exercises the simplest one -
+so that 3b's remaining modes are additions to that enum later, not a rework of it.
 
-**Not new plumbing, whichever of 3b's options gets picked**: the write mechanism (`Tap::send_bytes`, the shared
-writer lock) already tolerates any number of concurrent callers; `Send`/`SendKey`/`Resize` already exist as
-`Command` variants. **New regardless of which option**: the `--writable` opt-in itself, whatever state tracks
-"who's allowed to write right now" (nothing, for (a); one `Option<ConnectionId>`, for (b); a last-write timestamp,
-for (c); a boolean mode switch, for (d)), and `Resize`'s own sub-rule once a human's terminal is in the picture.
+**Not new plumbing, whichever modes end up built**: the write mechanism (`Tap::send_bytes`, the shared writer
+lock) already tolerates any number of concurrent callers; `Send`/`SendKey`/`Resize` already exist as `Command`
+variants. **New regardless of which modes**: the mode selector itself, whatever state a given mode needs to track
+"who's allowed to write right now" (nothing, for free-for-all; one `Option<ConnectionId>`, for exclusive handoff;
+a boolean switch, for mutually-exclusive-with-the-human), and `Resize`'s own sub-rule once a human's terminal is
+in the picture.
 
-3a doesn't need 3b resolved first and could be built independently, the same way observation (stage 2) didn't
-need this question answered either - worth doing regardless of which way 3b eventually goes.
+3a didn't need 3b resolved first, the same way observation (stage 2) didn't need either question answered -
+`WritePolicy` already exists as the enum 3b's remaining modes extend, not rework (`WritePolicy::Open` is 3a's
+mode; `(a)` free-for-all above is actually the same mode reused once a human's also typing, since nothing about
+it is specific to there being no human - only `(b)` exclusive handoff and `(d)` mutually-exclusive need new
+variants).
 
 ### Wait-for-predicate, beyond "text appears"
 
@@ -247,11 +255,10 @@ not decided).
 
 ## Open decisions
 
-- **Input merging** when both a human and an agent can type (stage 3b, "Full duplex" above): free-for-all,
-  exclusive handoff, idle-based priority, or no simultaneous access at all. Leaning exclusive handoff, not
-  decided - the user's call, not an engineering one.
-- **Whether to build 3a (remote-only control, no human competing) now**, independent of 3b - it has no open
-  question blocking it.
+- **Input merging** when both a human and an agent can type (stage 3b, "Full duplex" above): decided that
+  free-for-all, exclusive handoff, and no-simultaneous-access should all be selectable modes rather than one
+  fixed policy (idle-based priority stays excluded on its merits). Not yet decided: the mode selector's actual
+  shape (a CLI flag, a per-connection protocol choice, something else) or which mode is the default.
 - **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
   fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
   pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.
