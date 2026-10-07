@@ -109,6 +109,31 @@ speculation. Not investigated further now, consistent with requirement 8 deferri
 **Decision: build on `portable-pty`.** Its Linux backend is solid and the issues found were in our own glue code,
 not the crate. The Windows gap is real but expected and explicitly out of scope until the Windows work starts.
 
+## 2026-10-07: "both screen buffers" (requirement 3) deferred - a verified `alacritty_terminal` API gap
+
+**Measured against the crate (0.26.0) and alacritty's own current upstream `main` branch** (not just assumed):
+there is no public way to read the inactive screen buffer's content without destroying it. `Term` exposes
+`grid()`/`grid_mut()` for the *active* buffer only; the one way to reach the other, `swap_alt()`, is not a safe
+peek. Traced through its actual logic: swapping from the primary screen onto the alternate one always resets
+the alternate buffer first (`self.inactive_grid.reset_region(..)`), matching real terminal behaviour (a DEC
+alternate screen always starts blank on entry) but meaning any "peek at alt" also wipes it. Worse, a "peek, then
+swap back" round trip isn't safe either: swapping back from a now-active primary screen onto the alternate one
+re-triggers that same reset branch, destroying whatever was genuinely sitting in the alternate buffer. There is
+no direction this is safe in every case, and no accessor that avoids `swap_alt()` entirely.
+
+Real options considered: (a) defer and document - `alacritty_terminal` simply doesn't expose this safely yet,
+same category of gap as the Windows ConPTY bug, not a flaw in this project's own code; (b) vendor a one-line
+local patch adding `pub fn inactive_grid(&self) -> &Grid<Cell>` (behaviour-free, low risk, but a fork to
+maintain); (c) reconstruct it ourselves by snapshotting before every chunk to catch the alt-screen transition,
+expensive and not something anyone has actually asked for yet.
+
+**Decision: defer (a), stay on upstream `alacritty_terminal` with no local patches.** TinyFugue's own answer on
+this (`roadmap.md`) was "I'll find out if it matters from a first snapshot" - which only needs the active buffer
+this project already exposes, not a confirmed present need for the inactive one. Keeping everything on the
+unmodified upstream crate avoids taking on a fork to maintain for a need that hasn't materialized. Revisit via
+the fork route (b) specifically - not (c) - if TF's first real snapshot shows TF actually uses the alternate
+screen and the main-screen content underneath genuinely needs inspecting.
+
 ## Open
 
 - **Protocol**, **input merging**, **licence**: unchanged from README's "Open decisions."

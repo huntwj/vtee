@@ -20,7 +20,8 @@ status to track per-requirement rather than as one blob.
    shape and visibility, active modes, both screen buffers, scroll regions, scrollback, title.
    **Mostly met.** Open gaps: blink is structurally absent from `alacritty_terminal` (accepted, see
    `decisions.md`); underline *styles* (curly/double, not just on/off) aren't distinguished in the snapshot yet;
-   **only the active screen buffer is exposed, not both** - the next thing to fix (`roadmap.md`).
+   **only the active screen buffer is exposed, not both** - deferred, 2026-10-07, a verified `alacritty_terminal`
+   API gap rather than something to build around right now (`decisions.md`, `roadmap.md`).
 4. **Synchronisation that does not rely on the screen going quiet.** A server may stream constantly. So: wait for
    a condition, synchronise on markers the test controls, snapshot "as of output byte N" so a query never sees a
    half-drawn frame, and mask volatile regions such as a clock.

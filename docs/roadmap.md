@@ -10,14 +10,13 @@ Spawn, bidirectional forward, resize, terminal restore on normal exit/panic, a s
 cursor, modes, offset, title, scrollback), a raw byte log, and replay - verified against the live snapshot for
 all 15 probe files (`tests/replay.rs`).
 
-## Hardening v0 (in progress, 2026-10-06)
+## Hardening v0
 
-Three concrete gaps found by actually testing, not yet closed:
-
-1. **Both screen buffers in the snapshot** (requirement 3). Currently `Snapshot` only reads `term.grid()` (the
-   active buffer); `alacritty_terminal` also tracks an inactive one. Needs exposing both, with a flag for which
-   is currently active (already have `alt_screen` for that). TinyFugue's own answer below confirms this is
-   needed, not just theoretically nice - they don't yet know if TF uses the alternate screen.
+1. ~~**Both screen buffers in the snapshot**~~ **Deferred, 2026-10-07** - not skipped, genuinely blocked: there's
+   no safe way to read `alacritty_terminal`'s inactive buffer without destroying it, verified against the crate
+   and alacritty's own upstream `main` (`decisions.md`). Revisit by vendoring a trivial local patch if TF's first
+   real snapshot shows TF actually uses the alternate screen and the content underneath needs inspecting - not
+   before, and not by any other workaround (the alternatives considered are worse than waiting).
 2. **`SIGTERM`-safe shutdown.** Catchable, straightforward: a signal handler (`signal_hook`, Unix) that disables
    raw mode before exiting, same as `RawModeGuard` already does for normal exit and panic unwind.
 3. **`SIGKILL`-safe terminal restoration.** `SIGKILL` cannot be caught by the dying process - no handler, no
