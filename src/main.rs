@@ -50,7 +50,7 @@ fn run_interactive(program: &str, rest: &[String], log_path: Option<&Path>) -> i
     let (cols, rows) = terminal_size();
     let opts = vtee::SpawnOptions { cols, rows, log_path, interactive: true };
 
-    let mut tap = match vtee::Tap::spawn(program, rest, opts) {
+    let tap = match vtee::Tap::spawn(program, rest, opts) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("vtee: failed to spawn {program}: {e}");
@@ -100,7 +100,7 @@ fn run_script(program: &str, rest: &[String], log_path: Option<&Path>, script_pa
     let (cols, rows) = terminal_size();
     let opts = vtee::SpawnOptions { cols, rows, log_path, interactive: false };
 
-    let mut tap = match vtee::Tap::spawn(program, rest, opts) {
+    let tap = match vtee::Tap::spawn(program, rest, opts) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("vtee: failed to spawn {program}: {e}");
