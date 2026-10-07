@@ -126,7 +126,24 @@ them (human/agent input merging; whether `WaitFor` needs to grow into a full arb
 just "text appears") are still open and still only matter once something drives this live. It does mean that
 work, whenever it happens, extends the same `Command` core rather than inventing a second one.
 
-## v1 (scoped, not built - the live/interactive half)
+## v1 (scoped, not built - the live/interactive half): crawl, walk, run
+
+TF is one real consumer, asking from a testing perspective; the user is the other, asking from a "connect and
+watch an active session" perspective (2026-10-07) - HANDOFF.md §1's third original use case ("letting an agent
+watch while a human uses one"), now with an actual stakeholder behind it rather than a speculative one. Staged
+by the user explicitly, in this order, after hardening:
+
+1. **Hardening** (above) - first, regardless of consumer.
+2. **Observation**: a separate process can connect to an already-running `Tap` and read live `snapshot`/
+   `wait_for` state. Read-only, so it needs the wire protocol below but *not* the input-merging policy question -
+   a pure watcher never writes, so there's nothing to merge.
+3. **Full duplex**: the watcher can also inject input (`send`/`send_key`) into the live session. This is where
+   the input-merging policy question (below) actually has to be answered, not deferred - a human at the real
+   terminal and a remote writer can now genuinely collide.
+
+Do not build 3 while scoping/building 2 - observation has a materially smaller design surface (no policy
+decision blocking it), and building it first is how "crawl, walk, run" stays true rather than becoming "walk
+while also quietly building run."
 
 ### Input merging policy
 
@@ -136,7 +153,8 @@ injected input and (in interactive mode) a human's own typing can't corrupt each
 atomic chunk under the lock. What's still open is *policy*, not mechanism: once something drives `Command`s
 live against a `Tap` that also has a human typing, when a human is typing and an agent also wants to inject, who
 goes first, and does one block the other? That needs a real answer from how this actually gets used, not a
-guessed-at default, and TF's answers don't resolve it since TF's use is batch-only with no human in the loop.
+guessed-at default, and neither consumer has resolved it yet: TF's use is batch-only with no human in the loop,
+and the user's "connect and watch" (stage 2) is read-only and doesn't exercise it either. Blocks stage 3 only.
 
 ### Wait-for-predicate, beyond "text appears"
 
