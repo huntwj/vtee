@@ -1,7 +1,7 @@
 # Decisions
 
-Dated, one-way-door choices. See `HANDOFF.md` for the research behind each and `README.md` for the requirements
-each is judged against.
+Dated, one-way-door choices. See `HANDOFF.md` for the research behind each, `requirements.md` for what each is
+judged against, and `architecture.md`/`roadmap.md` for how they turned into the current build and what's next.
 
 ## 2026-10-06: emulator crate is `alacritty_terminal`
 

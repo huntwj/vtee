@@ -1,0 +1,49 @@
+# Requirements
+
+What `vtee` has to do, and what it deliberately doesn't. See `roadmap.md` for what's built versus planned, and
+`architecture.md` for how the built parts work. Moved out of `README.md` 2026-10-06 once there was enough real
+status to track per-requirement rather than as one blob.
+
+## Must do
+
+1. **Driveable without a human, and also interactively.** Scriptable from CI inside a Linux container, and usable
+   by an agent across many calls. The process model (library, daemon, socket) is a trade-off, not a rule.
+   **Met for the non-interactive, in-process case** (`Tap` as a library). Not yet met for the "usable by an agent
+   across many calls" sense that implies an out-of-process protocol - that's v1 (`roadmap.md`).
+2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
+   256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
+   and combining characters. We should not cap the target at what one program uses today.
+   **Met**, inherited from `alacritty_terminal` (`decisions.md`) and exposed through `Tap::snapshot()`
+   (`architecture.md`). Mouse/paste reporting is tracked as mode *state* but there's no input path to actually
+   send mouse/paste sequences yet (v1).
+3. **Full state exposure.** Every cell attribute (including dim, italic, strikethrough, underline styles), cursor
+   shape and visibility, active modes, both screen buffers, scroll regions, scrollback, title.
+   **Mostly met.** Open gaps: blink is structurally absent from `alacritty_terminal` (accepted, see
+   `decisions.md`); underline *styles* (curly/double, not just on/off) aren't distinguished in the snapshot yet;
+   **only the active screen buffer is exposed, not both** - the next thing to fix (`roadmap.md`).
+4. **Synchronisation that does not rely on the screen going quiet.** A server may stream constantly. So: wait for
+   a condition, synchronise on markers the test controls, snapshot "as of output byte N" so a query never sees a
+   half-drawn frame, and mask volatile regions such as a clock.
+   **Half met.** The byte-offset-stamped, race-free snapshot exists (`Tap::snapshot()`, `TapState`). Wait-for-a-
+   condition, marker synchronisation and masking don't exist yet - all v1 (`roadmap.md`).
+5. **Raw-stream capture and replay.** Record the bytes the program wrote, and replay them into an emulator later,
+   so a golden test is "emulator state after these bytes" and timing drops out.
+   **Met.** `RawLog` (asciicast v2) + `replay()`, verified byte-for-byte against the live snapshot for all 15
+   probe files (`tests/replay.rs`).
+6. **Deterministic.** Control over size, `TERM`, environment, working directory, resize and timing.
+   **Mostly met**: size and working directory are controlled by `Tap::spawn`; resize is handled live
+   (`SIGWINCH`). **Not yet controlled**: `TERM` and arbitrary environment variables - `Tap::spawn` doesn't expose
+   a way to set them on the child yet, so it inherits ours. Timing is irrelevant to replay (by design) but not
+   yet controllable for the live tap itself (no artificial delay/throttling, not clear it's needed).
+7. **Transparent observer mode.** The human keeps their own terminal and sees exactly what they would without the
+   tool. Output is forwarded raw; the emulator only watches.
+   **Met.** Raw bidirectional forwarding, `RawModeGuard` for the human's own terminal mode, confirmed not to alter
+   anything forwarded (the emulator reads a copy, never the original bytes).
+8. **Linux now, Windows later** (ConPTY).
+   **Linux: met.** **Windows: blocked on an upstream bug** (`wezterm/wezterm#7025`), not just unimplemented -
+   see `decisions.md`.
+
+## Not goals, for now
+
+Writing a terminal emulator from scratch (reuse one - done, `alacritty_terminal`), panes and windows, a status
+bar, or being a general `tmux` replacement.
