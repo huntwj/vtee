@@ -34,8 +34,17 @@ pub fn resolve(name: &str, app_cursor_mode: bool) -> Option<Vec<u8>> {
             if let Some(c) = name.strip_prefix("Ctrl-") {
                 ctrl_byte(c)?
             } else if let Some(c) = name.strip_prefix("Alt-") {
+                // Exactly one character, same as `Ctrl-` - "Alt-ab" isn't a key, and silently
+                // sending ESC+'a'+'b' for it would be a worse failure mode than rejecting it.
+                let mut chars = c.chars();
+                let ch = chars.next()?;
+                if chars.next().is_some() {
+                    return None;
+                }
+                let mut buf = [0u8; 4];
+                let encoded = ch.encode_utf8(&mut buf);
                 let mut v = vec![0x1b];
-                v.extend(c.as_bytes());
+                v.extend(encoded.as_bytes());
                 v
             } else {
                 return None;
@@ -95,5 +104,7 @@ mod tests {
         assert_eq!(resolve("Banana", false), None);
         assert_eq!(resolve("Ctrl-", false), None);
         assert_eq!(resolve("Ctrl-ab", false), None);
+        assert_eq!(resolve("Alt-", false), None);
+        assert_eq!(resolve("Alt-ab", false), None);
     }
 }
