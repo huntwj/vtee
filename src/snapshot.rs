@@ -6,12 +6,12 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use vte::ansi::Color as AnsiColor;
 
 use crate::ObserverListener;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Color {
     Default,
     Indexed(u8),
@@ -28,7 +28,7 @@ fn convert_color(c: AnsiColor) -> Color {
 
 /// One screen cell. `ch` already includes any combining marks `alacritty_terminal` stores
 /// separately via `Cell::zerowidth()` - callers never need to know about that split.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     pub ch: String,
     pub fg: Color,
@@ -45,7 +45,7 @@ pub struct Cell {
     pub hyperlink: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
     Block,
     Underline,
@@ -54,7 +54,7 @@ pub enum CursorShape {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cursor {
     pub row: i32,
     pub col: usize,
@@ -65,7 +65,7 @@ pub struct Cursor {
 /// The full state of a tap's screen as of `byte_offset` bytes of child output. Two snapshots
 /// built from the same byte offset (e.g. one live, one replayed from the raw log) should be
 /// identical - that's what makes a golden test out of this stable.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub byte_offset: u64,
     pub cols: usize,
@@ -78,7 +78,7 @@ pub struct Snapshot {
     /// Active DEC private modes, as their conventional string form (e.g. `"?1000"` for mouse
     /// click reporting, `"DECKPAM"` for application keypad) - the same vocabulary used
     /// throughout this project's probes and decisions.
-    pub modes: Vec<&'static str>,
+    pub modes: Vec<String>,
     pub alt_screen: bool,
     pub title: Option<String>,
     /// Scrolled-off rows, oldest first, text only (cell-level scrollback detail is not
@@ -125,21 +125,21 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     }
 
     let mode = *term.mode();
-    let mut modes = Vec::new();
+    let mut modes: Vec<String> = Vec::new();
     if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
-        modes.push("?1000");
+        modes.push("?1000".to_string());
     }
     if mode.contains(TermMode::SGR_MOUSE) {
-        modes.push("?1006");
+        modes.push("?1006".to_string());
     }
     if mode.contains(TermMode::BRACKETED_PASTE) {
-        modes.push("?2004");
+        modes.push("?2004".to_string());
     }
     if mode.contains(TermMode::APP_CURSOR) {
-        modes.push("?1");
+        modes.push("?1".to_string());
     }
     if mode.contains(TermMode::APP_KEYPAD) {
-        modes.push("DECKPAM");
+        modes.push("DECKPAM".to_string());
     }
 
     let cursor_point = grid.cursor.point;

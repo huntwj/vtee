@@ -122,7 +122,10 @@ pub struct Tap {
     child: Mutex<Box<dyn Child + Send + Sync>>,
     shared: SharedState,
     title: ObserverListener,
-    output_done: Receiver<()>,
+    // `Receiver` is `Send` but not `Sync` - wrapped for the same reason `child` is: `Arc<Tap>`
+    // (observation, `Tap::serve`) needs every field to be `Sync`, not just usable from one
+    // thread at a time the way a bare `Receiver` is.
+    output_done: Mutex<Receiver<()>>,
 }
 
 impl Tap {
@@ -173,6 +176,7 @@ impl Tap {
 
         let master = Arc::new(Mutex::new(pair.master));
         let child = Mutex::new(child);
+        let output_done = Mutex::new(output_done);
         Ok(Tap { master, writer, child, shared, title, output_done })
     }
 
@@ -203,7 +207,7 @@ impl Tap {
     /// might run concurrently with a blocked `wait()` in the future.
     pub fn wait(&self) -> io::Result<ExitStatus> {
         let status = self.child.lock().unwrap().wait().map_err(to_io_error)?;
-        let _ = self.output_done.recv_timeout(Duration::from_millis(500));
+        let _ = self.output_done.lock().unwrap().recv_timeout(Duration::from_millis(500));
         Ok(status)
     }
 
@@ -341,6 +345,68 @@ impl Tap {
     pub fn watch_sigterm(&self) {
         // TODO(requirement 8): Windows has no SIGTERM; the nearest equivalent is a console
         // control event, not yet handled.
+    }
+
+    /// Observation (`docs/roadmap.md`, "connect and watch"): bind a Unix domain socket at
+    /// `path` and, for each connection, read `Command`s as newline-delimited JSON - the exact
+    /// same format the batch CLI reads from a script file - and write one `CommandResult` line
+    /// back per `Snapshot`/`WaitFor`/`WaitMs`. Read-only by design right now: anything that
+    /// isn't (`Command::is_read_only`) gets a `CommandResult::Error` instead of ever reaching
+    /// `execute`, since a watcher injecting input is stage 3 ("full duplex"), not this stage.
+    ///
+    /// Takes `Arc<Tap>` rather than `&self`, because the accept loop and every per-connection
+    /// handler need to outlive this call and run concurrently with whatever the caller does
+    /// next (`Tap::wait()` in `main.rs`'s case) - an ordinary borrow couldn't outlive that.
+    /// Binding happens synchronously, so a bad path fails loudly here rather than silently in
+    /// a background thread; removes a stale socket file at `path` first, since `UnixListener::
+    /// bind` otherwise fails if a previous run left one behind (e.g. after a `SIGKILL`).
+    #[cfg(unix)]
+    pub fn serve(tap: Arc<Tap>, path: &Path) -> io::Result<()> {
+        let _ = std::fs::remove_file(path);
+        let listener = std::os::unix::net::UnixListener::bind(path)?;
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let tap = tap.clone();
+                thread::spawn(move || serve_connection(&tap, stream));
+            }
+        });
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn serve(_tap: Arc<Tap>, _path: &Path) -> io::Result<()> {
+        // TODO(requirement 8): named pipes are the Windows equivalent of a Unix domain socket;
+        // not yet done.
+        Err(io::Error::new(io::ErrorKind::Unsupported, "observation (--listen) needs Unix"))
+    }
+}
+
+#[cfg(unix)]
+fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream) {
+    let Ok(reader_stream) = stream.try_clone() else { return };
+    let reader = io::BufReader::new(reader_stream);
+    let mut writer = stream;
+    for line in io::BufRead::lines(reader) {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let result = match serde_json::from_str::<Command>(&line) {
+            Err(e) => CommandResult::Error { message: format!("bad command: {e}") },
+            Ok(cmd) if !cmd.is_read_only() => CommandResult::Error {
+                message: "write commands aren't available yet - observation is read-only (docs/roadmap.md)".to_string(),
+            },
+            Ok(cmd) => match cmd.execute(tap) {
+                Ok(Some(result)) => result,
+                Ok(None) => continue, // WaitMs: nothing to report, same as the batch CLI
+                Err(e) => CommandResult::Error { message: e.to_string() },
+            },
+        };
+        let Ok(text) = serde_json::to_string(&result) else { continue };
+        if writeln!(writer, "{text}").is_err() {
+            break;
+        }
     }
 }
 

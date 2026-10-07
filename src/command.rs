@@ -40,15 +40,29 @@ pub enum Command {
 }
 
 /// What a command that produces output looks like on the wire - one of these per line for
-/// every `snapshot` or `wait_for` command, nothing for the others.
-#[derive(Debug, Serialize)]
+/// every `snapshot` or `wait_for` command, nothing for the others. `Error` is only ever
+/// produced by a driver (e.g. `Tap::serve`'s connection handler), never by `execute` itself -
+/// a long-lived connection needs to report a bad command inline and keep going, where the
+/// batch CLI's `execute` contract is "the caller decides what a failure means" (it treats one
+/// as fatal to the whole script, `main.rs`).
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum CommandResult {
     Snapshot { snapshot: Snapshot },
     WaitFor { matched: bool, snapshot: Snapshot },
+    Error { message: String },
 }
 
 impl Command {
+    /// Whether this command only reads state - never injects input or changes the pty's size.
+    /// Used by `Tap::serve` (observation, `docs/roadmap.md`) to reject write commands until
+    /// full duplex is built: a pure watcher has no business sending them, and the mechanism to
+    /// do so safely (shared writer lock, already built) isn't the same as the *policy* question
+    /// of when a remote writer should be allowed to, which is still unresolved.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, Command::Snapshot | Command::WaitFor { .. } | Command::WaitMs { .. })
+    }
+
     pub fn execute(&self, tap: &Tap) -> io::Result<Option<CommandResult>> {
         match self {
             Command::Send { text } => {
