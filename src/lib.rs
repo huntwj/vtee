@@ -10,7 +10,7 @@ mod keys;
 mod log;
 pub mod snapshot;
 
-pub use command::{Command, CommandResult};
+pub use command::{Command, CommandResult, WritePolicy};
 pub use log::{RawLog, replay};
 pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot};
 
@@ -347,12 +347,14 @@ impl Tap {
         // control event, not yet handled.
     }
 
-    /// Observation (`docs/roadmap.md`, "connect and watch"): bind a Unix domain socket at
-    /// `path` and, for each connection, read `Command`s as newline-delimited JSON - the exact
-    /// same format the batch CLI reads from a script file - and write one `CommandResult` line
-    /// back per `Snapshot`/`WaitFor`/`WaitMs`. Read-only by design right now: anything that
-    /// isn't (`Command::is_read_only`) gets a `CommandResult::Error` instead of ever reaching
-    /// `execute`, since a watcher injecting input is stage 3 ("full duplex"), not this stage.
+    /// Observation and (stage 3a) remote control (`docs/roadmap.md`, "connect and watch" /
+    /// "Full duplex"): bind a Unix domain socket at `path` and, for each connection, read
+    /// `Command`s as newline-delimited JSON - the exact same format the batch CLI reads from a
+    /// script file - and write one `CommandResult` line back per `Snapshot`/`WaitFor`/
+    /// `WaitMs`/(if `opts.write_policy` allows it) `Send`/`SendKey`/`Resize`. Every command is
+    /// checked against `opts` via `Command::authorize` before ever reaching `execute` - a
+    /// rejection becomes a `CommandResult::Error`, not a dropped connection, so a client can
+    /// keep going after one denied command.
     ///
     /// Takes `Arc<Tap>` rather than `&self`, because the accept loop and every per-connection
     /// handler need to outlive this call and run concurrently with whatever the caller does
@@ -361,29 +363,46 @@ impl Tap {
     /// a background thread; removes a stale socket file at `path` first, since `UnixListener::
     /// bind` otherwise fails if a previous run left one behind (e.g. after a `SIGKILL`).
     #[cfg(unix)]
-    pub fn serve(tap: Arc<Tap>, path: &Path) -> io::Result<()> {
+    pub fn serve(tap: Arc<Tap>, path: &Path, opts: ServeOptions) -> io::Result<()> {
         let _ = std::fs::remove_file(path);
         let listener = std::os::unix::net::UnixListener::bind(path)?;
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let tap = tap.clone();
-                thread::spawn(move || serve_connection(&tap, stream));
+                thread::spawn(move || serve_connection(&tap, stream, opts));
             }
         });
         Ok(())
     }
 
     #[cfg(not(unix))]
-    pub fn serve(_tap: Arc<Tap>, _path: &Path) -> io::Result<()> {
+    pub fn serve(_tap: Arc<Tap>, _path: &Path, _opts: ServeOptions) -> io::Result<()> {
         // TODO(requirement 8): named pipes are the Windows equivalent of a Unix domain socket;
         // not yet done.
         Err(io::Error::new(io::ErrorKind::Unsupported, "observation (--listen) needs Unix"))
     }
 }
 
+/// `Tap::serve`'s policy knobs. `Copy` and small on purpose - it's cloned into every
+/// per-connection thread (`serve_connection`).
+#[derive(Clone, Copy)]
+pub struct ServeOptions {
+    pub write_policy: WritePolicy,
+    /// Whether the real terminal (if any) is actively managing the pty's size via
+    /// `Tap::watch_resize` - see `Command::authorize`. `main.rs` sets this from the same
+    /// `is_terminal()` check `RawModeGuard`/`watch_resize` already act on.
+    pub resize_owned_by_terminal: bool,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        ServeOptions { write_policy: WritePolicy::ReadOnly, resize_owned_by_terminal: false }
+    }
+}
+
 #[cfg(unix)]
-fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream) {
+fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: ServeOptions) {
     let Ok(reader_stream) = stream.try_clone() else { return };
     let reader = io::BufReader::new(reader_stream);
     let mut writer = stream;
@@ -394,13 +413,13 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream) {
         }
         let result = match serde_json::from_str::<Command>(&line) {
             Err(e) => CommandResult::Error { message: format!("bad command: {e}") },
-            Ok(cmd) if !cmd.is_read_only() => CommandResult::Error {
-                message: "write commands aren't available yet - observation is read-only (docs/roadmap.md)".to_string(),
-            },
-            Ok(cmd) => match cmd.execute(tap) {
-                Ok(Some(result)) => result,
-                Ok(None) => continue, // WaitMs: nothing to report, same as the batch CLI
-                Err(e) => CommandResult::Error { message: e.to_string() },
+            Ok(cmd) => match cmd.authorize(opts.write_policy, opts.resize_owned_by_terminal) {
+                Err(message) => CommandResult::Error { message },
+                Ok(()) => match cmd.execute(tap) {
+                    Ok(Some(result)) => result,
+                    Ok(None) => continue, // WaitMs/Send/SendKey/Resize: nothing to report
+                    Err(e) => CommandResult::Error { message: e.to_string() },
+                },
             },
         };
         let Ok(text) = serde_json::to_string(&result) else { continue };

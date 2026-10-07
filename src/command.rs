@@ -53,14 +53,43 @@ pub enum CommandResult {
     Error { message: String },
 }
 
+/// How a `Tap::serve` connection may write, if at all (`docs/roadmap.md`, "Full duplex"). An
+/// enum to grow into, not a single bool: the user decided the remaining policies (exclusive
+/// "take the pen" handoff, mutually-exclusive-with-the-human) should all be selectable modes
+/// rather than this project picking one fixed answer, so this type is where those land later -
+/// only the modes stage 3a actually needs (no human competing) exist so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritePolicy {
+    /// No `Send`/`SendKey`/`Resize` at all - observation's (stage 2) original behaviour, and
+    /// the default.
+    ReadOnly,
+    /// Any connected writer may inject at any time, no arbitration between writers. Only sound
+    /// when nothing else is also writing (stage 3a) - once a human is also typing (stage 3b),
+    /// this is one of several modes to choose from, not the only option.
+    Open,
+}
+
 impl Command {
-    /// Whether this command only reads state - never injects input or changes the pty's size.
-    /// Used by `Tap::serve` (observation, `docs/roadmap.md`) to reject write commands until
-    /// full duplex is built: a pure watcher has no business sending them, and the mechanism to
-    /// do so safely (shared writer lock, already built) isn't the same as the *policy* question
-    /// of when a remote writer should be allowed to, which is still unresolved.
-    pub fn is_read_only(&self) -> bool {
-        matches!(self, Command::Snapshot | Command::WaitFor { .. } | Command::WaitMs { .. })
+    /// Whether `self` is allowed under `policy`, given whether the real terminal (if any) is
+    /// actively managing the pty's size via `Tap::watch_resize`. `Resize` is checked against
+    /// that independently of `policy`: a remote resize would fight with a human's own terminal
+    /// resizing the session regardless of which write policy is otherwise in effect, since
+    /// there's only one real screen size that means anything once a human is looking at one.
+    pub fn authorize(&self, policy: WritePolicy, resize_owned_by_terminal: bool) -> Result<(), String> {
+        match self {
+            Command::Snapshot | Command::WaitFor { .. } | Command::WaitMs { .. } => Ok(()),
+            Command::Resize { .. } if resize_owned_by_terminal => {
+                Err("resize is controlled by the real terminal on this session - a remote resize would fight with it"
+                    .to_string())
+            }
+            Command::Send { .. } | Command::SendKey { .. } | Command::Resize { .. } => match policy {
+                WritePolicy::ReadOnly => {
+                    Err("write commands aren't allowed on this connection - start the server with --writable"
+                        .to_string())
+                }
+                WritePolicy::Open => Ok(()),
+            },
+        }
     }
 
     pub fn execute(&self, tap: &Tap) -> io::Result<Option<CommandResult>> {

@@ -26,12 +26,17 @@ fn main() -> ExitCode {
     let log_path = take_path_flag(&mut args, "--log");
     let script_path = take_path_flag(&mut args, "--script");
     let listen_path = take_path_flag(&mut args, "--listen");
+    // Stage 3a ("Full duplex", `docs/roadmap.md`): opt-in, default off, matching this project's
+    // pattern everywhere else of defaulting to the narrower/safer behaviour. Meaningless
+    // without `--listen`, so no separate validation for that - `--writable` alone just does
+    // nothing.
+    let writable = take_switch(&mut args, "--writable");
 
     let args: &[String] = if args.first().map(String::as_str) == Some("--") { &args[1..] } else { &args[..] };
 
     let Some((program, rest)) = args.split_first() else {
         eprintln!(
-            "usage: vtee [--log <path>] [--listen <path>] [--] <command> [args...]\n       \
+            "usage: vtee [--log <path>] [--listen <path> [--writable]] [--] <command> [args...]\n       \
              vtee --script <path> [--text] [--log <path>] [--] <command> [args...]\n       \
              vtee --connect <path> [--text]"
         );
@@ -44,7 +49,7 @@ fn main() -> ExitCode {
     // `Tap` is still alive would skip its child-killing `Drop` and orphan the child.
     match script_path {
         Some(script_path) => run_script(program, rest, log_path.as_deref(), &script_path, text_mode),
-        None => run_interactive(program, rest, log_path.as_deref(), listen_path.as_deref()),
+        None => run_interactive(program, rest, log_path.as_deref(), listen_path.as_deref(), writable),
     }
 }
 
@@ -68,7 +73,13 @@ fn terminal_size() -> (u16, u16) {
     (80, 24)
 }
 
-fn run_interactive(program: &str, rest: &[String], log_path: Option<&Path>, listen_path: Option<&Path>) -> ExitCode {
+fn run_interactive(
+    program: &str,
+    rest: &[String],
+    log_path: Option<&Path>,
+    listen_path: Option<&Path>,
+    writable: bool,
+) -> ExitCode {
     let (cols, rows) = terminal_size();
     let opts = vtee::SpawnOptions { cols, rows, log_path, interactive: true };
 
@@ -83,16 +94,27 @@ fn run_interactive(program: &str, rest: &[String], log_path: Option<&Path>, list
         }
     };
 
+    // The same check `RawModeGuard`/`watch_resize` act on: if there's a real terminal here,
+    // it's the one real screen size that means anything, so a remote `Resize` would just fight
+    // with it (`Command::authorize`, `docs/roadmap.md`).
+    let resize_owned_by_terminal = std::io::stdin().is_terminal();
+
     let _raw_guard = vtee::RawModeGuard::new();
     tap.watch_resize();
     tap.watch_sigterm();
 
     if let Some(path) = listen_path {
-        if let Err(e) = vtee::Tap::serve(tap.clone(), path) {
+        let write_policy = if writable { vtee::WritePolicy::Open } else { vtee::WritePolicy::ReadOnly };
+        let serve_opts = vtee::ServeOptions { write_policy, resize_owned_by_terminal };
+        if let Err(e) = vtee::Tap::serve(tap.clone(), path, serve_opts) {
             eprintln!("vtee: --listen failed: {e}");
             return exit_code(exitcode::OSERR);
         }
-        eprintln!("vtee: listening for observers at {}", path.display());
+        eprintln!(
+            "vtee: listening for {} at {}",
+            if writable { "observers (writable)" } else { "observers (read-only)" },
+            path.display()
+        );
     }
 
     let status = tap.wait();
