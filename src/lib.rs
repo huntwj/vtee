@@ -10,12 +10,13 @@ mod keys;
 mod log;
 pub mod snapshot;
 
-pub use command::{Command, CommandResult, WritePolicy};
+pub use command::{Command, CommandResult, HumanPriority, WritePolicy};
 pub use log::{RawLog, replay};
 pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot};
 
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -94,25 +95,70 @@ struct Shared {
 type SharedState = Arc<Shared>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
-/// How to spawn a [`Tap`]. `interactive` is the one switch between this project's two modes
-/// (`docs/roadmap.md`): a human at a real terminal (forward both ways, raw), or a script
-/// driving `Command`s with nothing forwarded automatically.
+/// Backs `WritePolicy::Exclusive` (`docs/roadmap.md`, "Full duplex" stage 3b): at most one
+/// connection ID may hold write access at a time. A field, not a per-connection value, because
+/// it has to be shared across the accept loop's per-connection threads *and* (when
+/// `HumanPriority::Participant`) the interactive stdin-forwarding thread - created once per
+/// `Tap`, inert (never checked) unless `Tap::serve` is actually called with `Exclusive`.
+#[derive(Default)]
+struct ExclusiveLock {
+    holder: Mutex<Option<u64>>,
+}
+
+impl ExclusiveLock {
+    fn try_acquire(&self, id: u64) -> bool {
+        let mut holder = self.holder.lock().unwrap();
+        match *holder {
+            Some(_) => false,
+            None => {
+                *holder = Some(id);
+                true
+            }
+        }
+    }
+
+    fn release_if_held_by(&self, id: u64) {
+        let mut holder = self.holder.lock().unwrap();
+        if *holder == Some(id) {
+            *holder = None;
+        }
+    }
+
+    fn is_held_by(&self, id: u64) -> bool {
+        *self.holder.lock().unwrap() == Some(id)
+    }
+
+    /// `HumanPriority::Participant`: a keystroke always revokes whoever currently holds it,
+    /// human or not - reacting to a real event (a byte arrived) rather than inferring "idle
+    /// enough" the way `WritePolicy`'s rejected idle-based option would have.
+    fn revoke(&self) {
+        *self.holder.lock().unwrap() = None;
+    }
+}
+
+/// How to spawn a [`Tap`]. `forward_input`/`forward_output` are independent switches
+/// (`docs/roadmap.md`, "Full duplex" stage 3b, mode (d)): the usual interactive case sets both,
+/// the batch CLI sets neither, and a session that wants a human to *watch* without being able
+/// to *type* (so a remote `--connect` client has the pty to itself) sets only `forward_output`.
 pub struct SpawnOptions<'a> {
     pub cols: u16,
     pub rows: u16,
     pub log_path: Option<&'a Path>,
-    pub interactive: bool,
+    /// Forward our own stdin to the child (a human's keystrokes, requirement 7).
+    pub forward_input: bool,
+    /// Forward the child's raw output to our own stdout (a human's view, requirement 7).
+    pub forward_output: bool,
 }
 
 impl Default for SpawnOptions<'_> {
     fn default() -> Self {
-        SpawnOptions { cols: 80, rows: 24, log_path: None, interactive: true }
+        SpawnOptions { cols: 80, rows: 24, log_path: None, forward_input: true, forward_output: true }
     }
 }
 
 /// A running tap: a child spawned in a pty, with a copy of its output feeding an in-memory
-/// terminal emulator, and (when `SpawnOptions::interactive`) forwarded both ways to our own
-/// real stdin/stdout.
+/// terminal emulator, and (per `SpawnOptions::forward_input`/`forward_output`) forwarded to our
+/// own real stdin/stdout.
 pub struct Tap {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: SharedWriter,
@@ -126,6 +172,13 @@ pub struct Tap {
     // (observation, `Tap::serve`) needs every field to be `Sync`, not just usable from one
     // thread at a time the way a bare `Receiver` is.
     output_done: Mutex<Receiver<()>>,
+    exclusive_lock: Arc<ExclusiveLock>,
+    // Set by `Tap::serve` when (and only when) it's called with `WritePolicy::Exclusive {
+    // human_priority: HumanPriority::Participant }` - read by the stdin-forwarding thread
+    // (spawned well before `serve` is ever called, so this can't just be a constructor
+    // argument) to decide whether to revoke `exclusive_lock` after each chunk it forwards.
+    human_revokes_lock: Arc<AtomicBool>,
+    next_connection_id: Arc<AtomicU64>,
 }
 
 impl Tap {
@@ -161,23 +214,39 @@ impl Tap {
         let (done_tx, output_done) = mpsc::channel();
         {
             let shared = shared.clone();
-            let write_raw = opts.interactive;
+            let write_raw = opts.forward_output;
             thread::spawn(move || {
                 forward_output(&mut reader, shared, log, write_raw);
                 let _ = done_tx.send(());
             });
         }
 
+        let exclusive_lock = Arc::new(ExclusiveLock::default());
+        let human_revokes_lock = Arc::new(AtomicBool::new(false));
+
         let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer().map_err(to_io_error)?));
-        if opts.interactive {
+        if opts.forward_input {
             let writer = writer.clone();
-            thread::spawn(move || forward_input(writer));
+            let exclusive_lock = exclusive_lock.clone();
+            let human_revokes_lock = human_revokes_lock.clone();
+            thread::spawn(move || forward_input(writer, exclusive_lock, human_revokes_lock));
         }
 
         let master = Arc::new(Mutex::new(pair.master));
         let child = Mutex::new(child);
         let output_done = Mutex::new(output_done);
-        Ok(Tap { master, writer, child, shared, title, output_done })
+        let next_connection_id = Arc::new(AtomicU64::new(1));
+        Ok(Tap {
+            master,
+            writer,
+            child,
+            shared,
+            title,
+            output_done,
+            exclusive_lock,
+            human_revokes_lock,
+            next_connection_id,
+        })
     }
 
     /// Resize the child's pty and the emulator together, so they never disagree about the
@@ -364,6 +433,14 @@ impl Tap {
     /// bind` otherwise fails if a previous run left one behind (e.g. after a `SIGKILL`).
     #[cfg(unix)]
     pub fn serve(tap: Arc<Tap>, path: &Path, opts: ServeOptions) -> io::Result<()> {
+        // Only `Exclusive { human_priority: Participant }` ever wants a keystroke to revoke a
+        // remote holder (`forward_input`, spawned long before this call, reads this flag on
+        // every chunk) - explicitly set either way rather than only ever turning it on, so a
+        // second `serve` call with a different policy can't leave a stale `true` behind.
+        let participant =
+            matches!(opts.write_policy, WritePolicy::Exclusive { human_priority: HumanPriority::Participant });
+        tap.human_revokes_lock.store(participant, Ordering::Relaxed);
+
         let _ = std::fs::remove_file(path);
         let listener = std::os::unix::net::UnixListener::bind(path)?;
         thread::spawn(move || {
@@ -403,6 +480,7 @@ impl Default for ServeOptions {
 
 #[cfg(unix)]
 fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: ServeOptions) {
+    let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let Ok(reader_stream) = stream.try_clone() else { return };
     let reader = io::BufReader::new(reader_stream);
     let mut writer = stream;
@@ -415,10 +493,29 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
             Err(e) => CommandResult::Error { message: format!("bad command: {e}") },
             Ok(cmd) => match cmd.authorize(opts.write_policy, opts.resize_owned_by_terminal) {
                 Err(message) => CommandResult::Error { message },
-                Ok(()) => match cmd.execute(tap) {
-                    Ok(Some(result)) => result,
-                    Ok(None) => continue, // WaitMs/Send/SendKey/Resize: nothing to report
-                    Err(e) => CommandResult::Error { message: e.to_string() },
+                // `authorize` only checked that `AcquireWrite`/`ReleaseWrite`/`Send`/`SendKey`/
+                // `Resize` are structurally reachable under `Exclusive` - whether *this*
+                // connection currently holds the lock is this function's job, since `authorize`
+                // has no notion of which connection is asking.
+                Ok(()) => match cmd {
+                    Command::AcquireWrite => {
+                        CommandResult::WriteAccess { acquired: tap.exclusive_lock.try_acquire(id) }
+                    }
+                    Command::ReleaseWrite => {
+                        tap.exclusive_lock.release_if_held_by(id);
+                        CommandResult::WriteAccess { acquired: false }
+                    }
+                    Command::Send { .. } | Command::SendKey { .. } | Command::Resize { .. }
+                        if matches!(opts.write_policy, WritePolicy::Exclusive { .. })
+                            && !tap.exclusive_lock.is_held_by(id) =>
+                    {
+                        CommandResult::Error { message: "write access not held - send acquire_write first".to_string() }
+                    }
+                    _ => match cmd.execute(tap) {
+                        Ok(Some(result)) => result,
+                        Ok(None) => continue, // WaitMs/Send/SendKey/Resize: nothing to report
+                        Err(e) => CommandResult::Error { message: e.to_string() },
+                    },
                 },
             },
         };
@@ -427,6 +524,10 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
             break;
         }
     }
+    // However this connection ends - a clean `release_write`, just closing it, a write
+    // failure above - it must not be left holding the lock forever (`docs/roadmap.md`:
+    // auto-released on disconnect). A no-op if it never held it, or already released it.
+    tap.exclusive_lock.release_if_held_by(id);
 }
 
 /// A safety net, not the primary cleanup path: whatever causes a `Tap` to be dropped -
@@ -469,7 +570,7 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
     }
 }
 
-fn forward_input(writer: SharedWriter) {
+fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human_revokes_lock: Arc<AtomicBool>) {
     let mut stdin = io::stdin();
     let mut buf = [0u8; 4096];
     loop {
@@ -477,11 +578,19 @@ fn forward_input(writer: SharedWriter) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        let mut w = writer.lock().unwrap();
-        if w.write_all(&buf[..n]).is_err() {
-            break;
+        // A human's own typing is never delayed or blocked by `WritePolicy::Exclusive` - see
+        // `HumanPriority`'s doc comment - so this writes first, unconditionally, and only
+        // *afterward* decides whether that keystroke should also revoke a remote holder.
+        {
+            let mut w = writer.lock().unwrap();
+            if w.write_all(&buf[..n]).is_err() {
+                break;
+            }
+            let _ = w.flush();
         }
-        let _ = w.flush();
+        if human_revokes_lock.load(Ordering::Relaxed) {
+            exclusive_lock.revoke();
+        }
     }
 }
 
