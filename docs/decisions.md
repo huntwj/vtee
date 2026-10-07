@@ -84,14 +84,27 @@ a running tap mid-command caused no crash, deadlock, or error.
   apart in time. `Tap::wait()` no longer blocks on that EOF; it waits up to 500ms via a channel and moves on
   regardless, so a platform where that EOF is delayed or absent can't hang `wait()` forever.
 
-**Windows (ConPTY): not usable from this MSYS2/Git-Bash host, cause not yet isolated.** Spawning even a
-no-argument, no-output native binary (`whoami.exe`) through `portable-pty`'s ConPTY backend from this host
-consistently exits with `STATUS_CONTROL_C_EXIT` (`0xC000013A`) within milliseconds, never producing the program's
-real output - only ConPTY's own injected startup/teardown sequences (`win32-input-mode` query, focus tracking,
-etc.) were seen. This looks like a console-control-event quirk of driving ConPTY from an MSYS2 terminal rather
-than a bug in the tap's logic (the same code path works cleanly on Linux), but that's not confirmed - it needs
-testing from a native Windows terminal (cmd.exe, PowerShell, Windows Terminal) to tell apart "MSYS2-specific" from
-"a real portable-pty/ConPTY bug." Not investigated further now, consistent with requirement 8 deferring Windows.
+**Windows (ConPTY): not usable, and it is not an MSYS2/Git-Bash artifact.** Spawning even a no-argument,
+no-output native binary (`whoami.exe`) through `portable-pty`'s ConPTY backend consistently exits with
+`STATUS_CONTROL_C_EXIT` (`0xC000013A`) within milliseconds, never producing the program's real output - only
+ConPTY's own injected startup/teardown sequences (`win32-input-mode` query, focus tracking, etc.) were seen.
+**Measured 2026-10-06 from genuine PowerShell** (not through this session's Bash tool/MSYS2): identical failure,
+byte-for-byte, ruling out the MSYS2-hosting theory entirely.
+
+This is a known, open, upstream bug, not something ours: **[wezterm/wezterm#7025](https://github.com/wezterm/wezterm/issues/7025)**,
+"Portably pty fails to launch commands on windows," filed against the same crate with the same trivial `whoami`
+repro and the same exit code, unresolved, zero comments, and reported as machine-dependent (the reporter's
+colleagues don't see it on their machines) - consistent with what we saw. Reading `portable-pty` 0.9.0's actual
+`CreateProcessW` call (`src/win/pseudocon.rs`, confirmed unchanged on wezterm's unreleased main branch too, so
+there's no newer release to upgrade to that fixes this): the creation flags are only
+`EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT` - **no `CREATE_NEW_PROCESS_GROUP`**. Without that flag
+a spawned child inherits the parent's process group, and Windows delivers console-control events (Ctrl+C/Break)
+by process-group membership, not strictly by which console a process is visibly attached to - so even though
+ConPTY attaches the child to its own hidden console, a break event aimed at the parent (or generated during
+normal console setup/teardown) can still reach it. Plausible explanation for the machine-dependence too: whatever
+makes one machine's ambient console/process-group state trigger this and not another's would vary host to host.
+Not confirmed by a patched build - that would be the next step if this gets picked up, not read-the-source
+speculation. Not investigated further now, consistent with requirement 8 deferring Windows.
 
 **Decision: build on `portable-pty`.** Its Linux backend is solid and the issues found were in our own glue code,
 not the crate. The Windows gap is real but expected and explicitly out of scope until the Windows work starts.
