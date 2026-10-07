@@ -152,17 +152,21 @@ watch an active session" perspective (2026-10-07) - HANDOFF.md §1's third origi
 watch while a human uses one"), now with an actual stakeholder behind it rather than a speculative one. Staged
 by the user explicitly, in this order, after hardening:
 
-1. **Hardening** (above) - first, regardless of consumer.
-2. **Observation**: a separate process can connect to an already-running `Tap` and read live `snapshot`/
-   `wait_for` state. Read-only, so it needs the wire protocol below but *not* the input-merging policy question -
-   a pure watcher never writes, so there's nothing to merge.
-3. **Full duplex**: the watcher can also inject input (`send`/`send_key`) into the live session. This is where
-   the input-merging policy question (below) actually has to be answered, not deferred - a human at the real
-   terminal and a remote writer can now genuinely collide.
-
-Do not build 3 while scoping/building 2 - observation has a materially smaller design surface (no policy
-decision blocking it), and building it first is how "crawl, walk, run" stays true rather than becoming "walk
-while also quietly building run."
+1. ~~**Hardening**~~ **Done, 2026-10-07** (above) - first, regardless of consumer.
+2. ~~**Observation**~~ **Done, 2026-10-07** (`vtee --listen <path>` / `vtee --connect <path>`,
+   `architecture.md`): a separate process connects to an already-running `Tap` and reads live `snapshot`/
+   `wait_for`/`wait_ms` state over a Unix domain socket, driving the exact same `Command` JSON the batch CLI
+   reads from a script file. `Send`/`SendKey`/`Resize` are rejected with a clear error rather than ever reaching
+   `execute` - read-only by design, so this didn't need the input-merging policy question below at all, only the
+   wire protocol (now decided: a Unix socket, settling that open decision too). Verified end to end: a snapshot
+   query, a write-command rejection, a `wait_for` match, and multiple commands over one persistent connection,
+   all against a real running session.
+3. **Full duplex** (not built): the watcher can also inject input (`send`/`send_key`) into the live session.
+   This is where the input-merging policy question (below) actually has to be answered, not deferred - a human
+   at the real terminal and a remote writer can now genuinely collide. The mechanism (`Tap::send_bytes`'s shared,
+   lock-guarded writer) already exists and already serves both the batch CLI and interactive stdin forwarding
+   without conflict - stage 3 is "allow a *third* writer (a remote `--connect` client) at the same time," which
+   is a policy decision about priority, not new plumbing.
 
 ### Input merging policy
 
@@ -187,11 +191,12 @@ answer 6).
 
 ### Wire protocol
 
-What carries live `Command`s/`Snapshot`s between processes. Leaning Unix domain socket with line-delimited JSON
-(what `ht` does, and what the `Command` design above already assumes) - a Python client needs nothing but
-`socket` + `json`. Considered and set aside: stdio-based JSON-RPC (conflicts with stdin/stdout already being
-raw-forwarding channels, would need its own fd for no clear win); HTTP/WebSocket (more flexible than anything
-here needs yet). Not decided. Windows equivalent (named pipes) is later, same as ConPTY itself.
+~~What carries live `Command`s/`Snapshot`s between processes.~~ **Decided and built, 2026-10-07**: a Unix domain
+socket with line-delimited JSON (what `ht` does, and what the `Command` design above already assumed) -
+`Tap::serve`/`vtee --connect`, `architecture.md`. Considered and set aside: stdio-based JSON-RPC (conflicts
+with stdin/stdout already being raw-forwarding channels, would need its own fd for no clear win); HTTP/WebSocket
+(more flexible than anything here needs). Windows equivalent (named pipes) is still later, same as ConPTY itself
+- `Tap::serve` returns an explicit "needs Unix" error there rather than silently doing nothing.
 
 ## Later
 
@@ -202,9 +207,11 @@ not decided).
 
 ## Open decisions
 
-- **Protocol.** See "Wire protocol" above. Leaning Unix socket + line-delimited JSON, not decided.
 - **Input merging** when both a human and an agent can type. See "Input merging policy" above - a real policy
-  decision, not yet made, and TF's batch-only use doesn't answer it.
-- **One process per session, or a daemon managing several?** Not decided.
+  decision, not yet made, and neither consumer's use so far (TF's batch, the user's read-only observation)
+  exercises it.
+- **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
+  fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
+  pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.
 - **Licence.** Not chosen. `publish = false` in `Cargo.toml` until it is.
 - **Whether the name `vtee` is free to use.** Not checked.
