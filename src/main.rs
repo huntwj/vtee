@@ -26,17 +26,21 @@ fn main() -> ExitCode {
     let log_path = take_path_flag(&mut args, "--log");
     let script_path = take_path_flag(&mut args, "--script");
     let listen_path = take_path_flag(&mut args, "--listen");
-    // Stage 3a ("Full duplex", `docs/roadmap.md`): opt-in, default off, matching this project's
-    // pattern everywhere else of defaulting to the narrower/safer behaviour. Meaningless
-    // without `--listen`, so no separate validation for that - `--writable` alone just does
-    // nothing.
-    let writable = take_switch(&mut args, "--writable");
+    // Stage 3a/3b ("Full duplex", `docs/roadmap.md`): opt-in, default `None` (read-only),
+    // matching this project's pattern everywhere else of defaulting to the narrower/safer
+    // behaviour. Meaningless without `--listen`, so no separate validation for that.
+    let write_policy = take_writable_flag(&mut args);
+    // Stage 3b mode (d): a human can watch (output still forwarded) without being able to type
+    // (input isn't), so a `--connect --writable` client has the pty to itself. Independent of
+    // `write_policy` on purpose - `--no-stdin` without `--writable` just means nobody can type.
+    let no_stdin = take_switch(&mut args, "--no-stdin");
 
     let args: &[String] = if args.first().map(String::as_str) == Some("--") { &args[1..] } else { &args[..] };
 
     let Some((program, rest)) = args.split_first() else {
         eprintln!(
-            "usage: vtee [--log <path>] [--listen <path> [--writable]] [--] <command> [args...]\n       \
+            "usage: vtee [--log <path>] [--listen <path> [--writable[=open|exclusive|exclusive-shared]]] \
+             [--no-stdin] [--] <command> [args...]\n       \
              vtee --script <path> [--text] [--log <path>] [--] <command> [args...]\n       \
              vtee --connect <path> [--text]"
         );
@@ -49,7 +53,7 @@ fn main() -> ExitCode {
     // `Tap` is still alive would skip its child-killing `Drop` and orphan the child.
     match script_path {
         Some(script_path) => run_script(program, rest, log_path.as_deref(), &script_path, text_mode),
-        None => run_interactive(program, rest, log_path.as_deref(), listen_path.as_deref(), writable),
+        None => run_interactive(program, rest, log_path.as_deref(), listen_path.as_deref(), write_policy, no_stdin),
     }
 }
 
@@ -78,10 +82,11 @@ fn run_interactive(
     rest: &[String],
     log_path: Option<&Path>,
     listen_path: Option<&Path>,
-    writable: bool,
+    write_policy: Option<vtee::WritePolicy>,
+    no_stdin: bool,
 ) -> ExitCode {
     let (cols, rows) = terminal_size();
-    let opts = vtee::SpawnOptions { cols, rows, log_path, interactive: true };
+    let opts = vtee::SpawnOptions { cols, rows, log_path, forward_input: !no_stdin, forward_output: true };
 
     // `Arc` even when `--listen` isn't given: `Tap::serve` needs one, and every method it
     // would otherwise need `&Tap` for already takes `&self`, so this costs one allocation and
@@ -96,7 +101,8 @@ fn run_interactive(
 
     // The same check `RawModeGuard`/`watch_resize` act on: if there's a real terminal here,
     // it's the one real screen size that means anything, so a remote `Resize` would just fight
-    // with it (`Command::authorize`, `docs/roadmap.md`).
+    // with it (`Command::authorize`, `docs/roadmap.md`). `no_stdin` doesn't change this - the
+    // terminal can still be real and still own resize even if we're not forwarding typing to it.
     let resize_owned_by_terminal = std::io::stdin().is_terminal();
 
     let _raw_guard = vtee::RawModeGuard::new();
@@ -104,17 +110,13 @@ fn run_interactive(
     tap.watch_sigterm();
 
     if let Some(path) = listen_path {
-        let write_policy = if writable { vtee::WritePolicy::Open } else { vtee::WritePolicy::ReadOnly };
+        let write_policy = write_policy.unwrap_or(vtee::WritePolicy::ReadOnly);
         let serve_opts = vtee::ServeOptions { write_policy, resize_owned_by_terminal };
         if let Err(e) = vtee::Tap::serve(tap.clone(), path, serve_opts) {
             eprintln!("vtee: --listen failed: {e}");
             return exit_code(exitcode::OSERR);
         }
-        eprintln!(
-            "vtee: listening for {} at {}",
-            if writable { "observers (writable)" } else { "observers (read-only)" },
-            path.display()
-        );
+        eprintln!("vtee: listening for observers ({write_policy:?}) at {}", path.display());
     }
 
     let status = tap.wait();
@@ -162,7 +164,7 @@ fn run_script(
     text_mode: bool,
 ) -> ExitCode {
     let (cols, rows) = terminal_size();
-    let opts = vtee::SpawnOptions { cols, rows, log_path, interactive: false };
+    let opts = vtee::SpawnOptions { cols, rows, log_path, forward_input: false, forward_output: false };
 
     let tap = match vtee::Tap::spawn(program, rest, opts) {
         Ok(t) => t,
@@ -322,6 +324,10 @@ fn print_text(out: &mut impl Write, result: &vtee::CommandResult) {
             let _ = writeln!(out, "--- error: {message} ---");
             return;
         }
+        vtee::CommandResult::WriteAccess { acquired } => {
+            let _ = writeln!(out, "--- write_access acquired={acquired} ---");
+            return;
+        }
     };
     let _ = writeln!(out, "--- {label} (byte_offset={}) ---", snapshot.byte_offset);
     for line in &snapshot.lines {
@@ -353,4 +359,25 @@ fn take_switch(args: &mut Vec<String>, flag: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// `--writable` (bare, meaning `WritePolicy::Open`) or `--writable=<mode>`
+/// (`exclusive`/`exclusive-shared`) - a single `=`-joined token, not `--writable <mode>` as two
+/// separate arguments the way `take_path_flag`'s flags work, specifically to avoid "is the next
+/// token this flag's value or the program name" ambiguity that an optional value taken from a
+/// second argument would otherwise have (`--listen x --writable cat` - is `cat` the mode or the
+/// program?).
+fn take_writable_flag(args: &mut Vec<String>) -> Option<vtee::WritePolicy> {
+    let pos = args.iter().position(|a| a == "--writable" || a.starts_with("--writable="))?;
+    let arg = args.remove(pos);
+    let value = arg.strip_prefix("--writable=");
+    Some(match value {
+        None | Some("open") => vtee::WritePolicy::Open,
+        Some("exclusive") => vtee::WritePolicy::Exclusive { human_priority: vtee::HumanPriority::AlwaysWins },
+        Some("exclusive-shared") => vtee::WritePolicy::Exclusive { human_priority: vtee::HumanPriority::Participant },
+        Some(other) => {
+            eprintln!("vtee: --writable={other} isn't a known mode (try: open, exclusive, exclusive-shared)");
+            std::process::exit(exitcode::USAGE);
+        }
+    })
 }
