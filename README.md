@@ -7,8 +7,9 @@ memory, and lets a script or an AI agent query it and (later) send input, while 
 their own terminal as usual. Think of it as `tee` for a TUI: the stream is copied without disturbing the original,
 but the copy is a screen you can query, not raw bytes.
 
-**Status: nothing implemented yet.** This README is the plan. The name is a working name. `HANDOFF.md` has the
-research, the context from TinyFugue, decisions made and not made, and working conventions: read it before starting.
+**Status: v0's tap exists** (spawn, bidirectional forward, resize, restore terminal on exit) but not its snapshot
+API, raw byte log or replay yet. The name is a working name. `HANDOFF.md` has the research, the context from
+TinyFugue, decisions made and not made, and working conventions: read it before starting.
 
 ## Why
 
@@ -56,11 +57,13 @@ thin live-watching tap.
   requirements 2 and 3 (`docs/decisions.md` has the evidence). `avt`, `vte` and `termwiz` were ruled out: `avt`
   confirmed (from source) to expose no mouse/paste/keypad mode state, no title, no OSC 8 and no cursor shape; `vte`
   and `termwiz` are parsers, not emulators, and would need a VT100+ state machine built and maintained from scratch.
+- **pty crate: `portable-pty`**, decided 2026-10-06 by building v0's tap on it and running all 15 probe files plus
+  a `SIGWINCH` resize check through a real Linux pty (`docs/decisions.md` has the detail). Confirmed working on
+  Linux; the Windows (ConPTY) backend hit a `STATUS_CONTROL_C_EXIT` under an MSYS2/Git-Bash host that needs real
+  Windows testing to characterize, consistent with requirement 8 treating Windows as later work.
 
 ## Open decisions
 
-- **pty crate.** `portable-pty` is the obvious candidate for requirement 8, not yet measured against a real
-  spawn/forward/resize loop.
 - **Protocol.** Probably line-delimited JSON over a Unix socket first, like `ht`.
 - **Input merging** when both a human and an agent can type.
 - **Licence.** Not chosen. `publish = false` in `Cargo.toml` until it is.

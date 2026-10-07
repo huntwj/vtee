@@ -61,8 +61,41 @@ don't distinguish underline *styles* even though `alacritty_terminal`'s `Flags::
 more than one. Bell (`bl`) isn't tested at all despite being in TinyFugue's own termcap list (HANDOFF §3). None of
 these are blockers; they're candidates for probe_eval.py additions if a real gap bites later.
 
+## 2026-10-06: pty crate is `portable-pty`
+
+**Measured**, by building v0's tap on it (`src/lib.rs`: `Tap::spawn`/`resize`/`wait`/`watch_resize`) and running it
+for real, not just reading its docs.
+
+**Linux (the target platform for v0, requirement 8): works.** All 15 probe files (`T1`-`T14`, `T7` split into
+`T7a`/`T7b`) run through a real pty via `cat T*.bin < /dev/null` inside a `rust:slim` container, forwarding
+correctly to stdout and producing the same `alacritty_terminal` state as the direct-feed probes in the emulator
+decision above (confirmed by eye against `probe_eval.py`'s expected rows for T1, T5, T6, T7a/T7b, T9, T14; sizes
+differ from the canonical 40x12 for tests not explicitly sized, which is expected). Two `SIGWINCH` signals sent to
+a running tap mid-command caused no crash, deadlock, or error.
+
+**Two real bugs found and fixed by actually running it, not by reading the API:**
+- `alacritty_terminal::Term` panics (`index out of bounds: the len is 0`) on a 0x0 grid. `crossterm::terminal::size()`
+  genuinely reports `0x0` when stdout is a tty that hasn't negotiated a real size yet (observed via
+  `docker run -t` without `-i`) - a real, reachable condition, not a hypothetical. Fixed with a hard floor
+  (`cols.max(1)`, `rows.max(1)`) in `Tap::spawn`/`resize`, and by treating a `0x0` read as "no usable size" (skip
+  the resize, or fall back to 80x24) at the two call sites that read the ambient terminal size.
+- The output-forwarding thread's `read()` on the pty master doesn't necessarily return EOF just because the child
+  process has exited - `child.wait()` and "the master's reader gets EOF" are two different events that can be far
+  apart in time. `Tap::wait()` no longer blocks on that EOF; it waits up to 500ms via a channel and moves on
+  regardless, so a platform where that EOF is delayed or absent can't hang `wait()` forever.
+
+**Windows (ConPTY): not usable from this MSYS2/Git-Bash host, cause not yet isolated.** Spawning even a
+no-argument, no-output native binary (`whoami.exe`) through `portable-pty`'s ConPTY backend from this host
+consistently exits with `STATUS_CONTROL_C_EXIT` (`0xC000013A`) within milliseconds, never producing the program's
+real output - only ConPTY's own injected startup/teardown sequences (`win32-input-mode` query, focus tracking,
+etc.) were seen. This looks like a console-control-event quirk of driving ConPTY from an MSYS2 terminal rather
+than a bug in the tap's logic (the same code path works cleanly on Linux), but that's not confirmed - it needs
+testing from a native Windows terminal (cmd.exe, PowerShell, Windows Terminal) to tell apart "MSYS2-specific" from
+"a real portable-pty/ConPTY bug." Not investigated further now, consistent with requirement 8 deferring Windows.
+
+**Decision: build on `portable-pty`.** Its Linux backend is solid and the issues found were in our own glue code,
+not the crate. The Windows gap is real but expected and explicitly out of scope until the Windows work starts.
+
 ## Open
 
-- **pty crate.** `portable-pty` is still the candidate named in README/HANDOFF, not yet measured against a real
-  spawn/forward/resize loop. First v0 implementation work will settle this empirically.
 - **Protocol**, **input merging**, **licence**: unchanged from README's "Open decisions."

@@ -50,8 +50,11 @@ Notes pages in `~/ai/mud/site/src/content/docs/`: `workflow/testing.md` (test de
   wait-for-predicate, later MCP, Windows and multiple sessions.
 - **Emulator crate decided 2026-10-06: `alacritty_terminal`.** See `docs/decisions.md` for the measured comparison
   against `avt`, `vte` and `termwiz`, plus follow-up checks (chunked-feed equivalence, malformed-input robustness).
-- **Not decided**: pty crate (`portable-pty` is the candidate, unmeasured), wire protocol, how to merge human and
-  agent input, licence.
+- **pty crate decided 2026-10-06: `portable-pty`.** Built v0's tap on it; works on Linux (all 15 probe files
+  through a real pty, survives `SIGWINCH`), found and fixed two real bugs in the process (zero-size grid panic,
+  an EOF-doesn't-always-follow-child-exit assumption). Windows (ConPTY) isn't usable from this MSYS2/Git-Bash host
+  yet, cause not isolated - see `docs/decisions.md`.
+- **Not decided**: wire protocol, how to merge human and agent input, licence.
 
 ## 3. What TinyFugue needs from a terminal
 
@@ -152,7 +155,12 @@ real behaviour of every wait primitive (read from help text only).
 
 1. ~~**Choose the emulator by measuring.**~~ **Done, 2026-10-06.** `docs/decisions.md` has the comparison and the
    follow-up chunked-feed/garbage-input checks. `alacritty_terminal` won.
-2. **The tap.** Spawn, forward both ways, restore the terminal on exit, handle resize.
+2. ~~**The tap.** Spawn, forward both ways, restore the terminal on exit, handle resize.~~ **Done, 2026-10-06** on
+   Linux (`src/lib.rs`, `Tap`): spawns via `portable-pty`, forwards both ways, feeds a copy of the child's output
+   into `alacritty_terminal`, restores the real terminal's mode on exit (`RawModeGuard`), watches `SIGWINCH`.
+   Windows not working yet from this host - see `docs/decisions.md`. Still missing from this step, deferred to 3:
+   a real way to query the emulator (`snapshot_lines()` is a debug stand-in, not the real API) and a true
+   `kill -9`/`SIGTERM`-safe terminal restoration (only normal exit and panic-unwind are covered).
 3. **The snapshot API** (cells, attributes, cursor, modes, offset) and the raw byte log.
 4. **Replay.** Rebuild a snapshot from a log, and check it matches the live one.
 5. **Tests that need no TinyFugue**: run `cat` on sequence files, and add conformance cases. Only after the crate works
