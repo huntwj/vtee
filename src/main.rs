@@ -1,11 +1,24 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut log_path: Option<PathBuf> = None;
+    if let Some(pos) = args.iter().position(|a| a == "--log") {
+        if pos + 1 >= args.len() {
+            eprintln!("vtee: --log needs a path argument");
+            std::process::exit(2);
+        }
+        let path = args.remove(pos + 1);
+        args.remove(pos);
+        log_path = Some(PathBuf::from(path));
+    }
+
     let args: &[String] = if args.first().map(String::as_str) == Some("--") { &args[1..] } else { &args[..] };
 
     let Some((program, rest)) = args.split_first() else {
-        eprintln!("usage: vtee [--] <command> [args...]");
+        eprintln!("usage: vtee [--log <path>] [--] <command> [args...]");
         std::process::exit(2);
     };
 
@@ -21,7 +34,7 @@ fn main() {
         (80, 24)
     };
 
-    let mut tap = match vtee::Tap::spawn(program, rest, cols, rows) {
+    let mut tap = match vtee::Tap::spawn(program, rest, cols, rows, log_path.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("vtee: failed to spawn {program}: {e}");
@@ -37,15 +50,20 @@ fn main() {
 
     match status {
         Ok(status) => {
+            let snap = tap.snapshot();
             eprintln!(
                 "\n--- vtee: child exited (success={}, exit_code={}), {} bytes seen ---",
                 status.success(),
                 status.exit_code(),
-                tap.bytes_seen()
+                snap.byte_offset
             );
-            for (i, line) in tap.snapshot_lines().iter().enumerate() {
+            for (i, line) in snap.lines.iter().enumerate() {
                 eprintln!("{i:2}: {line:?}");
             }
+            eprintln!(
+                "cursor={:?} modes={:?} alt_screen={} title={:?}",
+                snap.cursor, snap.modes, snap.alt_screen, snap.title
+            );
         }
         Err(e) => eprintln!("vtee: error waiting for child: {e}"),
     }
