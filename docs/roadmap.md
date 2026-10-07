@@ -196,7 +196,11 @@ user's call rather than an engineering one since it depends on how this actually
   before `Send`/`SendKey` are accepted; the server tracks one current holder, auto-released on disconnect. New
   protocol: an `AcquireWrite`/`ReleaseWrite` pair of `Command` variants, reusing `CommandResult::Error` for a
   denied request. Matches how pair-programming/screen-sharing tools usually handle "who's driving" - whoever
-  asked first keeps it until they let go.
+  asked first keeps it until they let go. **Has its own sub-setting, also decided to be a choice rather than one
+  fixed answer (2026-10-07)**: does the human's own typing ever need to hold this same lock, or does it always
+  pass through unconditionally regardless of who (if anyone) currently holds it? `WritePolicy::Exclusive` carries
+  a `HumanPriority` (`AlwaysWins` - the lock only arbitrates among remote clients, the human is never gated; or
+  `Participant` - the human is just another holder that can be preempted) rather than picking one.
 - **(c) Human always wins.** A remote write is only accepted when the interactive stdin-forwarding thread hasn't
   seen a byte in the last N ms - an idle-based heuristic. **Not recommended**: this is the same shape of fragile
   primitive requirement 4 already rejected for *output* ("wait until the screen settles is the wrong primitive")
@@ -208,11 +212,14 @@ user's call rather than an engineering one since it depends on how this actually
   turns out to be nobody's actual need and (a)/(b)/(c) are solving a problem nobody has.
 
 **Decided, 2026-10-07: not a single policy - all of (a)/(b)/(d) should be selectable modes** (the user's call,
-made explicitly: "I think those should all be options"). (c) stays excluded on its merits (the idle-detection
-fragility argument above still holds regardless of this), but which of the rest governs a given session is a
-per-invocation choice, not something this project bakes in once. This argues for shaping the mechanism as an
-enum of write-policy modes from the start, even though 3a (no competing human) only exercises the simplest one -
-so that 3b's remaining modes are additions to that enum later, not a rework of it.
+made explicitly: "I think those should all be options"), and the same goes one level deeper for (b)'s own
+`HumanPriority` sub-setting ("I think that's just one more setting/option, right?"). (c) stays excluded on its
+merits (the idle-detection fragility argument above still holds regardless of this), but everything else that
+sounds like a single policy call turns out to be a choice to expose, not a default to pick - this project settles
+into "make it a setting" as its default answer to this category of question. This argues for shaping the
+mechanism as an enum of write-policy modes from the start, even though 3a (no competing human) only exercises
+the simplest one - so that 3b's remaining modes, and their own sub-settings, are additions to that enum later,
+not a rework of it.
 
 **Not new plumbing, whichever modes end up built**: the write mechanism (`Tap::send_bytes`, the shared writer
 lock) already tolerates any number of concurrent callers; `Send`/`SendKey`/`Resize` already exist as `Command`
@@ -257,8 +264,10 @@ not decided).
 
 - **Input merging** when both a human and an agent can type (stage 3b, "Full duplex" above): decided that
   free-for-all, exclusive handoff, and no-simultaneous-access should all be selectable modes rather than one
-  fixed policy (idle-based priority stays excluded on its merits). Not yet decided: the mode selector's actual
-  shape (a CLI flag, a per-connection protocol choice, something else) or which mode is the default.
+  fixed policy, and that exclusive handoff's own `HumanPriority` (always-wins vs. the human as just another
+  participant) is likewise a setting, not a built-in answer (idle-based priority stays excluded on its merits
+  either way). Not yet decided: the mode/setting selector's actual shape (a CLI flag's value syntax, a
+  per-connection protocol choice, something else) or which mode and which `HumanPriority` are the defaults.
 - **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
   fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
   pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.
