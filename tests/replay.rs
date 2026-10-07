@@ -23,7 +23,8 @@ fn replay_matches_live_for_every_probe() {
         assert!(bin.exists(), "missing probe file {}", bin.display());
         let log_path = dir.join(format!("{name}.cast"));
 
-        let mut tap = vtee::Tap::spawn(cat_path(), &[bin.to_string_lossy().into_owned()], COLS, ROWS, Some(&log_path))
+        let opts = vtee::SpawnOptions { cols: COLS, rows: ROWS, log_path: Some(&log_path), interactive: false };
+        let mut tap = vtee::Tap::spawn(cat_path(), &[bin.to_string_lossy().into_owned()], opts)
             .unwrap_or_else(|e| panic!("{name}: spawn failed: {e}"));
 
         let status = tap.wait().unwrap_or_else(|e| panic!("{name}: wait failed: {e}"));

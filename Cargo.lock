@@ -675,6 +675,7 @@ dependencies = [
  "alacritty_terminal",
  "crossterm",
  "portable-pty",
+ "serde",
  "serde_json",
  "signal-hook 0.4.5",
  "vte",
