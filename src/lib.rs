@@ -302,6 +302,37 @@ impl Tap {
         // TODO(requirement 8): Windows resize watching (ConPTY has no SIGWINCH equivalent;
         // needs polling console size or a console resize event).
     }
+
+    /// Catch `SIGTERM` and clean up before exiting: restore the real terminal's mode if it was
+    /// changed (a safe no-op if it wasn't - `crossterm::disable_raw_mode` already checks),
+    /// kill the child, then exit. Unlike `SIGKILL` (see `RawModeGuard`'s watchdog), `SIGTERM` is
+    /// catchable, so no second process is needed here - this just makes sure something actually
+    /// catches it, since the default disposition (terminate, no cleanup) would otherwise leave
+    /// the terminal in whatever state raw mode left it in. Uses `ChildKiller::clone_killer`
+    /// rather than `Tap::kill`, specifically so this can run from its own thread without needing
+    /// `&mut Tap` - the thread that owns that may be blocked in `Tap::wait()` when the signal
+    /// arrives.
+    #[cfg(unix)]
+    pub fn watch_sigterm(&self) {
+        use signal_hook::consts::SIGTERM;
+        use signal_hook::iterator::Signals;
+
+        let mut killer = self.child.clone_killer();
+        let Ok(mut signals) = Signals::new([SIGTERM]) else { return };
+        thread::spawn(move || {
+            if signals.forever().next().is_some() {
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = killer.kill();
+                std::process::exit(143); // 128 + SIGTERM, the conventional shell-visible code
+            }
+        });
+    }
+
+    #[cfg(not(unix))]
+    pub fn watch_sigterm(&self) {
+        // TODO(requirement 8): Windows has no SIGTERM; the nearest equivalent is a console
+        // control event, not yet handled.
+    }
 }
 
 /// A safety net, not the primary cleanup path: whatever causes a `Tap` to be dropped -
@@ -364,19 +395,52 @@ fn to_io_error(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+#[cfg(unix)]
+type WatchdogHandle = std::os::unix::net::UnixStream;
+#[cfg(not(unix))]
+type WatchdogHandle = ();
+
 /// Puts our own controlling terminal into raw mode for the life of the guard, so keystrokes
 /// reach the child unmodified (requirement 7), and restores it on drop - including on panic
 /// unwind, so a bug in vtee doesn't leave the human's shell broken. A no-op when stdin isn't
 /// a real terminal (CI/scripted use, requirement 1), since raw mode doesn't apply there.
+///
+/// Also spawns a watchdog process (Unix; `requirement 8` defers Windows) that restores the
+/// terminal even if this process is killed with `SIGKILL`, which cannot be caught - no handler,
+/// no exception, a Unix guarantee, not a gap in this code. The technique: a `UnixStream::pair()`
+/// socketpair, one end given to the watchdog as its stdin, the other (`_watchdog` below) held
+/// here for the guard's lifetime. When this process dies for *any* reason - including `-9` -
+/// the OS closes all its file descriptors, including its end of that pair, with no cooperation
+/// needed from the dying process; the watchdog's blocking read on its stdin returns EOF, and it
+/// restores the terminal and exits. The same thing happens on a clean drop, just not because of
+/// a crash - harmless, restoring already-sane settings is a no-op in practice.
+///
+/// Measured, not assumed, that this can't just call `crossterm::terminal::disable_raw_mode()`
+/// from the watchdog: that function only works by remembering the pre-raw termios in a
+/// process-local static that `enable_raw_mode` populated - the watchdog is a different process
+/// that never called `enable_raw_mode`, so its copy of that static is empty, and
+/// `disable_raw_mode` silently no-ops instead of touching the terminal. First version of this
+/// did exactly that and the terminal measurably stayed raw after a real `SIGKILL` test. Fixed by
+/// capturing the real termios ourselves (`libc::tcgetattr`) before enabling raw mode, and
+/// sending those bytes to the watchdog over the same socket, so it can restore the exact prior
+/// state independently of crossterm's in-process memory.
 pub struct RawModeGuard {
     active: bool,
+    _watchdog: Option<WatchdogHandle>,
 }
 
 impl RawModeGuard {
     pub fn new() -> Self {
         use std::io::IsTerminal;
-        let active = io::stdin().is_terminal() && crossterm::terminal::enable_raw_mode().is_ok();
-        RawModeGuard { active }
+        let is_tty = io::stdin().is_terminal();
+        #[cfg(unix)]
+        let original_termios = if is_tty { capture_termios() } else { None };
+        let active = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
+        #[cfg(unix)]
+        let _watchdog = if active { spawn_tty_watchdog(original_termios) } else { None };
+        #[cfg(not(unix))]
+        let _watchdog = None;
+        RawModeGuard { active, _watchdog }
     }
 }
 
@@ -392,4 +456,86 @@ impl Drop for RawModeGuard {
             let _ = crossterm::terminal::disable_raw_mode();
         }
     }
+}
+
+#[cfg(unix)]
+fn capture_termios() -> Option<libc::termios> {
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut termios) == 0 { Some(termios) } else { None }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_tty_watchdog(original_termios: Option<libc::termios>) -> Option<WatchdogHandle> {
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+
+    let original_termios = original_termios?;
+    let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().ok()?;
+
+    // Sent first, read first (`run_tty_guard`) - the watchdog needs this before it can do
+    // anything, so write it before the dead-man's-switch end of this socket is even relevant.
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            (&original_termios as *const libc::termios).cast::<u8>(),
+            std::mem::size_of::<libc::termios>(),
+        )
+    };
+    ours.write_all(bytes).ok()?;
+
+    let exe = std::env::current_exe().ok()?;
+    std::process::Command::new(exe)
+        .arg("--internal-tty-guard")
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    Some(ours)
+}
+
+/// The watchdog process's own entry point. `main.rs` calls this immediately, before anything
+/// else, when invoked with `--internal-tty-guard` - the hidden argument `spawn_tty_watchdog`
+/// passes when it re-execs the same binary. Reads the termios snapshot `spawn_tty_watchdog`
+/// sent first, then blocks on the same stdin until it sees EOF (see `RawModeGuard`'s doc comment
+/// for why that's the right signal and why this can't just call `crossterm::disable_raw_mode`),
+/// and applies that snapshot to `/dev/tty` with `libc::tcsetattr`.
+///
+/// `/dev/tty` is opened *immediately*, before waiting for EOF, and the resulting fd is held
+/// rather than reopened afterward - measured, not assumed, that the reopen-after approach
+/// doesn't work: opening `/dev/tty` after the main process (the session leader) has died
+/// returns `ENXIO`, because POSIX disassociates the controlling terminal from a session once
+/// its leader exits, even though the watchdog itself is still alive and part of that session.
+/// An already-open fd from before that happens keeps working for `tcsetattr` regardless.
+///
+/// Also measured, not assumed: an earlier version without the `SIGHUP` guard below lost a
+/// different race and never got this far at all. The watchdog inherits the same controlling
+/// terminal and (unless moved) the same foreground process group as the main process, and when
+/// a session leader holding a controlling terminal dies, the kernel sends `SIGHUP` to that group
+/// - which killed the watchdog itself, by default, before it ever saw the pipe's EOF.
+/// Registering `SIGHUP` with `signal_hook` (even though nothing reads from the resulting
+/// `Signals`) replaces that default disposition, the same mechanism `watch_resize`/
+/// `watch_sigterm` use for their own signals - keeping the registration alive for the rest of
+/// this function is what matters, not consuming it.
+#[cfg(unix)]
+pub fn run_tty_guard() -> ! {
+    let _sighup_guard = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP]);
+    let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty");
+
+    let mut stdin = io::stdin();
+    let mut termios_bytes = [0u8; std::mem::size_of::<libc::termios>()];
+    if stdin.read_exact(&mut termios_bytes).is_ok() {
+        let mut buf = [0u8; 1];
+        let _ = stdin.read(&mut buf); // blocks until EOF (clean drop or the main process dying)
+
+        if let Ok(tty) = tty {
+            use std::os::fd::AsRawFd;
+            let termios: libc::termios = unsafe { std::ptr::read(termios_bytes.as_ptr().cast()) };
+            unsafe {
+                libc::tcsetattr(tty.as_raw_fd(), libc::TCSANOW, &termios);
+            }
+        }
+    }
+    std::process::exit(0);
 }

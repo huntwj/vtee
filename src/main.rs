@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
+    // The watchdog re-execs this same binary with this hidden flag (`vtee::spawn_tty_watchdog`
+    // via `RawModeGuard`) - handle it before anything else, since it's a different process
+    // entirely, not a mode of the CLI below.
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("--internal-tty-guard") {
+        vtee::run_tty_guard();
+    }
+
     let log_path = take_path_flag(&mut args, "--log");
     let script_path = take_path_flag(&mut args, "--script");
     let text_mode = take_switch(&mut args, "--text");
@@ -52,6 +60,7 @@ fn run_interactive(program: &str, rest: &[String], log_path: Option<&Path>) -> i
 
     let _raw_guard = vtee::RawModeGuard::new();
     tap.watch_resize();
+    tap.watch_sigterm();
 
     let status = tap.wait();
     drop(_raw_guard);
@@ -98,6 +107,8 @@ fn run_script(program: &str, rest: &[String], log_path: Option<&Path>, script_pa
             return 1;
         }
     };
+
+    tap.watch_sigterm();
 
     let code = run_script_body(&tap, script_path, text_mode);
 
