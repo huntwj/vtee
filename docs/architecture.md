@@ -79,15 +79,57 @@ order," not "these bytes, with this timing"), and returns a `Snapshot` built the
 
 ## What a caller sees: `Tap`'s public surface
 
-`Tap::spawn(program, args, cols, rows, log_path) -> Tap`, `Tap::snapshot() -> Snapshot`, `Tap::resize(cols, rows)`,
+`Tap::spawn(program, args, SpawnOptions) -> Tap`, `Tap::snapshot() -> Snapshot`, `Tap::resize(cols, rows)`,
 `Tap::wait() -> ExitStatus`, `Tap::watch_resize()` (Unix; no-op stub on other platforms, so callers don't need to
-`cfg`-gate the call site), `Tap::bytes_seen() -> u64`. `RawModeGuard` is separate from `Tap` on purpose - it
-manages *our own* controlling terminal's mode, not the child's pty, and a caller embedding `Tap` without a real
-terminal of its own (e.g. a test, or a future daemon) has no reason to touch it.
+`cfg`-gate the call site), `Tap::bytes_seen() -> u64`, `Tap::send_bytes`/`send_text`/`send_key`,
+`Tap::wait_for_text`, `Tap::app_cursor_mode`. `SpawnOptions::interactive` is the one switch between this
+project's two modes (`roadmap.md`): `true` forwards our own stdin to the child and the child's raw output to our
+own stdout (requirement 7, the human-at-a-real-terminal case); `false` does neither - the caller drives
+everything through `Command`s instead (the batch-CLI case below). `RawModeGuard` stays separate from `Tap` on
+purpose either way - it manages *our own* controlling terminal's mode, not the child's pty, and nothing in
+non-interactive mode has a real terminal of its own to manage.
 
-There is currently **no process boundary** - everything above is one `Tap` living inside the same process as its
-caller (`src/main.rs`'s CLI is a thin wrapper, not a separate protocol client). An out-of-process protocol is
-v1 work, scoped in `roadmap.md`, not built yet.
+There is currently **no process boundary** for the *live* case - an in-process `Tap` is still the only way to
+drive one interactively. The batch CLI below is a process boundary of a much narrower kind: one script, run to
+completion, no ongoing connection. A general out-of-process protocol for a live/interactive session is still v1
+work, scoped in `roadmap.md`, not built yet.
+
+## The command core: `src/command.rs`, `src/keys.rs`
+
+`Command` is the one vocabulary this project uses for "do something to a running tap and maybe get a `Snapshot`
+back" - `Send { text }`, `SendKey { key }`, `Resize { cols, rows }`, `WaitMs { ms }`,
+`WaitFor { text, timeout_ms }`, `Snapshot`. `Command::execute(&self, tap: &Tap)` runs one against a `Tap` and
+returns `Option<CommandResult>` - `None` for everything except `Snapshot` and `WaitFor`, which produce a tagged
+`CommandResult::Snapshot { snapshot }` / `CommandResult::WaitFor { matched, snapshot }`. This exists as its own
+module, independent of how the commands arrive, specifically so a later live protocol can drive the identical
+enum from a socket instead of a script file (`roadmap.md`) without a second design.
+
+`SendKey` resolves through `src/keys.rs`: a name (`Up`, `Home`, `F5`, `Ctrl-c`, `Alt-x`, ...) to the bytes to
+send, requested by TinyFugue because they have no such table of their own. Arrow keys and Home/End pick between
+CSI (`ESC [`) and SS3 (`ESC O`) forms based on `Tap::app_cursor_mode()` - a direct read of
+`TermMode::APP_CURSOR` off the live `Term` - matching xterm's own behaviour, which is exactly why TF asked for
+this to be mode-aware: it reads that distinction via termcap/terminfo.
+
+Input injection needed `Tap`'s pty-master writer to stop being owned exclusively by the `forward_input` thread:
+it's now `Arc<Mutex<Box<dyn Write + Send>>>`, shared between that thread (when `interactive`) and
+`Tap::send_bytes`. Each write is one call under the lock, so a script's `Send`/`SendKey` and (in interactive
+mode) a human's own typing can't interleave *within* a single write - see `roadmap.md` for the still-open
+*policy* question of which should take priority when both are happening at once, which this locking doesn't
+answer by itself.
+
+`Tap::wait_for_text` is `WaitFor`'s scoped-down wait-for-predicate (`roadmap.md`): "does the screen's text
+contain this substring," not an arbitrary predicate over a full `Snapshot` - that's what TinyFugue's own answer
+said was actually needed right now. Implemented with a `Condvar` paired with `TapState`'s `Mutex`
+(`forward_output` calls `notify_all()` after every chunk it applies), so it wakes exactly when there's new state
+to check instead of polling.
+
+## The batch CLI: `vtee --script <path> -- <program> [args...]`
+
+What TinyFugue actually asked for first (`roadmap.md`): spawn `program` non-interactively
+(`SpawnOptions::interactive = false` - no stdin forwarding, no raw passthrough to our own stdout, so stdout stays
+clean for structured output), read `<path>` as newline-delimited JSON, run each line as a `Command` in order, and
+write one `CommandResult` JSON line to stdout for every `Snapshot`/`WaitFor` command. `--log <path>` still works
+the same way in this mode, for anyone who also wants the raw byte log alongside the script's structured output.
 
 ## Known rough edges (tracked, not silently ignored)
 
