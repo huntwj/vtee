@@ -674,6 +674,7 @@ version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
  "crossterm",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
