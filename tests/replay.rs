@@ -24,7 +24,7 @@ fn replay_matches_live_for_every_probe() {
         let log_path = dir.join(format!("{name}.cast"));
 
         let opts = vtee::SpawnOptions { cols: COLS, rows: ROWS, log_path: Some(&log_path), interactive: false };
-        let mut tap = vtee::Tap::spawn(cat_path(), &[bin.to_string_lossy().into_owned()], opts)
+        let tap = vtee::Tap::spawn(cat_path(), &[bin.to_string_lossy().into_owned()], opts)
             .unwrap_or_else(|e| panic!("{name}: spawn failed: {e}"));
 
         let status = tap.wait().unwrap_or_else(|e| panic!("{name}: wait failed: {e}"));

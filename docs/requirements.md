@@ -8,10 +8,12 @@ status to track per-requirement rather than as one blob.
 
 1. **Driveable without a human, and also interactively.** Scriptable from CI inside a Linux container, and usable
    by an agent across many calls. The process model (library, daemon, socket) is a trade-off, not a rule.
-   **Met for the scriptable-from-CI case**: the batch CLI (`vtee --script`, `architecture.md`) runs a
-   newline-delimited-JSON script of commands non-interactively and dumps structured results, built for and
-   verified with TinyFugue's testing needs. Not yet met for "usable by an agent across many calls" in the sense
-   of an ongoing, out-of-process session - that's the live protocol, v1 (`roadmap.md`).
+   **Met.** The batch CLI (`vtee --script`, `architecture.md`) runs a newline-delimited-JSON script of commands
+   non-interactively and dumps structured results, built for and verified with TinyFugue's testing needs. "Usable
+   by an agent across many calls" against an ongoing, out-of-process session is now also met for the read-only
+   case: `vtee --listen`/`--connect` (`architecture.md`) lets a separate process query live state over many
+   calls on one persistent connection. What's still open is write access from that separate process (injecting
+   input) - full duplex, v1 stage 3 (`roadmap.md`) - and multiple sessions behind one process/daemon.
 2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
    256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
    and combining characters. We should not cap the target at what one program uses today.

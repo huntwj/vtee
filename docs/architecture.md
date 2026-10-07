@@ -139,13 +139,45 @@ whether it ran to completion or stopped partway on an error - rather than assumi
 exit on its own once the script stops feeding it input. Caught by review, not by a test that happened to exercise
 it: an earlier version did nothing at the end of a script, which is fine for a program that quits itself, but
 would otherwise orphan it and - for anything reading from a pty with nothing left to feed it, e.g. `cat` with no
-file argument - hang the whole CLI forever on the implicit `wait()` that used to be the only way out. Every exit
-path in `main.rs` returns a code rather than calling `std::process::exit` directly, specifically so a `Tap` (and
-anything else with a `Drop` impl) runs its destructor first - `std::process::exit` skips destructors entirely,
-so calling it while a `Tap` is still alive would bypass this no matter how careful `run_script` itself is.
-`Tap` also kills its child in its own `Drop` impl as a second, independent safety net, not the primary
+file argument - hang the whole CLI forever on the implicit `wait()` that used to be the only way out. `main`
+returns `std::process::ExitCode` rather than calling `std::process::exit` anywhere once a `Tap` might be alive -
+a normal function return runs every local's destructor first, where `std::process::exit` skips destructors
+entirely, so calling it while a `Tap` is still alive would bypass this no matter how careful `run_script` itself
+is. `Tap` also kills its child in its own `Drop` impl as a second, independent safety net, not the primary
 mechanism - it covers any future caller (library or CLI) that drops a `Tap` through a path this file didn't
-anticipate.
+anticipate. Exit codes themselves follow sysexits.h (the `exitcode` crate) rather than ad hoc `0`/`1`/`2` -
+`run_interactive` specifically propagates the wrapped program's *own* exit code on failure rather than
+collapsing every non-zero outcome to a fixed value, the way `env`/`time` do, since a caller scripting around
+`vtee` (CI, TF's harness) is more likely to care which code the wrapped program actually exited with than
+whether `vtee` itself has an opinion about it.
+
+## Observation: `vtee --listen <path>` and `vtee --connect <path>` (2026-10-07)
+
+"Connect and watch during active use" (`roadmap.md`'s crawl/walk/run plan, stage 2) - a separate process reading
+live state from an already-running interactive session, without touching it. Reuses the `Command`/`CommandResult`
+core exactly as designed for this (`roadmap.md`'s "shared command core"): `Tap::serve` binds a Unix domain socket
+(`requirement 8` defers a Windows equivalent - named pipes) and, per connection, reads the same newline-delimited
+`Command` JSON the batch CLI reads from a script file, executes it, and writes back a `CommandResult` line -
+except `Command::is_read_only()` gates this: `Send`/`SendKey`/`Resize` get a `CommandResult::Error` instead of
+ever reaching `execute`, since a watcher injecting input is stage 3 ("full duplex"), not this stage.
+`Snapshot`/`WaitFor`/`WaitMs` are the only commands available here.
+
+Needed one refactor first: `Tap::serve` takes `Arc<Tap>`, because the accept loop and each connection's handler
+have to outlive the call and run concurrently with whatever `run_interactive` does next - an ordinary borrow
+couldn't. That meant every field of `Tap` had to actually be `Sync`, not just usable one thread at a time -
+`child: Box<dyn Child + Send + Sync>` and `output_done: Receiver<()>` both had to move behind a `Mutex` (`Receiver`
+is `Send` but not `Sync` - measured via the compiler refusing `Arc<Tap>: Send` with a clear trail back to that
+field, not guessed at), and `Tap::wait`/`Tap::kill` went from `&mut self` to `&self` as a result - a straightforward
+mechanical change once the fields were ready for it.
+
+`vtee --connect <path>` is the client: connects, relays its own stdin to the socket line by line (the exact
+same `Command` format, typed or piped in live instead of from a file), prints whatever comes back (`--text` for
+the same human-readable rendering the batch CLI offers). One real bug found by testing two commands over one
+connection, not by reasoning about it: the first version's `drop(writer)` after relaying stdin didn't actually
+signal EOF to the server, because `UnixStream::try_clone` duplicates the underlying fd, and a stream socket only
+sees EOF when *every* fd referencing it closes (or `shutdown` is called explicitly) - the original `stream` handle
+and the reader thread's clone were both still open, so the connection just hung. Fixed with an explicit
+`writer.shutdown(Shutdown::Write)`, which acts on the socket itself regardless of how many other fds reference it.
 
 ## Surviving signals: `SIGTERM` and `SIGKILL` (2026-10-07)
 
