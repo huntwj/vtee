@@ -131,6 +131,19 @@ clean for structured output), read `<path>` as newline-delimited JSON, run each 
 write one `CommandResult` JSON line to stdout for every `Snapshot`/`WaitFor` command. `--log <path>` still works
 the same way in this mode, for anyone who also wants the raw byte log alongside the script's structured output.
 
+**Cleanup is deterministic, not hopeful.** `run_script` always calls `Tap::kill()` once the script finishes -
+whether it ran to completion or stopped partway on an error - rather than assuming the program being tested will
+exit on its own once the script stops feeding it input. Caught by review, not by a test that happened to exercise
+it: an earlier version did nothing at the end of a script, which is fine for a program that quits itself, but
+would otherwise orphan it and - for anything reading from a pty with nothing left to feed it, e.g. `cat` with no
+file argument - hang the whole CLI forever on the implicit `wait()` that used to be the only way out. Every exit
+path in `main.rs` returns a code rather than calling `std::process::exit` directly, specifically so a `Tap` (and
+anything else with a `Drop` impl) runs its destructor first - `std::process::exit` skips destructors entirely,
+so calling it while a `Tap` is still alive would bypass this no matter how careful `run_script` itself is.
+`Tap` also kills its child in its own `Drop` impl as a second, independent safety net, not the primary
+mechanism - it covers any future caller (library or CLI) that drops a `Tap` through a path this file didn't
+anticipate.
+
 ## Known rough edges (tracked, not silently ignored)
 
 - `Tap::wait()` doesn't block forever waiting for the pty master's reader to see EOF, because it isn't guaranteed
