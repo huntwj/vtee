@@ -158,9 +158,8 @@ live state from an already-running interactive session, without touching it. Reu
 core exactly as designed for this (`roadmap.md`'s "shared command core"): `Tap::serve` binds a Unix domain socket
 (`requirement 8` defers a Windows equivalent - named pipes) and, per connection, reads the same newline-delimited
 `Command` JSON the batch CLI reads from a script file, executes it, and writes back a `CommandResult` line -
-except `Command::is_read_only()` gates this: `Send`/`SendKey`/`Resize` get a `CommandResult::Error` instead of
-ever reaching `execute`, since a watcher injecting input is stage 3 ("full duplex"), not this stage.
-`Snapshot`/`WaitFor`/`WaitMs` are the only commands available here.
+except every command is checked first against `ServeOptions` via `Command::authorize` (below), which can turn
+it into a `CommandResult::Error` instead of ever reaching `execute`.
 
 Needed one refactor first: `Tap::serve` takes `Arc<Tap>`, because the accept loop and each connection's handler
 have to outlive the call and run concurrently with whatever `run_interactive` does next - an ordinary borrow
@@ -178,6 +177,33 @@ signal EOF to the server, because `UnixStream::try_clone` duplicates the underly
 sees EOF when *every* fd referencing it closes (or `shutdown` is called explicitly) - the original `stream` handle
 and the reader thread's clone were both still open, so the connection just hung. Fixed with an explicit
 `writer.shutdown(Shutdown::Write)`, which acts on the socket itself regardless of how many other fds reference it.
+
+## Full duplex, stage 3a: `vtee --listen <path> --writable` (2026-10-07)
+
+Observation's read-only gate is now a real authorization check, `Command::authorize(policy, resize_owned_by_terminal)`
+(`src/command.rs`), called once per command in `serve_connection` before `execute` is ever reached:
+`Snapshot`/`WaitFor`/`WaitMs` always pass; `Send`/`SendKey`/`Resize` pass only under `WritePolicy::Open`, which a
+connection only gets when the server was started with `--writable` (`ServeOptions`, default
+`WritePolicy::ReadOnly` - observation's original behaviour, unchanged unless asked for). `Resize` has one more
+rule on top, checked independently of the write policy: rejected outright whenever
+`resize_owned_by_terminal` is true, which `run_interactive` sets from the same `is_terminal()` check
+`RawModeGuard`/`watch_resize` already act on - a remote resize has no business fighting with a real human's
+actual terminal size.
+
+`WritePolicy` is deliberately an enum with room to grow, not a bool, per the user's explicit call
+(`roadmap.md`, "I think those should all be options"): stage 3b's remaining policies (exclusive handoff,
+mutually-exclusive-with-a-human) are additions to this enum later, and - noticed while writing this up, not
+planned in advance - stage 3b's "free-for-all" option turns out to just be `WritePolicy::Open` reused as-is;
+nothing about that mode is specific to there being no competing human, so it needed no new code at all.
+
+The mechanism underneath needed no changes: `Tap::send_bytes` (built for the batch CLI) already serializes any
+number of concurrent callers through one lock, so a `--connect` client and the interactive stdin-forwarding
+thread writing "at the same time" was already safe at the byte level before this stage - stage 3a was entirely
+about deciding *whether* to let a second caller reach that existing path, not making the path itself safe.
+
+Verified end to end: a `send` rejected on a read-only listener with a clear error, accepted and visible on
+screen on a `--writable` one, and a remote `resize` actually changing a live session's reported size (80x24 to
+100x40) when nothing else claimed ownership of it.
 
 ## Surviving signals: `SIGTERM` and `SIGKILL` (2026-10-07)
 

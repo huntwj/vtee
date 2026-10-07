@@ -10,10 +10,11 @@ status to track per-requirement rather than as one blob.
    by an agent across many calls. The process model (library, daemon, socket) is a trade-off, not a rule.
    **Met.** The batch CLI (`vtee --script`, `architecture.md`) runs a newline-delimited-JSON script of commands
    non-interactively and dumps structured results, built for and verified with TinyFugue's testing needs. "Usable
-   by an agent across many calls" against an ongoing, out-of-process session is now also met for the read-only
-   case: `vtee --listen`/`--connect` (`architecture.md`) lets a separate process query live state over many
-   calls on one persistent connection. What's still open is write access from that separate process (injecting
-   input) - full duplex, v1 stage 3 (`roadmap.md`) - and multiple sessions behind one process/daemon.
+   by an agent across many calls" against an ongoing, out-of-process session is also met, read-only and
+   read-write: `vtee --listen`/`--connect` (`architecture.md`) lets a separate process query live state, and
+   - with `--writable`, when no human is competing for input - inject it too (`WritePolicy::Open`). What's still
+   open is write access *while a human is also typing* (full duplex stage 3b, a policy decision, `roadmap.md`)
+   and multiple sessions behind one process/daemon.
 2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
    256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
    and combining characters. We should not cap the target at what one program uses today.
