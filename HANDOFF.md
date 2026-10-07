@@ -158,13 +158,21 @@ real behaviour of every wait primitive (read from help text only).
 2. ~~**The tap.** Spawn, forward both ways, restore the terminal on exit, handle resize.~~ **Done, 2026-10-06** on
    Linux (`src/lib.rs`, `Tap`): spawns via `portable-pty`, forwards both ways, feeds a copy of the child's output
    into `alacritty_terminal`, restores the real terminal's mode on exit (`RawModeGuard`), watches `SIGWINCH`.
-   Windows not working yet from this host - see `docs/decisions.md`. Still missing from this step, deferred to 3:
-   a real way to query the emulator (`snapshot_lines()` is a debug stand-in, not the real API) and a true
-   `kill -9`/`SIGTERM`-safe terminal restoration (only normal exit and panic-unwind are covered).
-3. **The snapshot API** (cells, attributes, cursor, modes, offset) and the raw byte log.
-4. **Replay.** Rebuild a snapshot from a log, and check it matches the live one.
-5. **Tests that need no TinyFugue**: run `cat` on sequence files, and add conformance cases. Only after the crate works
-   on its own, add an integration with TF's harness (`~/ai/mud/tests/harness.py`), probably a thin Python wrapper.
+   Windows not working yet from this host, and it's a real upstream bug, not just this host - see
+   `docs/decisions.md`. Still open: a true `kill -9`/`SIGTERM`-safe terminal restoration (only normal exit and
+   panic-unwind are covered).
+3. ~~**The snapshot API** (cells, attributes, cursor, modes, offset) and the raw byte log.~~ **Done, 2026-10-06**
+   (`src/snapshot.rs`, `Tap::snapshot()`; `src/log.rs`, `RawLog`). Cells carry colour (indexed/rgb/default), all
+   SGR attributes except blink (the accepted `alacritty_terminal` gap), and OSC 8 hyperlinks; the snapshot also
+   carries cursor shape/visibility, active modes, alt-screen state, title and scrollback. The byte offset and the
+   emulator state it describes are locked together (`TapState`) so they can never disagree. The log is asciicast
+   v2 (one `[time, "o", text]` event per chunk, as `ht`/`avt` already use), with the known accepted limitation that
+   non-UTF8 bytes in it get replaced lossily (the forwarded bytes themselves are never touched).
+4. ~~**Replay.** Rebuild a snapshot from a log, and check it matches the live one.~~ **Done, 2026-10-06**
+   (`vtee::replay()`; `tests/replay.rs` asserts it against the live snapshot for all 15 probe files).
+5. ~~**Tests that need no TinyFugue**: run `cat` on sequence files~~ **Done, 2026-10-06** (`tests/replay.rs`, same
+   as step 4 - one test covers both). Conformance cases beyond the existing probe files, and the TF harness
+   integration (`~/ai/mud/tests/harness.py`), are still open.
 
 If step 2 or 3 turns out much harder than expected, say so rather than push on: the fallback in the README is to adopt
 an existing tool for the test side and keep only a thin live-watching tap.

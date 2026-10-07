@@ -7,9 +7,12 @@ memory, and lets a script or an AI agent query it and (later) send input, while 
 their own terminal as usual. Think of it as `tee` for a TUI: the stream is copied without disturbing the original,
 but the copy is a screen you can query, not raw bytes.
 
-**Status: v0's tap exists** (spawn, bidirectional forward, resize, restore terminal on exit) but not its snapshot
-API, raw byte log or replay yet. The name is a working name. `HANDOFF.md` has the research, the context from
-TinyFugue, decisions made and not made, and working conventions: read it before starting.
+**Status: v0 is done** on Linux (not yet on Windows - see `docs/decisions.md`): spawn, bidirectional forward,
+resize, terminal restore, a snapshot API (cells, attributes, cursor, modes, offset, title, scrollback), a raw
+byte log, and replay - verified to reproduce the live state exactly, for all 15 probe files (`tests/replay.rs`).
+Known remaining gap: the snapshot only exposes the active screen buffer, not both (requirement 3). The name is a
+working name. `HANDOFF.md` has the research, the context from TinyFugue, decisions made and not made, and working
+conventions: read it before starting.
 
 ## Why
 
@@ -43,8 +46,9 @@ replacement.
 
 ## Staged plan
 
-- **v0, the tap.** Run a program in a pty, forward everything to the real terminal, keep emulator state, write a raw
-  byte log, answer snapshot queries (cells, attributes, cursor, modes). Read-only for the observer.
+- **v0, the tap.** Done on Linux, 2026-10-06. Run a program in a pty, forward everything to the real terminal,
+  keep emulator state, write a raw byte log, answer snapshot queries (cells, attributes, cursor, modes).
+  Read-only for the observer.
 - **v1.** Input injection from the observer, wait-for-predicate, a documented protocol.
 - **Later.** An MCP front end, Windows, multiple sessions.
 

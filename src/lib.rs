@@ -3,8 +3,14 @@
 //! also feeds an `alacritty_terminal` emulator so its state can be inspected. The emulator is a
 //! passive observer and never alters what is forwarded.
 
+mod log;
+pub mod snapshot;
+
+pub use log::{RawLog, replay};
+pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot};
+
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,20 +22,41 @@ use alacritty_terminal::term::{Config, Term};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 use vte::ansi::Processor;
 
+/// Captures title changes (requirement 3) via `alacritty_terminal`'s event callback, which is
+/// the only way to read a title back out - `Term` keeps no public getter for it. Everything
+/// else state-related is read straight off `Term`/`Grid` in `snapshot::build`.
 #[derive(Clone)]
-pub struct NullListener;
+pub struct ObserverListener {
+    title: Arc<Mutex<Option<String>>>,
+}
 
-impl EventListener for NullListener {
-    fn send_event(&self, _event: Event) {}
+impl ObserverListener {
+    pub(crate) fn new() -> Self {
+        ObserverListener { title: Arc::new(Mutex::new(None)) }
+    }
+
+    pub(crate) fn current_title(&self) -> Option<String> {
+        self.title.lock().unwrap().clone()
+    }
+}
+
+impl EventListener for ObserverListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::Title(t) => *self.title.lock().unwrap() = Some(t),
+            Event::ResetTitle => *self.title.lock().unwrap() = None,
+            _ => {}
+        }
+    }
 }
 
 /// Size handed to `alacritty_terminal`, which wants a `Dimensions` impl rather than a plain pair
-/// of numbers. `total_lines`/`screen_lines` are equal because v0 keeps no emulator-side
-/// scrollback of its own (requirement-3 scrollback is deferred to the snapshot API step).
+/// of numbers. `total_lines`/`screen_lines` are equal because scrollback comes from the grid's
+/// own history (see `snapshot::build`), not from keeping extra lines in the visible area.
 #[derive(Clone, Copy)]
-struct Size {
-    cols: usize,
-    rows: usize,
+pub(crate) struct Size {
+    pub(crate) cols: usize,
+    pub(crate) rows: usize,
 }
 
 impl Dimensions for Size {
@@ -44,22 +71,31 @@ impl Dimensions for Size {
     }
 }
 
-pub type SharedTerm = Arc<Mutex<Term<NullListener>>>;
+/// `term` and `bytes_seen` are locked together so a snapshot is always a consistent (state,
+/// offset) pair - requirement 4's "a query never sees a half-drawn frame," extended to mean the
+/// reported offset never disagrees with the state it's reported alongside.
+struct TapState {
+    term: Term<ObserverListener>,
+    bytes_seen: u64,
+}
+
+type SharedState = Arc<Mutex<TapState>>;
 
 /// A running tap: a child spawned in a pty, forwarded both ways, with a copy of its output
 /// also feeding an in-memory terminal emulator.
 pub struct Tap {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Box<dyn Child + Send + Sync>,
-    term: SharedTerm,
-    bytes_seen: Arc<AtomicU64>,
+    state: SharedState,
+    title: ObserverListener,
     output_done: Receiver<()>,
 }
 
 impl Tap {
     /// Spawn `program args...` in a pty of the given size, and start forwarding immediately:
-    /// child output -> our stdout + the emulator, our stdin -> child input.
-    pub fn spawn(program: &str, args: &[String], cols: u16, rows: u16) -> io::Result<Self> {
+    /// child output -> our stdout + the emulator (+ `log_path`, if given), our stdin -> child
+    /// input.
+    pub fn spawn(program: &str, args: &[String], cols: u16, rows: u16, log_path: Option<&Path>) -> io::Result<Self> {
         // A 0x0 (or 0-in-one-dimension) size is never meaningful and alacritty_terminal
         // panics on a zero-sized grid rather than erroring, so this is a hard floor rather
         // than something callers can opt out of.
@@ -79,20 +115,18 @@ impl Tap {
         // dropping it means the master sees EOF once the child's copy of the slave closes too.
         drop(pair.slave);
 
-        let term = Arc::new(Mutex::new(Term::new(
-            Config::default(),
-            &Size { cols: cols as usize, rows: rows as usize },
-            NullListener,
-        )));
-        let bytes_seen = Arc::new(AtomicU64::new(0));
+        let title = ObserverListener::new();
+        let term = Term::new(Config::default(), &Size { cols: cols as usize, rows: rows as usize }, title.clone());
+        let state: SharedState = Arc::new(Mutex::new(TapState { term, bytes_seen: 0 }));
+
+        let log = log_path.map(|p| RawLog::create(p, cols, rows)).transpose()?;
 
         let mut reader = pair.master.try_clone_reader().map_err(to_io_error)?;
         let (done_tx, output_done) = mpsc::channel();
         {
-            let term = term.clone();
-            let bytes_seen = bytes_seen.clone();
+            let state = state.clone();
             thread::spawn(move || {
-                forward_output(&mut reader, term, bytes_seen);
+                forward_output(&mut reader, state, log);
                 let _ = done_tx.send(());
             });
         }
@@ -101,7 +135,7 @@ impl Tap {
         thread::spawn(move || forward_input(&mut writer));
 
         let master = Arc::new(Mutex::new(pair.master));
-        Ok(Tap { master, child, term, bytes_seen, output_done })
+        Ok(Tap { master, child, state, title, output_done })
     }
 
     /// Resize the child's pty and the emulator together, so they never disagree about the
@@ -114,7 +148,7 @@ impl Tap {
             .unwrap()
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(to_io_error)?;
-        self.term.lock().unwrap().resize(Size { cols: cols as usize, rows: rows as usize });
+        self.state.lock().unwrap().term.resize(Size { cols: cols as usize, rows: rows as usize });
         Ok(())
     }
 
@@ -130,8 +164,15 @@ impl Tap {
         Ok(status)
     }
 
+    /// The full current state (cells, attributes, cursor, modes, offset - requirement 3 and
+    /// 4), atomically with respect to the output-forwarding thread.
+    pub fn snapshot(&self) -> Snapshot {
+        let state = self.state.lock().unwrap();
+        snapshot::build(&state.term, state.bytes_seen, self.title.current_title())
+    }
+
     pub fn bytes_seen(&self) -> u64 {
-        self.bytes_seen.load(Ordering::Relaxed)
+        self.state.lock().unwrap().bytes_seen
     }
 
     /// Watch for the real terminal being resized and propagate it to the child pty and the
@@ -143,7 +184,7 @@ impl Tap {
         use signal_hook::iterator::Signals;
 
         let master = self.master.clone();
-        let term = self.term.clone();
+        let state = self.state.clone();
         let Ok(mut signals) = Signals::new([SIGWINCH]) else { return };
         thread::spawn(move || {
             for _ in signals.forever() {
@@ -155,7 +196,7 @@ impl Tap {
                         continue;
                     }
                     let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-                    term.lock().unwrap().resize(Size { cols: cols as usize, rows: rows as usize });
+                    state.lock().unwrap().term.resize(Size { cols: cols as usize, rows: rows as usize });
                 }
             }
         });
@@ -166,25 +207,9 @@ impl Tap {
         // TODO(requirement 8): Windows resize watching (ConPTY has no SIGWINCH equivalent;
         // needs polling console size or a console resize event).
     }
-
-    /// Plain-text rows of the current screen. A stand-in for the real snapshot API (cells,
-    /// attributes, cursor, modes - HANDOFF.md step 3), kept here only so v0 is independently
-    /// checkable without that API existing yet.
-    pub fn snapshot_lines(&self) -> Vec<String> {
-        let term = self.term.lock().unwrap();
-        let grid = term.grid();
-        (0..grid.screen_lines())
-            .map(|r| {
-                let line = alacritty_terminal::index::Line(r as i32);
-                (0..grid.columns())
-                    .map(|c| grid[alacritty_terminal::index::Point::new(line, alacritty_terminal::index::Column(c))].c)
-                    .collect::<String>()
-            })
-            .collect()
-    }
 }
 
-fn forward_output(reader: &mut Box<dyn Read + Send>, term: SharedTerm, bytes_seen: Arc<AtomicU64>) {
+fn forward_output(reader: &mut Box<dyn Read + Send>, state: SharedState, mut log: Option<RawLog>) {
     let mut stdout = io::stdout();
     let mut parser = Processor::<vte::ansi::StdSyncHandler>::new();
     let mut buf = [0u8; 8192];
@@ -198,11 +223,14 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, term: SharedTerm, bytes_see
             break;
         }
         let _ = stdout.flush();
-        {
-            let mut term = term.lock().unwrap();
-            parser.advance(&mut *term, chunk);
+        if let Some(log) = log.as_mut() {
+            let _ = log.write_event(chunk);
         }
-        bytes_seen.fetch_add(n as u64, Ordering::Relaxed);
+        {
+            let mut state = state.lock().unwrap();
+            parser.advance(&mut state.term, chunk);
+            state.bytes_seen += n as u64;
+        }
     }
 }
 
