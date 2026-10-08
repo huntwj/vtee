@@ -49,10 +49,12 @@ status to track per-requirement rather than as one blob.
    **Mostly met**: size and working directory are controlled by `Tap::spawn`, and size is now explicitly
    overridable from the CLI too (`--cols`/`--rows`, `decisions.md`) rather than only ever auto-detected from a
    real terminal - the first of what's meant to grow into a fuller virtual tty spec (terminal emulation mode,
-   colour support, ...) as those are actually asked for. Resize is handled live (`SIGWINCH`). **Not yet
-   controlled**: `TERM` and arbitrary environment variables - `Tap::spawn` doesn't expose a way to set them on
-   the child yet, so it inherits ours. Timing is irrelevant to replay (by design) but not yet controllable for
-   the live tap itself (no artificial delay/throttling, not clear it's needed).
+   colour support, ...) as those are actually asked for. Resize is handled live (`SIGWINCH`). `TERM` and
+   arbitrary environment variables are now controllable too - `--env KEY=VALUE` (repeatable, `decisions.md`),
+   layered on top of `vtee`'s own inherited environment via `portable_pty::CommandBuilder::env` rather than
+   replacing it; `TERM` is just one entry here, not a separate mechanism. Timing is irrelevant to replay (by
+   design) but not yet controllable for the live tap itself (no artificial delay/throttling, not clear it's
+   needed).
 7. **Transparent observer mode.** The human keeps their own terminal and sees exactly what they would without the
    tool. Output is forwarded raw; the emulator only watches.
    **Met.** Raw bidirectional forwarding, `RawModeGuard` for the human's own terminal mode, confirmed not to alter

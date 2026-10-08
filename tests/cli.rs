@@ -58,6 +58,16 @@ fn cols_rejects_a_non_numeric_value() {
 }
 
 #[test]
+fn env_rejects_a_value_without_an_equals_sign() {
+    vtee()
+        .args(["--env", "justastring", "--", "cat"])
+        .assert()
+        .failure()
+        .code(exitcode::USAGE)
+        .stderr(predicate::str::contains("KEY=VALUE"));
+}
+
+#[test]
 fn writable_and_no_listen_conflict() {
     vtee()
         .args(["--writable", "--no-listen", "--", "cat"])
@@ -106,6 +116,31 @@ fn script_conflicts_with_every_interactive_only_flag() {
 #[cfg(unix)]
 mod unix_behavior {
     use super::*;
+
+    /// `--env` reaches the child via `portable_pty::CommandBuilder::env`, on top of the
+    /// inherited environment rather than in place of it - `printenv` exits on its own once it's
+    /// printed, so no hang risk the way `cat` would have.
+    #[test]
+    fn env_vars_reach_the_child() {
+        vtee()
+            .args(["--no-listen", "--env", "VTEE_TEST_VAR=hello-from-vtee", "--", "printenv", "VTEE_TEST_VAR"])
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("hello-from-vtee"));
+    }
+
+    /// A value containing `=` (e.g. a `PATH`-shaped override) must not be truncated at the
+    /// first `=` on the *value* side - only the key/value split itself stops at the first one.
+    #[test]
+    fn env_values_containing_equals_signs_are_preserved() {
+        vtee()
+            .args(["--no-listen", "--env", "VTEE_TEST_VAR=a=b=c", "--", "printenv", "VTEE_TEST_VAR"])
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("a=b=c"));
+    }
 
     /// Companion to `unknown_flags_are_rejected_not_swallowed_as_the_command`: dropping
     /// `allow_hyphen_values` must not have broken the actual feature `trailing_var_arg` is for -

@@ -367,6 +367,28 @@ cause was too-short sleeps in the *test script* racing the connect against the s
 No code changed. `roadmap.md` updated to mark (a) done alongside (b)/`HumanPriority`, leaving only (d)
 (mutually-exclusive-with-a-human) as the one remaining unbuilt mode of `WritePolicy`.
 
+## 2026-10-08: `--env KEY=VALUE` - requirement 6's last unmet piece
+
+Asked directly, decided to build now rather than keep deferring. Measured the actual crate before writing
+anything: `portable_pty::CommandBuilder` (the vendored source, `cmdbuilder.rs`, not assumed from memory) already
+seeds its environment from `std::env::vars_os()` with `is_from_base_env: true`, and `.env(key, value)` simply
+overrides/adds on top (`is_from_base_env: false`) without needing `env_clear()` first - exactly the
+"inherit by default, override selectively" shape this needed, already built into the dependency.
+
+`SpawnOptions` gained `env: &'a [(String, String)]` (default `&[]`, so existing callers are unaffected);
+`Tap::spawn` just loops it into `cmd.env(k, v)`. `Cli` gained `--env KEY=VALUE`, repeatable, splitting on the
+*first* `=` only so a value that itself contains `=` (e.g. a `PATH`-shaped override) isn't truncated or
+rejected. Shared by every mode - unlike `--cols`/`--rows`, which `run_script` also takes but for consistency
+rather than because the option itself is mode-specific, `--env` is equally meaningful everywhere a child gets
+spawned at all. No dedicated `--term` flag: `TERM` is just another entry through this same mechanism, not a
+special case - requirement 6 lists it separately from "environment" but there's no reason the implementation
+should.
+
+Verified end to end in the Linux container: a single `--env`, several at once, a value containing `=`
+(`a=b=c` survives intact), overriding an inherited variable (`TERM=dumb` reaches the child, confirmed via
+`printenv`), a malformed value with no `=` at all rejected with a clear usage error (exit 64), and the same
+flag working identically under `--script` (`printenv` inside a scripted snapshot showed the overridden value).
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."
