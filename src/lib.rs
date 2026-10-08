@@ -617,8 +617,26 @@ pub struct SessionPaths {
     pub pidfile: PathBuf,
 }
 
+/// Confirmed, not assumed, by an adversarial review: without this check, `--name
+/// '../../../tmp/evil'` (or an absolute path, or bare `.`/`..`) escaped `default_session_dir()`
+/// entirely - `PathBuf::join` doesn't confine a value containing `/` to the directory it's
+/// joined onto. A name must decompose into exactly one plain path component: no separators, no
+/// `.`/`..`, nothing absolute. This is the actual security boundary for every caller
+/// (`session_paths` is the one place a name becomes a filesystem path), not just the CLI's own
+/// `--name` flag - fixing it here covers `attach`/`ls`/`kill` too, not only spawning.
+fn valid_session_name(name: &str) -> bool {
+    use std::path::Component;
+    !name.is_empty() && matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [Component::Normal(_)])
+}
+
 #[cfg(unix)]
 pub fn session_paths(name: &str) -> io::Result<SessionPaths> {
+    if !valid_session_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} isn't a valid session name - no \"/\", no \".\"/\"..\", not empty"),
+        ));
+    }
     let dir = default_session_dir()?;
     Ok(SessionPaths {
         sock: dir.join(format!("{name}.sock")),

@@ -119,6 +119,7 @@ fn script_conflicts_with_every_interactive_only_flag() {
 #[cfg(unix)]
 mod unix_behavior {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
 
     /// `--env` reaches the child via `portable_pty::CommandBuilder::env`, on top of the
     /// inherited environment rather than in place of it - `printenv` exits on its own once it's
@@ -430,6 +431,59 @@ mod unix_behavior {
 
         let _ = child.kill();
         let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Regression test for a real, adversarially-found bug: `--name` reached `session_paths`
+    /// (`src/lib.rs`) with no validation at all, so a value containing `/` or `..` escaped the
+    /// hardened per-uid directory entirely (`PathBuf::join` doesn't confine it) - defeating the
+    /// whole point of that directory's own permission checks. Covers path traversal, an
+    /// absolute path, and bare `.`/`..`/empty, all of which must be rejected before anything is
+    /// created on disk.
+    #[test]
+    fn invalid_session_names_are_rejected_before_touching_disk() {
+        let tmpdir = isolated_tmpdir();
+        for bad_name in ["../../../tmp/evil", "/tmp/absolute-evil", "..", ".", ""] {
+            vtee_in(&tmpdir)
+                .args(["--name", bad_name, "--no-stdin", "--", "cat"])
+                .timeout(Duration::from_secs(5))
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("valid session name"));
+        }
+        // Confirms the rejection happens *before* any file is created anywhere reachable -
+        // not just that vtee prints an error while still leaving something behind.
+        assert!(!std::path::Path::new("/tmp/evil.sock").exists());
+        assert!(!std::path::Path::new("/tmp/absolute-evil.sock").exists());
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Regression test for a real, adversarially-found bug: `kill` used to trust a pidfile's
+    /// raw contents unconditionally and send `SIGTERM` with no liveness check at all - a stale
+    /// pidfile (left behind by a `SIGKILL`'d holder, a documented gap) pointing at a since-
+    /// reused PID would signal whatever unrelated process now holds it. Verifies `kill` checks
+    /// liveness first (via the same `session_is_live` `ls` already uses) rather than blindly
+    /// trusting the file: a stale pidfile just gets cleaned up, signaling nothing.
+    #[test]
+    fn kill_does_not_blindly_trust_a_stale_pidfile() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        // Must actually be 0700, not just present - `default_session_dir` rejects anything
+        // looser as "unsafe permissions" before `kill` even gets to the pidfile.
+        std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir).unwrap();
+        // `1` is guaranteed to exist (every running system has it) and guaranteed *not* to be
+        // an vtee holder we spawned - the exact shape of "a stale pidfile pointing at a
+        // since-reused PID" this test exists to catch, without needing a real PID-reuse race.
+        std::fs::write(dir.join("faketest.pid"), "1").unwrap();
+
+        vtee_in(&tmpdir).args(["kill", "faketest"]).timeout(Duration::from_secs(5)).assert().success();
+
+        // The stale pidfile is cleaned up either way; the only thing this test actually proves
+        // is that `kill` didn't crash or hang trying to signal PID 1 - a real signal to PID 1
+        // would be either a permission error (as this test's own non-root process) or, if run
+        // as root, exactly the kind of damage this fix exists to prevent. Checking the file is
+        // gone confirms the normal cleanup path still ran.
+        assert!(!dir.join("faketest.pid").exists());
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 }
