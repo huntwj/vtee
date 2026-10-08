@@ -82,10 +82,14 @@ order," not "these bytes, with this timing"), and returns a `Snapshot` built the
 `Tap::spawn(program, args, SpawnOptions) -> Tap`, `Tap::snapshot() -> Snapshot`, `Tap::resize(cols, rows)`,
 `Tap::wait() -> ExitStatus`, `Tap::watch_resize()` (Unix; no-op stub on other platforms, so callers don't need to
 `cfg`-gate the call site), `Tap::bytes_seen() -> u64`, `Tap::send_bytes`/`send_text`/`send_key`,
-`Tap::wait_for_text`, `Tap::app_cursor_mode`. `SpawnOptions::interactive` is the one switch between this
-project's two modes (`roadmap.md`): `true` forwards our own stdin to the child and the child's raw output to our
-own stdout (requirement 7, the human-at-a-real-terminal case); `false` does neither - the caller drives
-everything through `Command`s instead (the batch-CLI case below). `RawModeGuard` stays separate from `Tap` on
+`Tap::wait_for_text`, `Tap::app_cursor_mode`. `SpawnOptions::forward_input`/`forward_output` are the independent
+switches between this project's modes (`roadmap.md`, "Full duplex" stage 3b mode (d)): both `true` forwards our
+own stdin to the child and the child's raw output to our own stdout (requirement 7, the human-at-a-real-terminal
+case); both `false` does neither - the caller drives everything through `Command`s instead (the batch-CLI case
+below); independently, `forward_output` alone lets a human watch without being able to type. `SpawnOptions::env`
+(`&[(String, String)]`, `decisions.md`) sets/overrides environment variables on the child via
+`portable_pty::CommandBuilder::env`, layered on top of `vtee`'s own inherited environment rather than
+replacing it - an empty slice (the default) changes nothing. `RawModeGuard` stays separate from `Tap` on
 purpose either way - it manages *our own* controlling terminal's mode, not the child's pty, and nothing in
 non-interactive mode has a real terminal of its own to manage.
 
@@ -126,7 +130,7 @@ to check instead of polling.
 ## The batch CLI: `vtee --script <path> -- <program> [args...]`
 
 What TinyFugue actually asked for first (`roadmap.md`): spawn `program` non-interactively
-(`SpawnOptions::interactive = false` - no stdin forwarding, no raw passthrough to our own stdout, so stdout stays
+(`SpawnOptions { forward_input: false, forward_output: false, .. }` - no stdin forwarding, no raw passthrough to our own stdout, so stdout stays
 clean for structured output), read `<path>` as newline-delimited JSON, run each line as a `Command` in order, and
 write one `CommandResult` JSON line to stdout for every `Snapshot`/`WaitFor` command. `--log <path>` still works
 the same way in this mode, for anyone who also wants the raw byte log alongside the script's structured output.
