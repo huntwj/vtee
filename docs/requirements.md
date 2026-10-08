@@ -11,7 +11,9 @@ status to track per-requirement rather than as one blob.
    **Met.** The batch CLI (`vtee --script`, `architecture.md`) runs a newline-delimited-JSON script of commands
    non-interactively and dumps structured results, built for and verified with TinyFugue's testing needs. "Usable
    by an agent across many calls" against an ongoing, out-of-process session is also met, read-only and
-   read-write: `vtee --listen`/`--connect` (`architecture.md`) lets a separate process query live state, and
+   read-write: observation is on by default now (read-only, at a hardened per-user default path,
+   `--no-listen` to opt out - `decisions.md`), so a separate process can query live state via `--connect`
+   without the session having been started with `--listen` in anticipation of that, and
    inject input too - with `--writable` when no human is competing (`WritePolicy::Open`), or with
    `--writable=exclusive`/`exclusive-shared` when one is, via an explicit `acquire_write`/`release_write` handoff
    (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). What's still open: free-for-all
