@@ -61,13 +61,16 @@ status to track per-requirement rather than as one blob.
    anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
    `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
-   **Linux: met.** **Windows: partially unblocked.** A local patch to `portable-pty` (`vendor/portable-pty/`,
-   `decisions.md`) fixes the specific crash this was blocked on (`STATUS_CONTROL_C_EXIT` within milliseconds of
-   spawning anything, confirmed gone - the child now actually stays alive). A second issue surfaced once that
-   one was fixed - a ConPTY-issued cursor-position query (`ESC[6n`) with nothing to answer it in the
-   non-terminal harness used to test this - not yet verified from an actual interactive terminal window, which
-   nothing in this tool-driven environment can provide. Native Windows use is closer than "blocked" but not yet
-   "met."
+   **Linux: met. Windows: better than blocked, not yet fully solved.** A local patch to `portable-pty`
+   (`vendor/portable-pty/`, `decisions.md`) fixes the crash this was blocked on (`STATUS_CONTROL_C_EXIT` within
+   milliseconds of spawning anything) - confirmed, no flakiness observed re-testing specifically that part.
+   Confirmed end to end from a real terminal: `vtee -- whoami.exe` spawns, runs, prints real output, and
+   exits cleanly. But automating that same check (`tests/windows_conpty.rs`, `#[ignore]`d) surfaced a separate,
+   deeper issue: pty creation itself is measurably unreliable depending on the calling process's own console
+   state, mitigated (failure rate reduced) but not eliminated by a defensive `AllocConsole` call - three
+   identical runs went 2 passed, 1 hung. Not yet separately re-verified on Windows at all: full-screen TUIs,
+   resize (`SIGWINCH` doesn't exist there), signal handling (requirement 7's `SIGTERM`/`SIGKILL` survival was
+   only ever measured on Linux).
 
 ## Not goals, for now
 

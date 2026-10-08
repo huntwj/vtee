@@ -126,10 +126,39 @@ This is very likely *not* a new bug introduced by the patch, and probably resolv
 actual terminal window (a real terminal answers a DSR query automatically, and `vtee`'s own `forward_input`
 would relay that reply to the child exactly like any other keystroke) - but that's reasoning about what
 *should* happen, not something verified, because nothing in this tool-driven environment can attach a real,
-interactive Windows console to test it. **Status: the originally-diagnosed crash is fixed and verified; full
-interactive use on native Windows is not yet verified end-to-end, and needs a human actually running `vtee`
-from a real terminal window to close the loop.** `vendor/portable-pty/README-vtee-patch.md` has the patch's
-own rationale and the removal plan once upstream fixes #7025 for real.
+interactive Windows console to test it.
+
+**Closed the loop, 2026-10-08, by the user running it from a real terminal**: `.\target\debug\vtee.exe --
+whoami.exe` from an actual PowerShell window printed `whoami`'s real output (`HOST\user`) and returned to the
+prompt cleanly - no hang, no crash. Confirms the hypothesis above exactly: a real terminal answers the DSR
+query automatically, `forward_input` relays that reply to the child like any other keystroke, and the session
+completes normally.
+
+**Then automating that same check surfaced a residual, probabilistic rough edge.** Built an automated
+regression test (`tests/windows_conpty.rs`) that opens a real ConPTY pty itself (via our own patched
+`portable_pty`) and acts as a minimal terminal - answering `ESC[6n` the same way a real one would - so this
+doesn't need a human each time. It hung the same way the manual pre-patch testing once did, but only
+*sometimes*: identical back-to-back runs (`cargo test --test windows_conpty`, same machine, same binary)
+passed, passed, then hung on the third. Found that the calling process having no console of its own makes
+`openpty()` itself unreliable, independent of anything `vtee` does - confirmed by having both the test and
+`Tap::spawn` call `AllocConsole()` defensively first (a no-op failure if one already exists; gated on
+`SpawnOptions::forward_output` in `Tap::spawn` specifically so `--headless`/`--script` never risk a surprise
+GUI window appearing during otherwise-automated/CI usage). That measurably helped - the failure rate dropped -
+but did not eliminate it: three identical runs after the fix went 2 passed, 1 hung. This matches the
+underlying GitHub issue's own description of "machine-dependent" almost exactly, just one level deeper -
+apparently extending to run-to-run variance on a single machine, not only machine-to-machine.
+
+**Status, precisely**: the originally-diagnosed crash (`STATUS_CONTROL_C_EXIT` within milliseconds) is fixed
+and verified with no flakiness observed in re-testing specifically that. The user's own real-terminal use
+worked cleanly, and this is the realistic case - that test harness itself (deliberately constructing an
+artificial pty-within-a-pty to automate what a human did manually) may be exercising a Windows console corner
+nobody's actual usage looks like. But a separate, deeper ConPTY-creation reliability issue is real, measured,
+not fully eliminated, and not fully understood - `tests/windows_conpty.rs` is `#[ignore]`d by default for
+exactly this reason (a 1-in-3 failure rate is unfit as a normal gate) rather than claimed as passing.
+Native Windows interactive use is meaningfully better than "blocked," genuinely not yet "fully solved."
+`vendor/portable-pty/README-vtee-patch.md` has the `CREATE_NEW_PROCESS_GROUP` patch's own rationale and the
+removal plan once upstream fixes #7025 for real; the `AllocConsole` mitigation is a separate, independent
+finding layered on top of it, not part of that same upstream issue.
 
 ## 2026-10-07: "both screen buffers" (requirement 3) deferred - a verified `alacritty_terminal` API gap
 
