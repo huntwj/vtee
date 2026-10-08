@@ -1291,6 +1291,7 @@ dependencies = [
  "serde_json",
  "signal-hook 0.4.5",
  "vte",
+ "winapi",
 ]
 
 [[package]]

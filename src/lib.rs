@@ -197,6 +197,22 @@ impl Tap {
         let cols = opts.cols.max(1);
         let rows = opts.rows.max(1);
 
+        // Measured, not a precaution added on spec (docs/decisions.md): `openpty()` just below
+        // was observed to hang when the calling process had no console of its own - a Windows
+        // ConPTY quirk, independent of the CREATE_NEW_PROCESS_GROUP bug this project already
+        // patches around (`vendor/portable-pty/README-vtee-patch.md`). A no-op failure
+        // (ignored) if this process already has a console, which is the common case - but a
+        // real side effect (a new, visible console window) if it doesn't, so this is gated on
+        // `forward_output`: only when something's actually meant to be shown to a human on a
+        // real screen, never for `--headless`/`--script`, where a surprise GUI window popping
+        // up during otherwise-automated/CI usage would be exactly the wrong kind of surprise.
+        #[cfg(windows)]
+        if opts.forward_output {
+            unsafe {
+                winapi::um::consoleapi::AllocConsole();
+            }
+        }
+
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(to_io_error)?;
 
@@ -831,7 +847,13 @@ pub fn run_tty_guard() -> ! {
 
         if let Ok(tty) = tty {
             use std::os::fd::AsRawFd;
-            let termios: libc::termios = unsafe { std::ptr::read(termios_bytes.as_ptr().cast()) };
+            // `read_unaligned`, not `read`: `termios_bytes` is a `[u8; N]`, which the type
+            // system only guarantees to be 1-byte aligned, while `libc::termios` likely needs
+            // more (it's built from `c_int`/`tcflag_t` fields). `read` requires the source to
+            // already be aligned for the target type; `read_unaligned` has identical semantics
+            // without that requirement - this buffer's actual alignment isn't something to rely
+            // on even though it has probably always happened to be enough in practice.
+            let termios: libc::termios = unsafe { std::ptr::read_unaligned(termios_bytes.as_ptr().cast()) };
             unsafe {
                 libc::tcsetattr(tty.as_raw_fd(), libc::TCSANOW, &termios);
             }
