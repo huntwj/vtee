@@ -18,7 +18,9 @@ status to track per-requirement rather than as one blob.
    `--writable=exclusive`/`exclusive-shared` when one is, via an explicit `acquire_write`/`release_write` handoff
    (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). What's still open: free-for-all
    and mutually-exclusive-with-a-human remain unbuilt modes of the same `WritePolicy` enum (nobody's needed them
-   yet), and multiple sessions behind one process/daemon.
+   yet), and multiple sessions behind one process/daemon. "Without a human" is now a declared mode, not an
+   accident of environment detection: `--headless` (`decisions.md`) turns off human stdin/stdout forwarding and
+   the raw-mode/signal machinery outright, rather than leaving it to whatever `is_terminal()` happens to see.
 2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
    256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
    and combining characters. We should not cap the target at what one program uses today.
@@ -44,10 +46,13 @@ status to track per-requirement rather than as one blob.
    **Met.** `RawLog` (asciicast v2) + `replay()`, verified byte-for-byte against the live snapshot for all 15
    probe files (`tests/replay.rs`).
 6. **Deterministic.** Control over size, `TERM`, environment, working directory, resize and timing.
-   **Mostly met**: size and working directory are controlled by `Tap::spawn`; resize is handled live
-   (`SIGWINCH`). **Not yet controlled**: `TERM` and arbitrary environment variables - `Tap::spawn` doesn't expose
-   a way to set them on the child yet, so it inherits ours. Timing is irrelevant to replay (by design) but not
-   yet controllable for the live tap itself (no artificial delay/throttling, not clear it's needed).
+   **Mostly met**: size and working directory are controlled by `Tap::spawn`, and size is now explicitly
+   overridable from the CLI too (`--cols`/`--rows`, `decisions.md`) rather than only ever auto-detected from a
+   real terminal - the first of what's meant to grow into a fuller virtual tty spec (terminal emulation mode,
+   colour support, ...) as those are actually asked for. Resize is handled live (`SIGWINCH`). **Not yet
+   controlled**: `TERM` and arbitrary environment variables - `Tap::spawn` doesn't expose a way to set them on
+   the child yet, so it inherits ours. Timing is irrelevant to replay (by design) but not yet controllable for
+   the live tap itself (no artificial delay/throttling, not clear it's needed).
 7. **Transparent observer mode.** The human keeps their own terminal and sees exactly what they would without the
    tool. Output is forwarded raw; the emulator only watches.
    **Met.** Raw bidirectional forwarding, `RawModeGuard` for the human's own terminal mode, confirmed not to alter

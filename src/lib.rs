@@ -130,9 +130,11 @@ impl ExclusiveLock {
 
     /// `HumanPriority::Participant`: a keystroke always revokes whoever currently holds it,
     /// human or not - reacting to a real event (a byte arrived) rather than inferring "idle
-    /// enough" the way `WritePolicy`'s rejected idle-based option would have.
-    fn revoke(&self) {
-        *self.holder.lock().unwrap() = None;
+    /// enough" the way `WritePolicy`'s rejected idle-based option would have. Returns whether
+    /// anyone was actually holding it, so a caller logging this can skip the common "nobody
+    /// held it anyway" case instead of logging every single keystroke.
+    fn revoke(&self) -> bool {
+        self.holder.lock().unwrap().take().is_some()
     }
 }
 
@@ -462,10 +464,9 @@ impl Tap {
 }
 
 /// tmux's own answer to "who can connect" (`docs/decisions.md`): not socket-file permissions,
-/// but a private per-user directory that nothing else can even traverse into. Used when
-/// `--listen` is given with no explicit path (`main.rs`) - an explicit `--listen <path>` skips
-/// this entirely and is the caller's own responsibility, same as tmux's `-S` does for its own
-/// explicit socket paths.
+/// but a private per-user directory that nothing else can even traverse into. Shared by
+/// `default_socket_path` and `default_log_path` - one session's socket and its diagnostic log
+/// live side by side, so they only need this check done once each.
 ///
 /// Creates `$TMPDIR/vtee-<uid>/` with mode `0700` if it doesn't exist yet (the mode is passed
 /// to the `mkdir` call itself, not set afterwards, so there's no window where it briefly exists
@@ -474,12 +475,9 @@ impl Tap {
 /// `symlink_metadata` doesn't follow one), isn't owned by the current user, or has any
 /// group/other permission bit set - the exact two checks that defeat a classic `/tmp`
 /// symlink-or-pre-plant race, where another local user pre-creates the directory before this
-/// one ever runs. The socket itself is named by this process's pid, so concurrent sessions for
-/// the same user don't collide; `Tap::serve` already removes a stale file at its target path
-/// before binding, which also covers a pid getting reused long after a killed session left its
-/// socket behind.
+/// one ever runs.
 #[cfg(unix)]
-pub fn default_socket_path() -> io::Result<PathBuf> {
+fn default_session_dir() -> io::Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     let uid = unsafe { libc::getuid() };
@@ -488,19 +486,19 @@ pub fn default_socket_path() -> io::Result<PathBuf> {
     match std::fs::symlink_metadata(&dir) {
         Ok(meta) if !meta.is_dir() => {
             return Err(io::Error::other(format!(
-                "{} exists and isn't a plain directory - refusing to use it as the default socket dir",
+                "{} exists and isn't a plain directory - refusing to use it as the default session dir",
                 dir.display()
             )));
         }
         Ok(meta) if meta.uid() != uid => {
             return Err(io::Error::other(format!(
-                "{} isn't owned by the current user - refusing to use it as the default socket dir",
+                "{} isn't owned by the current user - refusing to use it as the default session dir",
                 dir.display()
             )));
         }
         Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
             return Err(io::Error::other(format!(
-                "{} has unsafe permissions (group/other access) - refusing to use it as the default socket dir",
+                "{} has unsafe permissions (group/other access) - refusing to use it as the default session dir",
                 dir.display()
             )));
         }
@@ -511,12 +509,37 @@ pub fn default_socket_path() -> io::Result<PathBuf> {
         Err(e) => return Err(e),
     }
 
-    Ok(dir.join(format!("{}.sock", std::process::id())))
+    Ok(dir)
+}
+
+/// Used when `--listen` is given with no explicit path (`main.rs`) - an explicit
+/// `--listen=<path>` skips this entirely and is the caller's own responsibility, same as
+/// tmux's `-S` does for its own explicit socket paths. Named by this process's pid, so
+/// concurrent sessions for the same user don't collide; `Tap::serve` already removes a stale
+/// file at its target path before binding, which also covers a pid getting reused long after a
+/// killed session left its socket behind.
+#[cfg(unix)]
+pub fn default_socket_path() -> io::Result<PathBuf> {
+    Ok(default_session_dir()?.join(format!("{}.sock", std::process::id())))
 }
 
 #[cfg(not(unix))]
 pub fn default_socket_path() -> io::Result<PathBuf> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "a default --listen socket path needs Unix"))
+}
+
+/// Where diagnostic logging goes when a real terminal is actively showing the child
+/// (`docs/decisions.md`) - right beside the session's own socket, so attaching to one tells you
+/// where to find the other. Same pid-naming and stale-file reasoning as `default_socket_path`;
+/// unlike the socket, nothing re-opens this across runs, so no stale-file cleanup is needed.
+#[cfg(unix)]
+pub fn default_log_path() -> io::Result<PathBuf> {
+    Ok(default_session_dir()?.join(format!("{}.log", std::process::id())))
+}
+
+#[cfg(not(unix))]
+pub fn default_log_path() -> io::Result<PathBuf> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "a default diagnostic log path needs Unix"))
 }
 
 /// `Tap::serve`'s policy knobs. `Copy` and small on purpose - it's cloned into every
@@ -539,6 +562,7 @@ impl Default for ServeOptions {
 #[cfg(unix)]
 fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: ServeOptions) {
     let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
+    ::log::debug!("connection {id}: accepted");
     let Ok(reader_stream) = stream.try_clone() else { return };
     let reader = io::BufReader::new(reader_stream);
     let mut writer = stream;
@@ -557,10 +581,13 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
                 // has no notion of which connection is asking.
                 Ok(()) => match cmd {
                     Command::AcquireWrite => {
-                        CommandResult::WriteAccess { acquired: tap.exclusive_lock.try_acquire(id) }
+                        let acquired = tap.exclusive_lock.try_acquire(id);
+                        ::log::debug!("connection {id}: acquire_write -> {acquired}");
+                        CommandResult::WriteAccess { acquired }
                     }
                     Command::ReleaseWrite => {
                         tap.exclusive_lock.release_if_held_by(id);
+                        ::log::debug!("connection {id}: released write access");
                         CommandResult::WriteAccess { acquired: false }
                     }
                     Command::Send { .. } | Command::SendKey { .. } | Command::Resize { .. }
@@ -577,11 +604,15 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
                 },
             },
         };
+        if let CommandResult::Error { message } = &result {
+            ::log::debug!("connection {id}: rejected - {message}");
+        }
         let Ok(text) = serde_json::to_string(&result) else { continue };
         if writeln!(writer, "{text}").is_err() {
             break;
         }
     }
+    ::log::debug!("connection {id}: disconnected");
     // However this connection ends - a clean `release_write`, just closing it, a write
     // failure above - it must not be left holding the lock forever (`docs/roadmap.md`:
     // auto-released on disconnect). A no-op if it never held it, or already released it.
@@ -646,8 +677,8 @@ fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human
             }
             let _ = w.flush();
         }
-        if human_revokes_lock.load(Ordering::Relaxed) {
-            exclusive_lock.revoke();
+        if human_revokes_lock.load(Ordering::Relaxed) && exclusive_lock.revoke() {
+            ::log::debug!("human keystroke revoked the remote write lock");
         }
     }
 }
