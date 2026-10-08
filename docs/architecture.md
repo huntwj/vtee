@@ -296,6 +296,22 @@ reached the point of listening on its socket), and, after fixing that, insuffici
 unblocking the FIFO and asserting on the result. Switching to a real pty removed the whole class of ordering
 hazard at once, the same win `pty.fork()` already gave the `SIGTERM`/`SIGKILL` tests.
 
+## Socket security: the default `--listen` path (2026-10-08)
+
+`vtee::default_socket_path()` (`src/lib.rs`) is tmux's own answer to "who can connect" (`docs/decisions.md`
+has the full comparison): not socket-file permissions, but a private per-UID directory
+(`$TMPDIR/vtee-<uid>/`, mode `0700`, passed straight to `mkdir` rather than `chmod`'d afterwards) that nothing
+else can even traverse into. If that directory already exists, it's verified rather than trusted - rejected
+outright if it isn't a plain directory (`symlink_metadata`, so a symlink is caught the same way a wrong-type
+file would be), isn't owned by the current UID, or has any group/other permission bit set at all. `main.rs`'s
+`take_listen_flag` routes a bare `--listen` (no path argument) through this; `--listen <path>` is untouched and
+stays the caller's own responsibility. The socket inside is named `<pid>.sock`; `Tap::serve`'s pre-bind
+`remove_file` (above) already handles a stale file left by a killed, pid-reused session.
+
+This narrows who can *reach* the socket at all - it adds nothing on top for a client that does connect, which
+still gets exactly what `WritePolicy` on that connection allows, with no per-client identity beyond the
+sequential id `ExclusiveLock` uses to arbitrate the write lock.
+
 ## Known rough edges (tracked, not silently ignored)
 
 - `Tap::wait()` doesn't block forever waiting for the pty master's reader to see EOF, because it isn't guaranteed

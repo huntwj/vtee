@@ -140,6 +140,45 @@ this project already exposes, and TF's own read of the result was "the unexposed
 The gap this entry defers turned out not to be in the way of the thing it was theoretically about. No patch
 needed; closing the loop here rather than leaving it as a live risk.
 
+## 2026-10-08: `--listen` with no path defaults to tmux's own socket-security model
+
+**Gap found while being asked** "how is security handled for this?" - measured, not assumed, before answering:
+`UnixListener::bind` creates the socket file with whatever the process umask produces (verified in the Linux
+container: `srwxr-xr-x` under the default `umask 0022`), and `vtee` did nothing to narrow that. There is no
+application-level authentication at all - `WritePolicy` governs what a connection may do once connected, not who
+may connect; under `Exclusive`, the per-connection id used to arbitrate the write lock is sequential, not a
+secret. Whoever could reach an explicit `--listen <path>` could do anything the server's policy allowed.
+
+**Looked at how `tmux` handles the same problem** (confirmed against its actual source, not recalled from
+memory - `server.c`): it isn't socket-file permissions either. `tmux` puts its socket in a per-UID directory
+(`$TMPDIR/tmux-<uid>/`) and, before using that directory, checks that it's owned by the current user and that
+group/other have no permission bits at all - refusing to start ("unsafe permissions") if an existing directory
+fails either check. The protection is blocking *traversal into the directory* for anyone but the owner, not the
+socket file's own mode bits - which also defeats a `/tmp` symlink-or-pre-plant race, where another local user
+pre-creates that directory before the real one ever runs `tmux`.
+
+**Decision: the same model, scoped to the default case only.** `vtee::default_socket_path()` (`src/lib.rs`)
+creates `$TMPDIR/vtee-<uid>/` with mode `0700` passed directly to the `mkdir` call (no window where it exists
+with looser permissions), or - if the directory already exists - verifies rather than trusts it: refuses to use
+it if it isn't a plain directory (`symlink_metadata`, so a symlink is rejected the same way a plain file would
+be), isn't owned by the current UID, or has any group/other bit set. `--listen` with no path argument
+(`main.rs`'s `take_listen_flag`) resolves to this; `--listen <path>` is unchanged and stays the caller's own
+responsibility, exactly as `tmux -S <path>` does for its own explicit paths - this only hardens the default,
+not every possible invocation. The socket inside that directory is named by pid (`<pid>.sock`), not a fixed
+name like tmux's `default` session, since nothing here manages multiple named sessions behind one directory yet;
+`Tap::serve`'s existing stale-socket removal (`docs/architecture.md`) already covers a pid getting reused after
+a killed session left its file behind.
+
+Verified end to end in the Linux container: a bare `--listen` creates `/tmp/vtee-<uid>/` as `drwx------`; an
+explicit `--listen <path>` is byte-for-byte the same as before; a pre-existing world-writable directory at the
+default path is refused (`unsafe permissions`, exit code 71); a pre-existing directory owned by a different
+user is refused (`isn't owned by the current user`, exit code 71).
+
+**Not solved by this**: an explicit `--listen <path>` still has no protection at all - that remains the caller's
+job, same as it was. There's still no way for a client to prove *who* it is once connected; this closes the
+"who can reach the socket at all" gap, not an authentication gap on top of that. Nobody's asked for the latter
+yet.
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."
