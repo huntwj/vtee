@@ -179,6 +179,40 @@ job, same as it was. There's still no way for a client to prove *who* it is once
 "who can reach the socket at all" gap, not an authentication gap on top of that. Nobody's asked for the latter
 yet.
 
+## 2026-10-08: observation is on by default now; the exit-time snapshot dump isn't
+
+Two related corrections prompted by the same question - "what does plain `vtee -- vim` actually gain you over
+running `vim` directly?" - asked in direct response to an honest answer about what the previous defaults did.
+
+**The exit-time screen dump was never a real requirement.** Traced to the very first commit, before TF had
+asked for anything - debug scaffolding to prove `Tap` was tracking state correctly, left on by default ever
+since. For a human running something interactively, it's also actively redundant: `forward_output` already
+rendered the real final screen to their actual terminal, live: the dump just repeats that, in uglier
+`Debug`-escaped form, after the fact. **Decision: opt-in via `--dump-on-exit`, off by default.** Nothing in
+`requirements.md` calls for it; `--script`'s structured results and `--listen`'s on-demand queries are the
+real answers to "give me the state," not an unconditional dump nobody consuming `vtee` programmatically
+asked for.
+
+**Observation, on the other hand, turns out to be the actual common case - so make it the default.** The one
+use case that exists today (TF's testing) never touches `--listen` at all; the one described but unbuilt
+(watching a live session, `architecture.md`/`roadmap.md`) is the user's own stated reason for being "the other
+consumer" of this project. Once `default_socket_path` made a default location safe to bind
+(above), the cost of always having something to attach to dropped to "one background thread and one socket
+file," while the value - any `vtee` session being attachable without having to restart it with `--listen`
+in hindsight - is real. **Decision: `--listen` is implicit now, `WritePolicy::ReadOnly`, at the hardened
+default path, unless `--no-listen` is given** (added specifically for a CI script driving `vtee` through
+plain stdin/stdout, which has no use for an attachable socket and would rather not have one appear in a shared
+`/tmp`). `--listen`/`--listen <path>` still work exactly as before and still mean what they meant; `--writable`
+is still required to get anything beyond read-only, unchanged. The *implicit* default's own
+`default_socket_path` failing (not Unix, today) is **not** treated as fatal - that would turn "you get
+observation for free" into "the program won't even start" on a platform that can't have it yet, which is a
+worse trade than just not being attachable. An *explicit* `--listen` failing the same way stays a hard error,
+since the user asked for it by name.
+
+Verified end to end in the Linux container: a plain run with no flags creates the default socket and prints
+the same "listening for observers" line `--listen` always has; `--no-listen` suppresses it entirely; passing
+both `--listen` and `--no-listen` is a usage error (exit code 64) rather than silently picking one.
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."
