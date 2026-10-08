@@ -353,6 +353,20 @@ All three fixes have regression tests in `tests/cli.rs` (`unknown_flags_are_reje
 `trailing_var_arg` exists for). Full suite re-verified in the Linux container and natively on Windows after
 every change in this entry.
 
+## 2026-10-08: "free-for-all" (stage 3b option (a)) needed nothing built - confirmed, not assumed
+
+The user asked for this mode specifically; `roadmap.md` had already predicted it would turn out to be
+`WritePolicy::Open` reused as-is once a human is also typing, since `Command::authorize`'s `Open` arm never
+checked whether anyone else was typing - but that was a read of the code, not a live test with an actual human
+present. Verified for real: a simulated human (Python's `pty.fork()`, the same technique as the signal and
+`Participant` tests) types into the real pty while a separate `--connect` client sends a `send` command with no
+`acquire_write` - both land in the child. (First run of this test showed the remote write missing entirely; the
+cause was too-short sleeps in the *test script* racing the connect against the server still starting up, not an
+`vtee` bug - same class of mistake as the FIFO-timing lessons from the `Participant` verification earlier.)
+
+No code changed. `roadmap.md` updated to mark (a) done alongside (b)/`HumanPriority`, leaving only (d)
+(mutually-exclusive-with-a-human) as the one remaining unbuilt mode of `WritePolicy`.
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."
