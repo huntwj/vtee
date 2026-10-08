@@ -125,6 +125,13 @@ struct Cli {
     #[arg(long, value_name = "N")]
     rows: Option<u16>,
 
+    /// Set (or override) an environment variable on the spawned child, `KEY=VALUE` - repeatable.
+    /// Applied on top of `vtee`'s own inherited environment, not in place of it (requirement
+    /// 6, "Deterministic": `TERM` is just one entry here, not a separate flag). Shared by every
+    /// mode, same as `--cols`/`--rows` - unlike those, `run_script` does read this one too.
+    #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair)]
+    env: Vec<(String, String)>,
+
     /// The program to run, and its own arguments - everything after the last recognized flag
     /// (or after an explicit `--`, needed if the program's own name or first argument could
     /// otherwise be mistaken for one of ours). Not required with `--connect`, which has nothing
@@ -225,7 +232,11 @@ fn main() -> ExitCode {
     // drops before this function's own return does - calling `std::process::exit` while a
     // `Tap` is still alive would skip its child-killing `Drop` and orphan the child.
     match &cli.script {
-        Some(script_path) => run_script(program, rest, cli.log.as_deref(), script_path, cli.text, cols, rows),
+        Some(script_path) => run_script(
+            program,
+            rest,
+            ScriptOpts { log_path: cli.log.as_deref(), script_path, text_mode: cli.text, cols, rows, env: &cli.env },
+        ),
         None => run_interactive(
             program,
             rest,
@@ -238,6 +249,7 @@ fn main() -> ExitCode {
                 headless: cli.headless,
                 cols,
                 rows,
+                env: &cli.env,
             },
         ),
     }
@@ -255,6 +267,15 @@ fn vtee_log_path_hint() -> String {
 /// conversion happens.
 fn exit_code(code: exitcode::ExitCode) -> ExitCode {
     ExitCode::from(code as u8)
+}
+
+/// `--env KEY=VALUE` - splits on the *first* `=` only, so a value containing `=` (e.g.
+/// `--env PATH=/a=b`) still parses as intended rather than erroring or truncating.
+fn parse_env_pair(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((key, value)) => Ok((key.to_string(), value.to_string())),
+        None => Err(format!("expected KEY=VALUE, got {s:?}")),
+    }
 }
 
 /// A fatal, always-visible message - printed directly to stderr (never through the file-backed
@@ -303,6 +324,7 @@ struct InteractiveOpts<'a> {
     headless: bool,
     cols: u16,
     rows: u16,
+    env: &'a [(String, String)],
 }
 
 fn run_interactive(program: &str, rest: &[String], cli: InteractiveOpts) -> ExitCode {
@@ -315,6 +337,7 @@ fn run_interactive(program: &str, rest: &[String], cli: InteractiveOpts) -> Exit
         log_path: cli.log_path,
         forward_input: !cli.no_stdin && !cli.headless,
         forward_output: !cli.headless,
+        env: cli.env,
     };
 
     // `Arc` even when `--listen` isn't given: `Tap::serve` needs one, and every method it
@@ -398,18 +421,26 @@ fn run_interactive(program: &str, rest: &[String], cli: InteractiveOpts) -> Exit
 /// to stdout per `snapshot`/`wait_for` command. Always kills the child at the end rather than
 /// hoping a script leaves it in a state where it exits on its own - deterministic beats
 /// "probably fine" for something a test harness depends on not hanging.
-fn run_script(
-    program: &str,
-    rest: &[String],
-    log_path: Option<&Path>,
-    script_path: &Path,
+struct ScriptOpts<'a> {
+    log_path: Option<&'a Path>,
+    script_path: &'a Path,
     text_mode: bool,
     cols: u16,
     rows: u16,
-) -> ExitCode {
-    let opts = vtee::SpawnOptions { cols, rows, log_path, forward_input: false, forward_output: false };
+    env: &'a [(String, String)],
+}
 
-    let tap = match vtee::Tap::spawn(program, rest, opts) {
+fn run_script(program: &str, rest: &[String], opts: ScriptOpts) -> ExitCode {
+    let spawn_opts = vtee::SpawnOptions {
+        cols: opts.cols,
+        rows: opts.rows,
+        log_path: opts.log_path,
+        forward_input: false,
+        forward_output: false,
+        env: opts.env,
+    };
+
+    let tap = match vtee::Tap::spawn(program, rest, spawn_opts) {
         Ok(t) => t,
         Err(e) => {
             print_error(&format!("failed to spawn {program}: {e}"));
@@ -419,7 +450,7 @@ fn run_script(
 
     tap.watch_sigterm();
 
-    let code = run_script_body(&tap, script_path, text_mode);
+    let code = run_script_body(&tap, opts.script_path, opts.text_mode);
 
     tap.kill();
     let _ = tap.wait();

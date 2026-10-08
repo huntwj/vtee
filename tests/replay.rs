@@ -29,6 +29,7 @@ fn replay_matches_live_for_every_probe() {
             log_path: Some(&log_path),
             forward_input: false,
             forward_output: false,
+            env: &[],
         };
         let tap = vtee::Tap::spawn(cat_path(), &[bin.to_string_lossy().into_owned()], opts)
             .unwrap_or_else(|e| panic!("{name}: spawn failed: {e}"));

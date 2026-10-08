@@ -150,11 +150,16 @@ pub struct SpawnOptions<'a> {
     pub forward_input: bool,
     /// Forward the child's raw output to our own stdout (a human's view, requirement 7).
     pub forward_output: bool,
+    /// Extra/overriding environment variables for the child (requirement 6, "Deterministic" -
+    /// `TERM` is just another entry here, not a separate mechanism). Applied on top of our own
+    /// inherited environment (`portable_pty::CommandBuilder::env`'s own default), not in place
+    /// of it - an empty slice changes nothing from today's "inherits ours" behaviour.
+    pub env: &'a [(String, String)],
 }
 
 impl Default for SpawnOptions<'_> {
     fn default() -> Self {
-        SpawnOptions { cols: 80, rows: 24, log_path: None, forward_input: true, forward_output: true }
+        SpawnOptions { cols: 80, rows: 24, log_path: None, forward_input: true, forward_output: true, env: &[] }
     }
 }
 
@@ -199,6 +204,9 @@ impl Tap {
         cmd.args(args);
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
+        }
+        for (key, value) in opts.env {
+            cmd.env(key, value);
         }
         let child = pair.slave.spawn_command(cmd).map_err(to_io_error)?;
         // Our process doesn't need its own handle to the slave side once the child has it;
