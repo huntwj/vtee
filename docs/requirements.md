@@ -61,8 +61,13 @@ status to track per-requirement rather than as one blob.
    anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
    `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
-   **Linux: met.** **Windows: blocked on an upstream bug** (`wezterm/wezterm#7025`), not just unimplemented -
-   see `decisions.md`.
+   **Linux: met.** **Windows: partially unblocked.** A local patch to `portable-pty` (`vendor/portable-pty/`,
+   `decisions.md`) fixes the specific crash this was blocked on (`STATUS_CONTROL_C_EXIT` within milliseconds of
+   spawning anything, confirmed gone - the child now actually stays alive). A second issue surfaced once that
+   one was fixed - a ConPTY-issued cursor-position query (`ESC[6n`) with nothing to answer it in the
+   non-terminal harness used to test this - not yet verified from an actual interactive terminal window, which
+   nothing in this tool-driven environment can provide. Native Windows use is closer than "blocked" but not yet
+   "met."
 
 ## Not goals, for now
 
