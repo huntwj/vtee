@@ -25,3 +25,10 @@ vte = { version = "0.15.0", features = ["ansi"] }
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
+
+# Local one-line fix for the Windows ConPTY bug (docs/decisions.md, vendor/portable-pty/
+# README-vtee-patch.md) - CREATE_NEW_PROCESS_GROUP missing from CreateProcessW, tracked
+# upstream at wezterm/wezterm#7025. Remove this and the vendor/ directory once a released
+# portable-pty actually fixes it.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }
