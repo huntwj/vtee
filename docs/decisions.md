@@ -303,6 +303,56 @@ actually needs rather than adopting its whole list:
   `signal-hook`, already in use for the SIGHUP-immunization/watchdog tricks `ctrlc` doesn't offer); `ansi_term`
   (the book's own pick for colour, but archived/unmaintained - `owo-colors` above instead).
 
+## 2026-10-08: antagonistic review of the day's work - one real CLI bug found and fixed
+
+Four adversarial reviews, each explicitly briefed to try to disprove this project's own claims rather than
+confirm them, covering: the socket-security hardening, `ExclusiveLock` concurrency and `--headless`'s
+guarantees, and the new `clap` CLI surface. **Three areas held up; one didn't.**
+
+**Socket security (default per-UID directory)**: every attack scenario tried - TOCTOU between the directory
+check and `mkdir`, two same-uid processes racing, a symlink pre-planted at the predicted `<pid>.sock` path,
+files already present inside the directory - either fails closed (the losing side of a race just gets "not
+attachable," never a trusted-but-wrong directory) or is foreclosed structurally by the 0700 directory gate
+before it's even reachable (a non-owning attacker has no `x`/`w` on the directory at all, so pid predictability
+is irrelevant). One honest caveat the docs didn't state outright: this assumes a sticky-bit temp directory
+(true of `/tmp` by default) and that root always bypasses Unix permission checks (standard, not a flaw here).
+
+**`ExclusiveLock` concurrency and `--headless`**: both held up. Acquire/release/revoke are each one
+operation under a single mutex, so two connections racing `AcquireWrite` cannot both win, and id reuse needs
+2^64 connections to even become a question. The one real nuance - a remote write can land in the microsecond
+gap between a human's keystroke landing and `revoke()` running, since those are two separate critical
+sections, not one atomic unit - is a property of a *reactive* lock, not a broken promise: the design never
+claimed byte-level-atomic preemption, only "a remote client finds out by its next command failing," which
+still holds. `--headless` was verified to genuinely skip `RawModeGuard`/the watchdog/`watch_resize` outright
+(not just leave them to no-op), not merely claim to.
+
+**The `clap` CLI surface had a real, confirmed bug**: `allow_hyphen_values = true` on the trailing `command`
+positional made clap treat *any* unrecognized leading flag - including `--version`/`-V` - as the start of the
+program to run rather than rejecting it, so a typo'd `vtee` flag silently became "the program to run" and
+failed with a confusing pty-spawn error instead of clap's own "unrecognized argument" message.
+**Fixed by dropping `allow_hyphen_values`** - `trailing_var_arg` alone still lets a hyphen-prefixed argument
+*after* the program name pass through untouched (verified: `vtee -- cat -n` and `vtee cat -n` both still
+reach `cat` correctly, with or without the `--`), it just no longer greedily starts the positional at an
+unrecognized flag *before* any program name has appeared. Investigating this also surfaced that `--version`
+had never actually been enabled at all (`clap::Parser` requires the explicit `#[command(version)]` opt-in,
+confirmed against its own docs) - added, so `--version`/`-V` now print `vtee 0.0.0` and exit 0 rather than
+erroring either way.
+
+**Two smaller, real inconsistencies fixed alongside it**: `--writable` had no `conflicts_with` tying it to a
+socket existing at all, unlike `--headless`+`--no-listen` which was already validated - `--writable --no-listen`
+used to be silently accepted and silently inert; now rejected the same way. `--script` silently accepted and
+silently ignored every interactive-only flag (`--headless`, `--listen`/`--no-listen`, `--writable`,
+`--no-stdin`, `--dump-on-exit`) since `run_script` never reads any of them - now `conflicts_with_all` on
+`--script` rejects the combination instead, on the principle that accepting a flag `run_script` can't possibly
+honor is misleading, not lenient.
+
+All three fixes have regression tests in `tests/cli.rs` (`unknown_flags_are_rejected_not_swallowed_as_the_command`,
+`version_flag_is_handled_by_clap_not_swallowed`, `writable_and_no_listen_conflict`,
+`script_conflicts_with_every_interactive_only_flag`, plus a Unix-only
+`hyphen_flags_after_the_program_name_still_pass_through` confirming the fix didn't break the feature
+`trailing_var_arg` exists for). Full suite re-verified in the Linux container and natively on Windows after
+every change in this entry.
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."

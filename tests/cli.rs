@@ -57,9 +57,81 @@ fn cols_rejects_a_non_numeric_value() {
         .stderr(predicate::str::contains("--cols"));
 }
 
+#[test]
+fn writable_and_no_listen_conflict() {
+    vtee()
+        .args(["--writable", "--no-listen", "--", "cat"])
+        .assert()
+        .failure()
+        .code(exitcode::USAGE)
+        .stderr(predicate::str::contains("--writable").and(predicate::str::contains("--no-listen")));
+}
+
+/// Regression test for a real bug an adversarial review caught: `allow_hyphen_values` on the
+/// trailing `command` positional used to make clap treat *any* unrecognized leading flag,
+/// including its own `--version`/`-V`, as the start of the command to run rather than rejecting
+/// it - so a typo'd vtee flag silently became "the program to run" and failed with a
+/// confusing pty-spawn error instead of clap's own "unrecognized argument" message. Fixed by
+/// dropping `allow_hyphen_values` (program args after the program name itself still pass
+/// through fine via plain `trailing_var_arg` - see the Unix-only passthrough test below).
+#[test]
+fn unknown_flags_are_rejected_not_swallowed_as_the_command() {
+    vtee()
+        .arg("--this-is-not-a-real-flag")
+        .assert()
+        .failure()
+        .code(exitcode::USAGE)
+        .stderr(predicate::str::contains("unexpected argument").or(predicate::str::contains("unrecognized")));
+}
+
+#[test]
+fn version_flag_is_handled_by_clap_not_swallowed() {
+    vtee().arg("--version").assert().success().stdout(predicate::str::contains("vtee"));
+}
+
+/// `--script` never looks at the interactive-only flags (`run_script` has no idea they exist) -
+/// rejecting the combination is more honest than silently accepting and ignoring it.
+#[test]
+fn script_conflicts_with_every_interactive_only_flag() {
+    for flag in ["--headless", "--listen", "--no-listen", "--writable", "--no-stdin", "--dump-on-exit"] {
+        vtee()
+            .args(["--script", "nonexistent.ndjson", flag, "--", "cat"])
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains("--script").and(predicate::str::contains(flag)));
+    }
+}
+
 #[cfg(unix)]
 mod unix_behavior {
     use super::*;
+
+    /// Companion to `unknown_flags_are_rejected_not_swallowed_as_the_command`: dropping
+    /// `allow_hyphen_values` must not have broken the actual feature `trailing_var_arg` is for -
+    /// a hyphen-prefixed argument belonging to the *wrapped program*, appearing after the
+    /// program name has already started the positional, still has to pass through untouched,
+    /// with or without an explicit `--`. Uses `head -c 2` rather than `cat`: it exits on its own
+    /// once it's read 2 bytes, so this can't hang waiting for stdin EOF the way `cat` would (the
+    /// pty master stays open for the life of the session, so closing just our own stdin never
+    /// delivers EOF to the child) - if `-c 2` were silently dropped, `head` would fall back to
+    /// its 10-line default and hang on this input, caught by `.timeout()` rather than wedging
+    /// the test suite.
+    #[test]
+    fn hyphen_flags_after_the_program_name_still_pass_through() {
+        // Not `--headless` - that forces `forward_input` off regardless, which would make this
+        // test about whether stdin forwarding happens at all, not about hyphen-flag passthrough.
+        for args in [["--no-listen", "--", "head", "-c", "2"].as_slice(), ["--no-listen", "head", "-c", "2"].as_slice()]
+        {
+            vtee()
+                .args(args)
+                .timeout(Duration::from_secs(5))
+                .write_stdin("hi there\n")
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("hi"));
+        }
+    }
 
     /// `--listen <path>` with a space is deliberately not the same as `--listen=<path>`
     /// (`docs/decisions.md`, following POSIX's own rule for an optional-value long option) -
