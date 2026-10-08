@@ -109,6 +109,28 @@ speculation. Not investigated further now, consistent with requirement 8 deferri
 **Decision: build on `portable-pty`.** Its Linux backend is solid and the issues found were in our own glue code,
 not the crate. The Windows gap is real but expected and explicitly out of scope until the Windows work starts.
 
+**2026-10-08: the patch was tried, and it's a real, confirmed, partial fix - not a full fix.** Vendored
+`portable-pty` 0.9.0 into `vendor/portable-pty/` (self-contained once published - its registry `Cargo.toml` has
+no path deps on sibling `wezterm` crates, confirmed by reading it, so no need to fork the whole monorepo),
+added `CREATE_NEW_PROCESS_GROUP` to the one `CreateProcessW` call, wired in via `[patch.crates-io]`.
+**Confirmed fixed**: spawning `whoami.exe` natively on Windows no longer dies with `STATUS_CONTROL_C_EXIT`
+within milliseconds - `tasklist` shows the child process actually alive and running, where before it was gone
+almost instantly. That's the exact, specific bug this entry diagnosed, and it's gone.
+
+**But that wasn't the end of it.** With the crash fixed, a second, separate issue surfaced: the child's
+(forwarded) output included a bare cursor-position query (`ESC[6n`, DSR) that ConPTY itself issues toward
+whatever's on the other end of its pty, expecting a reply via stdin - and with no real terminal actually
+attached in the test harness used to check this (`PowerShell`'s `Start-Process` with redirected pipes, not a
+real console window), nothing ever answers it, so the session hangs waiting for a reply that will never come.
+This is very likely *not* a new bug introduced by the patch, and probably resolves itself when run from an
+actual terminal window (a real terminal answers a DSR query automatically, and `vtee`'s own `forward_input`
+would relay that reply to the child exactly like any other keystroke) - but that's reasoning about what
+*should* happen, not something verified, because nothing in this tool-driven environment can attach a real,
+interactive Windows console to test it. **Status: the originally-diagnosed crash is fixed and verified; full
+interactive use on native Windows is not yet verified end-to-end, and needs a human actually running `vtee`
+from a real terminal window to close the loop.** `vendor/portable-pty/README-vtee-patch.md` has the patch's
+own rationale and the removal plan once upstream fixes #7025 for real.
+
 ## 2026-10-07: "both screen buffers" (requirement 3) deferred - a verified `alacritty_terminal` API gap
 
 **Measured against the crate (0.26.0) and alacritty's own current upstream `main` branch** (not just assumed):
