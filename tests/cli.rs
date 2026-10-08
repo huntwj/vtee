@@ -14,7 +14,10 @@ fn vtee() -> Command {
 
 #[test]
 fn requires_a_command_unless_connecting() {
-    vtee().assert().failure().code(exitcode::USAGE).stderr(predicate::str::contains("COMMAND"));
+    // Enforced manually now, not via clap's own `required_unless_present` (which can't
+    // reference a `#[command(subcommand)]` field directly - `src/main.rs`'s `command` field
+    // doc comment has the full reasoning) - the message is ours, not clap's generated one.
+    vtee().assert().failure().code(exitcode::USAGE).stderr(predicate::str::contains("a command is required"));
 }
 
 #[test]
@@ -233,12 +236,18 @@ mod unix_behavior {
         let meta = std::fs::symlink_metadata(&dir).expect("default session dir should exist");
         assert!(meta.is_dir());
         assert_eq!(meta.mode() & 0o777, 0o700, "session dir must be 0700, not {:o}", meta.mode() & 0o777);
-        let sockets: Vec<_> = std::fs::read_dir(&dir)
+        // A named session now has three files: the NDJSON socket, the raw-TTY socket, and the
+        // pidfile `ls`/`kill`/`attach` use to find it - all named `cat.*` here (`cat` is the
+        // program `spawn_headless` runs), not pid-based like before session naming existed.
+        let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sock"))
+            .filter_map(|e| e.file_name().into_string().ok())
             .collect();
-        assert_eq!(sockets.len(), 1, "expected exactly one .sock file in {}", dir.display());
+        assert!(names.contains(&"cat.sock".to_string()), "missing cat.sock in {names:?}");
+        assert!(names.contains(&"cat.tty.sock".to_string()), "missing cat.tty.sock in {names:?}");
+        assert!(names.contains(&"cat.pid".to_string()), "missing cat.pid in {names:?}");
+        assert_eq!(names.len(), 3, "expected exactly these three files, got {names:?}");
 
         let _ = child.kill();
         let _ = child.wait();
@@ -268,17 +277,156 @@ mod unix_behavior {
         let mut child = spawn_headless(&tmpdir, &["--cols", "97", "--rows", "31"]);
         std::thread::sleep(Duration::from_millis(300));
 
-        let sock = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "sock"))
-            .expect("expected a socket to connect to")
-            .path();
+        // Specifically the NDJSON socket (`cat.sock`), not the raw-TTY one (`cat.tty.sock`) -
+        // both end in `.sock`, so matching on the extension alone would pick either.
+        let sock = dir.join("cat.sock");
+        assert!(sock.exists(), "expected {} to exist", sock.display());
 
         let output = vtee().arg("--connect").arg(&sock).write_stdin("{\"cmd\":\"snapshot\"}\n").output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("\"cols\":97"), "snapshot didn't reflect --cols: {stdout}");
         assert!(stdout.contains("\"rows\":31"), "snapshot didn't reflect --rows: {stdout}");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    fn spawn_named(tmpdir: &std::path::Path, name: &str, extra_args: &[&str]) -> std::process::Child {
+        let bin = assert_cmd::cargo::cargo_bin("vtee");
+        std::process::Command::new(bin)
+            .env("TMPDIR", tmpdir)
+            .arg("--headless")
+            .args(["--name", name])
+            .args(extra_args)
+            .args(["--", "cat"])
+            .spawn()
+            .unwrap()
+    }
+
+    fn vtee_in(tmpdir: &std::path::Path) -> Command {
+        let mut cmd = vtee();
+        cmd.env("TMPDIR", tmpdir);
+        cmd
+    }
+
+    /// The core naming behaviour (`docs/architecture.md`, "session naming"): a second session
+    /// under the same name is rejected, matching tmux's own real default (confirmed against
+    /// its source, `docs/decisions.md`) - no auto-suffixing, no silent attach.
+    #[test]
+    fn duplicate_session_name_is_rejected() {
+        let tmpdir = isolated_tmpdir();
+        let mut first = spawn_named(&tmpdir, "dup-test", &[]);
+        std::thread::sleep(Duration::from_millis(300));
+
+        vtee_in(&tmpdir)
+            .args(["--name", "dup-test", "--", "cat"])
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains("duplicate session: dup-test"));
+
+        let _ = first.kill();
+        let _ = first.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// `--attach-if-exists` (tmux's own `-A`): the same duplicate-name situation above, but
+    /// attaches instead of erroring. Verified by checking the *attaching* invocation's own
+    /// stdout contains the redraw/live output a real attach produces, rather than a usage
+    /// error - it would otherwise look identical to the rejection case above (same exit
+    /// shape) if it silently did nothing.
+    #[test]
+    fn attach_if_exists_attaches_instead_of_erroring() {
+        let tmpdir = isolated_tmpdir();
+        let mut first = spawn_named(&tmpdir, "attach-if-exists-test", &[]);
+        std::thread::sleep(Duration::from_millis(800));
+
+        let mut second = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
+            .env("TMPDIR", &tmpdir)
+            .args(["--name", "attach-if-exists-test", "--attach-if-exists", "--", "cat"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+
+        use std::io::Write as _;
+        let mut stdin = second.stdin.take().unwrap();
+        stdin.write_all(b"from-attacher\r").unwrap();
+        stdin.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        drop(stdin);
+        let _ = second.kill();
+        let output = second.wait_with_output().unwrap();
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert!(out.contains("from-attacher"), "expected the attached session's live echo in: {out:?}");
+
+        let _ = first.kill();
+        let _ = first.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// `vtee ls`/`kill` round trip: a live session shows up, `kill` ends it and removes its
+    /// files, and it no longer shows up afterward.
+    #[test]
+    fn ls_and_kill_round_trip() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "ls-kill-test", &[]);
+        std::thread::sleep(Duration::from_millis(300));
+
+        vtee_in(&tmpdir)
+            .arg("ls")
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("ls-kill-test").and(predicate::str::contains("live")));
+
+        vtee_in(&tmpdir).args(["kill", "ls-kill-test"]).timeout(Duration::from_secs(5)).assert().success();
+
+        // `kill` cleans up the files directly (`run_kill`'s own doc comment: `watch_sigterm`'s
+        // handler calls `std::process::exit`, which would otherwise skip the holder's own
+        // `SessionFiles` guard) - give the signalled process a moment to actually exit too.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!dir.join("ls-kill-test.sock").exists());
+        assert!(!dir.join("ls-kill-test.tty.sock").exists());
+        assert!(!dir.join("ls-kill-test.pid").exists());
+
+        vtee_in(&tmpdir)
+            .arg("ls")
+            .timeout(Duration::from_secs(5))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("no sessions"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// `--no-listen`'s rationale ("no footprint in a shared /tmp at all") extends to the
+    /// pidfile, not just the two sockets - confirmed by the directory not existing at all,
+    /// same assertion `no_listen_creates_no_session_dir` above already makes, specifically
+    /// re-checked here under `--name` (which otherwise *would* trigger naming/pidfile logic)
+    /// to confirm `--no-listen` still skips it entirely even when a name is given.
+    #[test]
+    fn no_listen_skips_naming_entirely_even_with_a_name() {
+        // Not `spawn_named` - it always passes `--headless`, which `conflicts_with "no_listen"`
+        // at the clap level (unrelated to what this test checks), so this needs its own plain
+        // invocation instead. Non-blocking without a real tty either way, same as every other
+        // plain-interactive-mode test that doesn't attach a pty.
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
+            .env("TMPDIR", &tmpdir)
+            .args(["--name", "should-not-appear", "--no-listen", "--no-stdin", "--", "cat"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert!(!dir.exists(), "{} should not exist with --no-listen, even with --name", dir.display());
 
         let _ = child.kill();
         let _ = child.wait();
