@@ -15,7 +15,7 @@ pub use log::{RawLog, replay};
 pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot};
 
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
@@ -459,6 +459,64 @@ impl Tap {
         // not yet done.
         Err(io::Error::new(io::ErrorKind::Unsupported, "observation (--listen) needs Unix"))
     }
+}
+
+/// tmux's own answer to "who can connect" (`docs/decisions.md`): not socket-file permissions,
+/// but a private per-user directory that nothing else can even traverse into. Used when
+/// `--listen` is given with no explicit path (`main.rs`) - an explicit `--listen <path>` skips
+/// this entirely and is the caller's own responsibility, same as tmux's `-S` does for its own
+/// explicit socket paths.
+///
+/// Creates `$TMPDIR/vtee-<uid>/` with mode `0700` if it doesn't exist yet (the mode is passed
+/// to the `mkdir` call itself, not set afterwards, so there's no window where it briefly exists
+/// with the wrong permissions). If it already exists, verifies rather than trusts it - refuses
+/// to use it at all if it isn't a plain directory (rejects a symlink the same way, since
+/// `symlink_metadata` doesn't follow one), isn't owned by the current user, or has any
+/// group/other permission bit set - the exact two checks that defeat a classic `/tmp`
+/// symlink-or-pre-plant race, where another local user pre-creates the directory before this
+/// one ever runs. The socket itself is named by this process's pid, so concurrent sessions for
+/// the same user don't collide; `Tap::serve` already removes a stale file at its target path
+/// before binding, which also covers a pid getting reused long after a killed session left its
+/// socket behind.
+#[cfg(unix)]
+pub fn default_socket_path() -> io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!("vtee-{uid}"));
+
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if !meta.is_dir() => {
+            return Err(io::Error::other(format!(
+                "{} exists and isn't a plain directory - refusing to use it as the default socket dir",
+                dir.display()
+            )));
+        }
+        Ok(meta) if meta.uid() != uid => {
+            return Err(io::Error::other(format!(
+                "{} isn't owned by the current user - refusing to use it as the default socket dir",
+                dir.display()
+            )));
+        }
+        Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
+            return Err(io::Error::other(format!(
+                "{} has unsafe permissions (group/other access) - refusing to use it as the default socket dir",
+                dir.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        }
+        Err(e) => return Err(e),
+    }
+
+    Ok(dir.join(format!("{}.sock", std::process::id())))
+}
+
+#[cfg(not(unix))]
+pub fn default_socket_path() -> io::Result<PathBuf> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "a default --listen socket path needs Unix"))
 }
 
 /// `Tap::serve`'s policy knobs. `Copy` and small on purpose - it's cloned into every

@@ -25,7 +25,17 @@ fn main() -> ExitCode {
 
     let log_path = take_path_flag(&mut args, "--log");
     let script_path = take_path_flag(&mut args, "--script");
-    let listen_path = take_path_flag(&mut args, "--listen");
+    let listen_path: Option<PathBuf> = match take_listen_flag(&mut args) {
+        None => None,
+        Some(Some(explicit)) => Some(explicit),
+        Some(None) => match vtee::default_socket_path() {
+            Ok(path) => Some(path),
+            Err(e) => {
+                eprintln!("vtee: --listen (no path given) couldn't set up a default socket directory: {e}");
+                return exit_code(exitcode::OSERR);
+            }
+        },
+    };
     // Stage 3a/3b ("Full duplex", `docs/roadmap.md`): opt-in, default `None` (read-only),
     // matching this project's pattern everywhere else of defaulting to the narrower/safer
     // behaviour. Meaningless without `--listen`, so no separate validation for that.
@@ -39,7 +49,7 @@ fn main() -> ExitCode {
 
     let Some((program, rest)) = args.split_first() else {
         eprintln!(
-            "usage: vtee [--log <path>] [--listen <path> [--writable[=open|exclusive|exclusive-shared]]] \
+            "usage: vtee [--log <path>] [--listen [<path>] [--writable[=open|exclusive|exclusive-shared]]] \
              [--no-stdin] [--] <command> [args...]\n       \
              vtee --script <path> [--text] [--log <path>] [--] <command> [args...]\n       \
              vtee --connect <path> [--text]"
@@ -348,6 +358,28 @@ fn take_path_flag(args: &mut Vec<String>, flag: &str) -> Option<PathBuf> {
     let value = args.remove(pos + 1);
     args.remove(pos);
     Some(PathBuf::from(value))
+}
+
+/// `--listen` alone (tmux's own default-socket model, `vtee::default_socket_path`,
+/// `docs/decisions.md`) vs. `--listen <path>` (today's explicit, caller's-own-responsibility
+/// behaviour, unchanged). Distinguishing the two: the next token is treated as a path unless
+/// it's missing, `--` itself, or another flag (starts with `--`) - a real socket path is never
+/// written that way, and every example already puts `--` right before the program to run.
+/// Returns `None` if `--listen` wasn't given at all, `Some(None)` for the bare form, `Some(Some(path))`
+/// for the explicit one.
+fn take_listen_flag(args: &mut Vec<String>) -> Option<Option<PathBuf>> {
+    let pos = args.iter().position(|a| a == "--listen")?;
+    let bare = match args.get(pos + 1) {
+        None => true,
+        Some(next) => next == "--" || next.starts_with("--"),
+    };
+    if bare {
+        args.remove(pos);
+        return Some(None);
+    }
+    let value = args.remove(pos + 1);
+    args.remove(pos);
+    Some(Some(PathBuf::from(value)))
 }
 
 /// Removes a no-value flag from `args` if present, returning whether it was there.
