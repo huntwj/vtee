@@ -354,6 +354,89 @@ process exits. Tracing this through surfaced one real pre-existing bug: the `--l
 was being printed via plain `eprintln!` *after* `RawModeGuard` had already put the terminal in raw mode, with
 the child potentially already drawing - fixed by dropping the guard (restoring cooked mode) before printing.
 
+## Named sessions and `vtee attach` (2026-10-08)
+
+Prompted by a direct question: could a human, in a separate shell, connect to a session an AI started and
+*see what it sees*, live - the way `tmux attach` works, with several clients (of either kind) attachable to
+one session at once? The answer required a real architectural change, not a new flag: today's interactive mode
+fused "the process that owns the pty and the child" with "whatever is currently watching it," tying
+`forward_input`/`forward_output` directly to whichever process happened to call `Tap::spawn`. There was no way
+for a *different*, later process to attach to a live session at all - `--connect` only ever reached the
+structured NDJSON protocol, never a live, continuously-updating raw view.
+
+**Sessions are named now**, replacing the old pid-based socket naming entirely. `vtee::session_paths(name)`
+(`src/lib.rs`) resolves three paths inside the same hardened per-uid directory `default_session_dir` already
+provides: the NDJSON socket (`<name>.sock`, unchanged protocol), a new raw-TTY socket (`<name>.tty.sock`), and
+a pidfile (`<name>.pid`) `vtee ls`/`kill`/`attach` use to find and signal the holder process. The default
+name is the program's own basename (`vtee tf` → session `tf`); `--name <NAME>` overrides it.
+`vtee::session_is_live(name)` checks liveness by actually trying to connect to the NDJSON socket, not by
+trusting the pidfile or the socket file's mere existence - a stale file left by a killed session must not look
+"alive," the same reasoning `Tap::serve`'s own pre-bind `remove_file` already relies on.
+
+**Duplicate names are rejected, matching tmux's own real default** (confirmed against tmux's actual source,
+not assumed): `tmux new-session -s NAME` on an existing name errors `duplicate session: NAME` - no
+auto-suffixing, no silent attach. `vtee <program>` does the same. The one exception, also tmux's own
+(`-A`): `--attach-if-exists` attaches instead of erroring, overridable per-invocation either direction
+(`--no-attach-if-exists` forces the error even if a standing default says otherwise) and settable as that
+standing default via a new config file - `VteeConfig { attach_if_exists: bool }` (`src/main.rs`), loaded with
+`confy::load("vtee", None)`, TOML, at `confy`'s own default XDG path. The first persistent config this
+project has had; declined earlier this session specifically because nothing needed one yet - this is that
+need.
+
+**The raw-TTY socket is purely additive, deliberately not a replacement for `forward_input`/`forward_output`.**
+The obvious-looking design - route the *originating* invocation's own display through a self-connection to its
+own new TTY socket, "instead of" the direct stdio path - was tried and reverted during implementation: the raw
+byte protocol has no framing for an `acquire_write`/`release_write` handshake, so `WritePolicy::Exclusive`
+can't mean anything there, which would have silently retired the already-built-and-tested
+`HumanPriority`/exclusive-handoff machinery (stage 3b) the moment a human attached via TTY instead of owning
+the original stdio. Instead: the originating invocation's own `forward_input`/`forward_output` are completely
+unchanged, and `Tap::serve_tty` (new, mirroring `Tap::serve`'s shape) binds a *second*, independent listener
+that only `vtee attach`/other remote clients use - always `WritePolicy::Open` (no `Exclusive` concept for
+this protocol; a remote TTY attacher can always type, exactly as the local invocation's own typing already
+could, independent of this policy entirely).
+
+**Multicast output, redraw-on-attach, and why they're one atomic operation.** Every attached TTY client
+receives the live byte stream via a new `Tap` field, `TapState::tty_sinks` - deliberately living inside the
+*same* `Mutex` as `term`/`bytes_seen`, not a separate lock: `forward_output` already serializes "apply this
+chunk to `term`" and must also serialize "broadcast this chunk to every sink" relative to a *new* client's own
+"snapshot current state, then start receiving future chunks" (`Tap::attach_tty_sink`) - two separate locks
+would leave a real window where a chunk lands in neither the new client's redraw nor its live feed (or lands in
+both). `vtee::snapshot::redraw_sequence(&Snapshot) -> Vec<u8>` (new) reconstructs the current screen as raw
+ANSI before the live feed starts, so attaching mid-session shows the current picture immediately, the way
+`tmux attach` does - checked directly against `alacritty_terminal` 0.26.0's own source first: no existing API
+does this (it only ever consumes ANSI, never re-emits it), so this is new code, not a missed library feature.
+Scope, deliberately: visual state only (cells + cursor); restoring input-affecting modes (app-cursor-keys,
+mouse reporting) for a freshly-attached client's own keystrokes is a smaller, known follow-on.
+
+**`vtee ls`/`kill`** read/signal via the pidfile. `kill` cleans up all three files itself rather than relying
+on the holder's own cleanup - `watch_sigterm`'s handler calls `std::process::exit` directly on `SIGTERM`, which
+skips every destructor including the holder's own cleanup guard (`SessionFiles`, `src/main.rs`), so without
+this the files would be left behind despite the process actually stopping.
+
+**Detach has no keybinding**, unlike tmux (which needs a prefix key, Ctrl-b `d`, because its server requires
+an explicit detach signal). Here, the holder's lifetime depends on the child process, not on any one client
+connection, so "detaching" is just the attach client process ending - Ctrl-C, closing the window - with no
+escape sequence stealing keystrokes from the child. This keeps requirement 7's full-transparency promise
+intact for this feature rather than trading it away for tmux-literalism.
+
+**Verified end to end** (not just unit-level): a human (simulated via a real pty) spawns a named session;
+a *separate* process attaches and sees the live screen immediately (redraw) followed by further live updates;
+typing *in the attached client* reaches the child and is visible back on the original spawner's own terminal -
+true bidirectional multi-client behaviour, not just one-way observation. Also verified: duplicate-name
+rejection, `--attach-if-exists` attaching instead, and the `ls`/`kill` round trip. `tests/cli.rs`'s
+`unix_behavior` module has the automated versions of the CLI-visible pieces (naming, duplicates, `ls`/`kill`);
+the deeper protocol mechanics (multicast, redraw ordering, bidirectional typing) were verified via a scripted
+real-pty harness during implementation, the same technique `tests/windows_conpty.rs` and the `Participant`/
+free-for-all verifications earlier this session already used.
+
+**Known gap, accepted rather than solved**: if the holder process is itself `SIGKILL`'d, no destructor runs
+(including `SessionFiles`), so its socket/pidfile are left behind as stale leftovers and its child reparents to
+init, unreachable via `vtee` from then on. Fixing this would need a second watchdog process, the same trick
+`RawModeGuard` already uses for terminal restoration - real, but for an edge case that requires deliberately
+`kill -9`ing the holder specifically, not its child. Revisit only if it actually bites; `session_is_live`
+already degrades gracefully around a stale leftover (a subsequent same-named spawn succeeds, treating it as
+removable, the same way `Tap::serve` already treats a stale socket file).
+
 ## Known rough edges (tracked, not silently ignored)
 
 - `Tap::wait()` doesn't block forever waiting for the pty master's reader to see EOF, because it isn't guaranteed

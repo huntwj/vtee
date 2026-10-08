@@ -462,6 +462,43 @@ Verified end to end in the Linux container: a single `--env`, several at once, a
 `printenv`), a malformed value with no `=` at all rejected with a clear usage error (exit 64), and the same
 flag working identically under `--script` (`printenv` inside a scripted snapshot showed the overridden value).
 
+## 2026-10-08: tmux as the explicit reference model for named sessions and attach
+
+Decided, when asked to design this rather than just build the first thing that worked, to follow tmux's own
+precedent deliberately rather than invent new conventions - checked against tmux's actual source/docs at each
+fork, not recalled from memory:
+
+- **A session name defaults to something, and a second one with the same name is a hard error** - tmux's own
+  `new-session -s NAME` behaviour exactly (`duplicate session: NAME`, no auto-suffixing, no silent attach).
+  Considered and rejected: auto-suffixing (`tf`, `tf-1`, `tf-2`, ...) - tmux itself doesn't do this for named
+  sessions (only for its own anonymous numbered ones), and it would make `attach <name>` ambiguous about which
+  one you meant.
+- **`--attach-if-exists` is tmux's own `-A`** (`new-session` behaves like `attach-session` if the name already
+  exists) - adopted directly, plus made configurable as a standing default via a new config file, which tmux
+  itself doesn't offer but was asked for specifically and fit the same "make it a setting, not a fixed answer"
+  pattern this project has used throughout (`WritePolicy`, `HumanPriority`).
+- **Bare `attach` (no name) resolves the way tmux's own bare `attach-session` does**: the only live session if
+  there's exactly one, else the most-recently-active. "Most-recently-active" is approximated by the pidfile's
+  own mtime - a reasonable, stated proxy, not a reproduction of tmux's own richer activity tracking.
+- **Detach deliberately has *no* keybinding**, the one deliberate departure from tmux rather than a borrowed
+  precedent. tmux needs a prefix key (Ctrl-b `d`) because its server requires an explicit detach signal; here,
+  the holder's lifetime depends on the child process, not on any client connection, so an attach client ending
+  for *any* reason (Ctrl-C, closing the window) already is detaching, with nothing else to signal. Keeping that
+  simplicity was judged more valuable than literal tmux-parity - it preserves requirement 7's "fully
+  transparent passthrough" promise instead of stealing a keystroke from the child to implement a feature that
+  doesn't structurally need one here.
+
+**The one design that was tried and reverted during implementation, not just considered and declined**: making
+the *originating* `vtee <program>` invocation's own display self-connect to its own new TTY socket, "instead
+of" its existing direct `forward_input`/`forward_output`, so every client (including the original one) would
+be symmetric. Implemented, then reverted on realizing the raw byte protocol has no framing for
+`acquire_write`/`release_write` - `WritePolicy::Exclusive` can't mean anything there, so going fully symmetric
+would have silently retired the already-built-and-tested `HumanPriority`/exclusive-handoff machinery (stage
+3b) the instant a human attached via TTY instead of owning the original stdio. Kept the direct path unchanged
+for the originating invocation and made the new socket purely additive instead (`architecture.md` has the
+full mechanics) - a case where the architecturally "purer" design turned out to be the wrong one once actually
+built and checked against what it would cost, not just how it looked on paper.
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."
