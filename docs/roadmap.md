@@ -187,11 +187,17 @@ owned it.
 **3b. Human and remote both writing at once - the real open question.** Four shapes, not decided, genuinely the
 user's call rather than an engineering one since it depends on how this actually gets used:
 
-- **(a) Free-for-all.** No arbitration; the existing lock already guarantees one write-call's bytes can't
-  literally interleave with another's *bytes*, but says nothing about *order* or *intent* - a human mid-keystroke
-  and an agent injecting at the same moment could still produce confusing, uncoordinated screen output (not
-  corrupted, just badly timed). Simplest to build - it's what exists today minus the gate. Fine if the real use
-  is cooperative and low-frequency, wrong if it's "compete for the keyboard."
+- **(a) Free-for-all.** ~~No arbitration~~ **Done, 2026-10-08 - turned out to already be built.** This is
+  `WritePolicy::Open` (stage 3a) reused exactly as predicted below: `Command::authorize` never checked whether
+  a human was also typing, so giving `--writable` (bare, i.e. `Open`) on an interactive, non-headless session
+  already had no gate at all - confirmed, not assumed, with a real pty standing in for the human (`python3`'s
+  `pty.fork()`, same technique as the signal/`Participant` tests): the simulated human types, a `--connect`
+  client sends `send` concurrently with no `acquire_write` needed, and both land in the child. The existing
+  lock already guarantees one write-call's bytes can't literally interleave with another's *bytes*, but says
+  nothing about *order* or *intent* - a human mid-keystroke and an agent injecting at the same moment can still
+  produce confusing, uncoordinated screen output (not corrupted, just badly timed). Fine if the real use is
+  cooperative and low-frequency, wrong if it's "compete for the keyboard" - that tradeoff was always the
+  point of making this a selectable mode rather than the only one.
 - **(b) Exclusive/advisory handoff ("take the pen").** ~~A client must send an explicit acquire-write command
   before `Send`/`SendKey` are accepted~~ **Done, 2026-10-07** (`vtee --listen <path> --writable=exclusive` or
   `--writable=exclusive-shared`, `ExclusiveLock`, `Command::AcquireWrite`/`ReleaseWrite`, `architecture.md`). The
@@ -232,8 +238,8 @@ sounds like a single policy call turns out to be a choice to expose, not a defau
 into "make it a setting" as its default answer to this category of question. This argues for shaping the
 mechanism as an enum of write-policy modes from the start, even though 3a (no competing human) only exercises
 the simplest one - so that 3b's remaining modes, and their own sub-settings, are additions to that enum later,
-not a rework of it. (a) and (d) remain unbuilt - (b) was the mode actually asked for once scoped, and nothing
-about `WritePolicy`'s shape as an enum needs either built before it's useful.
+not a rework of it. (d) remains unbuilt - nothing about `WritePolicy`'s shape as an enum needs it built before
+it's useful. (a) turned out to need nothing built at all, once checked - see above.
 
 **Not new plumbing, whichever modes end up built**: the write mechanism (`Tap::send_bytes`, the shared writer
 lock) already tolerates any number of concurrent callers; `Send`/`SendKey`/`Resize` already exist as `Command`
@@ -280,8 +286,9 @@ not decided).
   free-for-all, exclusive handoff, and no-simultaneous-access should all be selectable modes rather than one
   fixed policy, and that exclusive handoff's own `HumanPriority` (always-wins vs. the human as just another
   participant) is likewise a setting, not a built-in answer (idle-based priority stays excluded on its merits
-  either way). Exclusive handoff (both `HumanPriority` settings) is built and verified; free-for-all and
-  no-simultaneous-access remain unbuilt until something actually needs them. Still not decided: which mode and
+  either way). Exclusive handoff (both `HumanPriority` settings) and free-for-all are both built and verified
+  (`--writable`/`--writable=open`); no-simultaneous-access remains unbuilt until something actually needs it.
+  Still not decided: which mode and
   which `HumanPriority` are the defaults when none is requested (today: `ReadOnly` if `--writable` is absent at
   all, otherwise whatever `--writable=<mode>` names explicitly - there is no implicit default *among* the
   writable modes yet, since every caller so far has said which one it wants).
