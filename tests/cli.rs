@@ -486,4 +486,81 @@ mod unix_behavior {
         assert!(!dir.join("faketest.pid").exists());
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
+
+    /// Regression test for a real, adversarially-found bug: broadcasting to raw-TTY sinks used
+    /// to do a blocking `write_all` to *every* sink under the one lock that also gates `term`,
+    /// `bytes_seen`, and `snapshot()` - so one attach client that simply stops reading (a
+    /// backgrounded terminal, a slow reader, a hostile one) could wedge every other sink and
+    /// every snapshot indefinitely, demonstrated by the review with a client that never read and
+    /// a concurrent `snapshot()` call that then never returned. Reproduces that shape directly:
+    /// client A attaches and never reads, client B attaches and keeps reading, and a `snapshot`
+    /// query over the unrelated NDJSON socket must still return promptly - all three go through
+    /// `TapState`'s one lock, so if the fix regressed back to blocking under it, this hangs past
+    /// its `.timeout()` instead of passing.
+    #[test]
+    fn a_stalled_tty_client_does_not_block_other_clients_or_snapshots() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        // `yes` floods output fast and indefinitely - exactly the kind of volume needed to fill
+        // a stalled sink's bounded queue quickly rather than waiting on a slow producer.
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
+            .env("TMPDIR", &tmpdir)
+            .arg("--headless")
+            .args(["--name", "holblock"])
+            .args(["--", "yes"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let tty_sock = dir.join("holblock.tty.sock");
+        let ndjson_sock = dir.join("holblock.sock");
+        assert!(tty_sock.exists(), "expected {} to exist", tty_sock.display());
+
+        // Client A: attaches, then never reads again - the stalled sink.
+        let _client_a = UnixStream::connect(&tty_sock).unwrap();
+
+        // Client B: attaches and keeps reading/discarding, tracking how many bytes arrive.
+        let client_b = UnixStream::connect(&tty_sock).unwrap();
+        let bytes_received = Arc::new(AtomicU64::new(0));
+        {
+            let bytes_received = bytes_received.clone();
+            let mut client_b = client_b;
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match client_b.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+
+        // Give `yes`'s output time to fill client A's queue past capacity and get it dropped,
+        // while client B keeps draining its own.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(bytes_received.load(Ordering::Relaxed) > 0, "client B received nothing while client A was stalled");
+
+        // The actual regression check: a `snapshot` query on the completely separate NDJSON
+        // socket must still return within the timeout. Before the fix, this call shared the
+        // same lock `forward_output`'s blocking broadcast held hostage, and never returned.
+        vtee()
+            .arg("--connect")
+            .arg(&ndjson_sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\""));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
 }

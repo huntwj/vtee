@@ -17,7 +17,7 @@ pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot, redraw_sequence};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,11 +87,24 @@ impl Dimensions for Size {
 /// would leave a real window where a chunk lands in neither the snapshot nor the live feed (or
 /// in both). One lock serializing "update state and broadcast this chunk" against "snapshot
 /// current state and register for future chunks" closes that window by construction.
+///
+/// Each entry is a bounded channel, not the sink itself: confirmed by an adversarial review that
+/// writing straight to the sink here - blocking `write_all` under this very lock - lets one
+/// stalled TTY client (a backgrounded terminal, a slow reader, a hostile one that just never
+/// reads) wedge the lock indefinitely, which stalls every other sink, `snapshot()`, and
+/// eventually the pty itself. A dedicated writer thread per sink owns the actual blocking
+/// `write_all`; this lock only ever does a bounded, non-blocking `try_send` (`forward_output`),
+/// so a sink that falls behind gets dropped instead of blocking everyone else.
 struct TapState {
     term: Term<ObserverListener>,
     bytes_seen: u64,
-    tty_sinks: Vec<(u64, Box<dyn Write + Send>)>,
+    tty_sinks: Vec<(u64, SyncSender<Vec<u8>>)>,
 }
+
+/// Bytes, not chunk count: at the 8KiB read-buffer size `forward_output` uses, this bounds a
+/// single stalled sink to ~2MiB of buffered output before it's dropped rather than let it block
+/// everything else.
+const TTY_SINK_QUEUE_CAPACITY: usize = 256;
 
 /// Paired with the `Mutex` so `wait_for_text` can block efficiently instead of polling:
 /// `forward_output` notifies after every chunk it applies.
@@ -336,20 +349,33 @@ impl Tap {
         self.shared.state.lock().unwrap().bytes_seen
     }
 
-    /// Writes a redraw of the current screen to `sink` and registers it to receive every chunk
-    /// from now on, both under the one lock that also serializes `forward_output`'s own
-    /// "apply this chunk, then broadcast it" step (`TapState::tty_sinks`'s doc comment) - so
-    /// there is no window where a live chunk could be broadcast before, or interleaved with,
-    /// the redraw that's supposed to precede it. This atomicity, not just the redraw itself, is
-    /// what makes attaching mid-session show the current screen correctly rather than a
-    /// scrambled one.
-    fn attach_tty_sink(&self, id: u64, mut sink: Box<dyn Write + Send>) -> io::Result<()> {
-        let mut state = self.shared.state.lock().unwrap();
-        let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
-        sink.write_all(&snapshot::redraw_sequence(&snap))?;
-        sink.flush()?;
-        state.tty_sinks.push((id, sink));
-        Ok(())
+    /// Queues a redraw of the current screen and registers the sink to receive every chunk from
+    /// now on, both under the one lock that also serializes `forward_output`'s own "apply this
+    /// chunk, then broadcast it" step (`TapState::tty_sinks`'s doc comment) - so there is no
+    /// window where a live chunk could be enqueued before, or interleaved with, the redraw
+    /// that's supposed to precede it. The redraw is the first item placed in a fresh, empty
+    /// channel, so it's always first out regardless of when the dedicated writer thread below
+    /// gets scheduled.
+    ///
+    /// The actual blocking `write_all` happens on a dedicated thread, not under `self.shared`'s
+    /// lock - see `TapState::tty_sinks`'s doc comment for why that split exists.
+    fn attach_tty_sink(&self, id: u64, sink: Box<dyn Write + Send>) {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(TTY_SINK_QUEUE_CAPACITY);
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
+            // The channel was just created with spare capacity, so this can't actually be full.
+            let _ = tx.try_send(snapshot::redraw_sequence(&snap));
+            state.tty_sinks.push((id, tx));
+        }
+        thread::spawn(move || {
+            let mut sink = sink;
+            for chunk in rx {
+                if sink.write_all(&chunk).is_err() || sink.flush().is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     fn detach_tty_sink(&self, id: u64) {
@@ -795,10 +821,9 @@ fn serve_tty_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, polic
     ::log::debug!("tty connection {id}: accepted");
     let Ok(reader_stream) = stream.try_clone() else { return };
     // `stream` itself becomes the registered sink - see `attach_tty_sink`'s doc comment for
-    // why the redraw and every later broadcast go through this *same* handle, under one lock.
-    if tap.attach_tty_sink(id, Box::new(stream)).is_err() {
-        return;
-    }
+    // why the redraw and every later broadcast go through this *same* handle, via its own
+    // dedicated writer thread.
+    tap.attach_tty_sink(id, Box::new(stream));
 
     let mut reader = reader_stream;
     let mut buf = [0u8; 4096];
@@ -858,13 +883,19 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
             state.bytes_seen += n as u64;
             // Broadcast to every attached TTY client (`Tap::serve_tty`), under the same lock
             // that just applied this chunk to `term` - see `TapState::tty_sinks`'s doc comment
-            // for why that atomicity matters. A sink that errors (the client disconnected) is
-            // dropped here rather than left to accumulate; `serve_tty_connection` also removes
-            // its own entry on the way out, so this is a belt-and-suspenders cleanup for a
-            // write that fails before that connection's own thread notices.
-            state.tty_sinks.retain_mut(|(_, sink)| sink.write_all(chunk).is_ok() && sink.flush().is_ok());
+            // for why that atomicity matters. `try_send` only enqueues for that sink's own
+            // writer thread - never blocks here - so a sink whose queue is full (its reader has
+            // stalled) is dropped instead of wedging this lock, and with it every other sink,
+            // `snapshot()`, and the pty itself. A sink whose writer thread already exited
+            // (the client disconnected) reports the channel as disconnected and is dropped the
+            // same way; `serve_tty_connection` also removes its own entry on the way out, so
+            // this is a belt-and-suspenders cleanup for the same case.
+            state.tty_sinks.retain(|(_, tx)| tx.try_send(chunk.to_vec()).is_ok());
             shared.changed.notify_all();
         }
+        // std's Mutex isn't fair: under a flooding child this loop re-takes the lock before a
+        // waiting `snapshot()` caller ever gets scheduled, starving it.
+        thread::yield_now();
     }
 }
 
