@@ -12,7 +12,7 @@ pub mod snapshot;
 
 pub use command::{Command, CommandResult, HumanPriority, WritePolicy};
 pub use log::{RawLog, replay};
-pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot};
+pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot, redraw_sequence};
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -80,9 +80,17 @@ impl Dimensions for Size {
 /// `term` and `bytes_seen` are locked together so a snapshot is always a consistent (state,
 /// offset) pair - requirement 4's "a query never sees a half-drawn frame," extended to mean the
 /// reported offset never disagrees with the state it's reported alongside.
+///
+/// `tty_sinks` lives here too, not in a separate `Mutex`, deliberately: a new raw-TTY client
+/// (`Tap::serve_tty`) needs "take a redraw snapshot of right now" and "start receiving every
+/// chunk from now on" to be one atomic step relative to `forward_output` - two separate locks
+/// would leave a real window where a chunk lands in neither the snapshot nor the live feed (or
+/// in both). One lock serializing "update state and broadcast this chunk" against "snapshot
+/// current state and register for future chunks" closes that window by construction.
 struct TapState {
     term: Term<ObserverListener>,
     bytes_seen: u64,
+    tty_sinks: Vec<(u64, Box<dyn Write + Send>)>,
 }
 
 /// Paired with the `Mutex` so `wait_for_text` can block efficiently instead of polling:
@@ -231,8 +239,10 @@ impl Tap {
 
         let title = ObserverListener::new();
         let term = Term::new(Config::default(), &Size { cols: cols as usize, rows: rows as usize }, title.clone());
-        let shared: SharedState =
-            Arc::new(Shared { state: Mutex::new(TapState { term, bytes_seen: 0 }), changed: Condvar::new() });
+        let shared: SharedState = Arc::new(Shared {
+            state: Mutex::new(TapState { term, bytes_seen: 0, tty_sinks: Vec::new() }),
+            changed: Condvar::new(),
+        });
 
         let log = opts.log_path.map(|p| RawLog::create(p, cols, rows)).transpose()?;
 
@@ -324,6 +334,26 @@ impl Tap {
 
     pub fn bytes_seen(&self) -> u64 {
         self.shared.state.lock().unwrap().bytes_seen
+    }
+
+    /// Writes a redraw of the current screen to `sink` and registers it to receive every chunk
+    /// from now on, both under the one lock that also serializes `forward_output`'s own
+    /// "apply this chunk, then broadcast it" step (`TapState::tty_sinks`'s doc comment) - so
+    /// there is no window where a live chunk could be broadcast before, or interleaved with,
+    /// the redraw that's supposed to precede it. This atomicity, not just the redraw itself, is
+    /// what makes attaching mid-session show the current screen correctly rather than a
+    /// scrambled one.
+    fn attach_tty_sink(&self, id: u64, mut sink: Box<dyn Write + Send>) -> io::Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
+        sink.write_all(&snapshot::redraw_sequence(&snap))?;
+        sink.flush()?;
+        state.tty_sinks.push((id, sink));
+        Ok(())
+    }
+
+    fn detach_tty_sink(&self, id: u64) {
+        self.shared.state.lock().unwrap().tty_sinks.retain(|(sink_id, _)| *sink_id != id);
     }
 
     /// Whether application-cursor-key mode (DECCKM, `?1`) is active, so `send_key` can pick
@@ -485,6 +515,32 @@ impl Tap {
         // not yet done.
         Err(io::Error::new(io::ErrorKind::Unsupported, "observation (--listen) needs Unix"))
     }
+
+    /// The raw-TTY peer protocol (`docs/architecture.md`): bidirectional byte forwarding, for a
+    /// client that wants to *see and type* the way a real terminal would, rather than drive
+    /// `Command`s. Same accept-loop shape as `serve` (and the same `Tap`, so the two protocols'
+    /// writers share one `ExclusiveLock`/`WritePolicy` - a TTY client's keystrokes and a JSON
+    /// client's `Send` are symmetric writers from here on, arbitrated identically). Several TTY
+    /// clients may be attached at once; each gets its own entry in `tty_sinks` and its own
+    /// live redraw-then-mirror of the screen.
+    #[cfg(unix)]
+    pub fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::Result<()> {
+        let _ = std::fs::remove_file(path);
+        let listener = std::os::unix::net::UnixListener::bind(path)?;
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let tap = tap.clone();
+                thread::spawn(move || serve_tty_connection(&tap, stream, policy));
+            }
+        });
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn serve_tty(_tap: Arc<Tap>, _path: &Path, _policy: WritePolicy) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "attach (raw TTY) needs Unix"))
+    }
 }
 
 /// tmux's own answer to "who can connect" (`docs/decisions.md`): not socket-file permissions,
@@ -528,7 +584,20 @@ fn default_session_dir() -> io::Result<PathBuf> {
         }
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+            // Measured, not assumed (a real test failure surfaced this): two processes can
+            // both see `NotFound` here and both race to create the directory - the loser gets
+            // `AlreadyExists`, not a real problem (the winner created the exact same hardened
+            // directory), so this re-verifies rather than propagating a transient race as a
+            // hard failure. Anything *other* than `AlreadyExists` is a real error and still
+            // propagates. The re-verification (recursing once) reuses the same checks above
+            // rather than duplicating them - correct whether this call created the directory
+            // or lost the race to one that already had.
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            return default_session_dir();
         }
         Err(e) => return Err(e),
     }
@@ -536,20 +605,74 @@ fn default_session_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Used when `--listen` is given with no explicit path (`main.rs`) - an explicit
-/// `--listen=<path>` skips this entirely and is the caller's own responsibility, same as
-/// tmux's `-S` does for its own explicit socket paths. Named by this process's pid, so
-/// concurrent sessions for the same user don't collide; `Tap::serve` already removes a stale
-/// file at its target path before binding, which also covers a pid getting reused long after a
-/// killed session left its socket behind.
+/// A named session's addresses - the NDJSON command socket, the raw-TTY socket
+/// (`docs/architecture.md`, "two peer protocols"), and the pidfile `vtee ls`/`kill` use to
+/// find and signal the holder process. All three share one name inside
+/// `default_session_dir()`, replacing the old pid-based `<pid>.sock` naming now that a session
+/// needs to be *findable* by something other than the pid of a process that might not be the
+/// one you're thinking of (`vtee attach <name>`).
+pub struct SessionPaths {
+    pub sock: PathBuf,
+    pub tty_sock: PathBuf,
+    pub pidfile: PathBuf,
+}
+
 #[cfg(unix)]
-pub fn default_socket_path() -> io::Result<PathBuf> {
-    Ok(default_session_dir()?.join(format!("{}.sock", std::process::id())))
+pub fn session_paths(name: &str) -> io::Result<SessionPaths> {
+    let dir = default_session_dir()?;
+    Ok(SessionPaths {
+        sock: dir.join(format!("{name}.sock")),
+        tty_sock: dir.join(format!("{name}.tty.sock")),
+        pidfile: dir.join(format!("{name}.pid")),
+    })
 }
 
 #[cfg(not(unix))]
-pub fn default_socket_path() -> io::Result<PathBuf> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "a default --listen socket path needs Unix"))
+pub fn session_paths(_name: &str) -> io::Result<SessionPaths> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "named sessions need Unix"))
+}
+
+/// Whether a session named `name` is currently live. Tries actually connecting to its NDJSON
+/// socket rather than trusting the pidfile or the socket file's mere existence - a stale file
+/// left by a killed session is exactly the case that must *not* look "alive" (the same reason
+/// `Tap::serve` already removes a stale socket file before binding, rather than trusting it).
+#[cfg(unix)]
+pub fn session_is_live(name: &str) -> io::Result<bool> {
+    let paths = session_paths(name)?;
+    match std::os::unix::net::UnixStream::connect(&paths.sock) {
+        Ok(_) => Ok(true),
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+pub fn session_is_live(_name: &str) -> io::Result<bool> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "named sessions need Unix"))
+}
+
+/// Every session name currently in `default_session_dir()` with a matching pidfile - the list
+/// `vtee ls` reports, before each entry is checked with `session_is_live` for whether it's
+/// actually still running or just a stale leftover.
+#[cfg(unix)]
+pub fn session_names() -> io::Result<Vec<String>> {
+    let dir = default_session_dir()?;
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "pid")
+            && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(not(unix))]
+pub fn session_names() -> io::Result<Vec<String>> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "named sessions need Unix"))
 }
 
 /// Where diagnostic logging goes when a real terminal is actively showing the child
@@ -643,6 +766,43 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
     tap.exclusive_lock.release_if_held_by(id);
 }
 
+/// The raw-TTY peer protocol's own connection handler (`Tap::serve_tty`): register as a live
+/// output sink (redraw-then-mirror, `Tap::attach_tty_sink`), then treat every byte read from
+/// the client as a write, authorized through the *same* `ExclusiveLock`/`WritePolicy` a JSON
+/// client's `Send` goes through - a TTY client's keystrokes are a writer like any other, not a
+/// privileged special case, now that there's no longer a single "the original human."
+#[cfg(unix)]
+fn serve_tty_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, policy: WritePolicy) {
+    let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
+    ::log::debug!("tty connection {id}: accepted");
+    let Ok(reader_stream) = stream.try_clone() else { return };
+    // `stream` itself becomes the registered sink - see `attach_tty_sink`'s doc comment for
+    // why the redraw and every later broadcast go through this *same* handle, under one lock.
+    if tap.attach_tty_sink(id, Box::new(stream)).is_err() {
+        return;
+    }
+
+    let mut reader = reader_stream;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let allowed = match policy {
+            WritePolicy::ReadOnly => false,
+            WritePolicy::Open => true,
+            WritePolicy::Exclusive { .. } => tap.exclusive_lock.is_held_by(id),
+        };
+        if allowed && tap.send_bytes(&buf[..n]).is_err() {
+            break;
+        }
+    }
+    ::log::debug!("tty connection {id}: disconnected");
+    tap.detach_tty_sink(id);
+    tap.exclusive_lock.release_if_held_by(id);
+}
+
 /// A safety net, not the primary cleanup path: whatever causes a `Tap` to be dropped -
 /// including an early return or a `?` after the child was spawned - this stops the child from
 /// being silently orphaned. Harmless if the child already exited (the error from killing an
@@ -678,6 +838,13 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
             let mut state = shared.state.lock().unwrap();
             parser.advance(&mut state.term, chunk);
             state.bytes_seen += n as u64;
+            // Broadcast to every attached TTY client (`Tap::serve_tty`), under the same lock
+            // that just applied this chunk to `term` - see `TapState::tty_sinks`'s doc comment
+            // for why that atomicity matters. A sink that errors (the client disconnected) is
+            // dropped here rather than left to accumulate; `serve_tty_connection` also removes
+            // its own entry on the way out, so this is a belt-and-suspenders cleanup for a
+            // write that fails before that connection's own thread notices.
+            state.tty_sinks.retain_mut(|(_, sink)| sink.write_all(chunk).is_ok() && sink.flush().is_ok());
             shared.changed.notify_all();
         }
     }
@@ -830,6 +997,7 @@ fn spawn_tty_watchdog(original_termios: Option<libc::termios>) -> Option<Watchdo
 /// terminal and (unless moved) the same foreground process group as the main process, and when
 /// a session leader holding a controlling terminal dies, the kernel sends `SIGHUP` to that group
 /// - which killed the watchdog itself, by default, before it ever saw the pipe's EOF.
+///
 /// Registering `SIGHUP` with `signal_hook` (even though nothing reads from the resulting
 /// `Signals`) replaces that default disposition, the same mechanism `watch_resize`/
 /// `watch_sigterm` use for their own signals - keeping the registration alive for the rest of

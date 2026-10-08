@@ -1,11 +1,34 @@
+#[cfg(unix)]
+use std::io::{self, Read};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use clap_verbosity_flag::InfoLevel;
 use owo_colors::{OwoColorize, Stream::Stderr};
+use serde::{Deserialize, Serialize};
+
+/// Standing preference, not just a per-invocation flag (`docs/decisions.md`) - whether `vtee
+/// <program>` attaches to an already-live same-named session instead of erroring, the way
+/// tmux's own `-A` does for one invocation. Loaded once via `confy::load("vtee", None)`; TOML,
+/// at `confy`'s own default XDG path - no custom location logic needed.
+#[derive(Serialize, Deserialize, Default)]
+struct VteeConfig {
+    attach_if_exists: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Attach to a live session - bare resolves like tmux's own `attach-session`: the only one
+    /// if there's exactly one, else the most-recently-active.
+    Attach { name: Option<String> },
+    /// List live sessions (name, pid, age) - and stale leftovers, clearly marked as such.
+    Ls,
+    /// End a session: signal its holder process, clean up both its sockets and its pidfile.
+    Kill { name: String },
+}
 
 /// `--writable[=<MODE>]` (`docs/roadmap.md`, "I think those should all be options") - a
 /// `clap::ValueEnum` rather than a hand-parsed string so an unknown mode gets clap's own
@@ -38,6 +61,9 @@ impl From<WritableMode> for vtee::WritePolicy {
 #[derive(Parser)]
 #[command(name = "vtee", version)]
 struct Cli {
+    #[command(subcommand)]
+    subcommand: Option<Commands>,
+
     #[command(flatten)]
     verbosity: clap_verbosity_flag::Verbosity<InfoLevel>,
 
@@ -64,7 +90,10 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["listen", "no_listen", "writable", "no_stdin", "dump_on_exit", "headless"]
+        conflicts_with_all = [
+            "listen", "no_listen", "writable", "no_stdin", "dump_on_exit", "headless", "name",
+            "attach_if_exists", "no_attach_if_exists"
+        ]
     )]
     script: Option<PathBuf>,
 
@@ -108,12 +137,29 @@ struct Cli {
     #[arg(long)]
     dump_on_exit: bool,
 
-    /// AI-only session, declared rather than left to the accident of whatever stdin/stdout
-    /// happen to be (`docs/decisions.md`): no human stdin/stdout forwarding, no raw-mode
-    /// guard/watchdog, and a remote `resize` is never rejected as "owned by the real terminal"
-    /// since there isn't one.
+    /// AI-only session: spawn and bind both sockets, but don't also self-attach (no human
+    /// stdin/stdout forwarding, no raw-mode guard/watchdog, and a remote `resize` is never
+    /// rejected as "owned by the real terminal" since there isn't one) - declared rather than
+    /// left to the accident of whatever stdin/stdout happen to be (`docs/decisions.md`).
     #[arg(long, conflicts_with = "no_listen")]
     headless: bool,
+
+    /// Session name, for `vtee attach`/`ls`/`kill` to find it by later - defaults to the
+    /// program's own basename (`docs/architecture.md`, "session naming"). Two live sessions
+    /// can't share a name; starting one while another of the same name is still running is a
+    /// usage error unless `--attach-if-exists` (or its config default) says otherwise.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+
+    /// Attach to the already-live session instead of erroring, if `--name` (or the default
+    /// name) is already taken - tmux's own `-A`. Overrides the config file's standing default
+    /// either direction; `--no-attach-if-exists` forces the error even if the config default is
+    /// set.
+    #[arg(long, conflicts_with = "no_attach_if_exists")]
+    attach_if_exists: bool,
+
+    #[arg(long, conflicts_with = "attach_if_exists")]
+    no_attach_if_exists: bool,
 
     /// Virtual tty width, overriding the real terminal's own (`docs/roadmap.md`, "virtual tty
     /// specs" - the first of more to follow: terminal emulation mode, colour support, ...).
@@ -136,7 +182,11 @@ struct Cli {
     /// (or after an explicit `--`, needed if the program's own name or first argument could
     /// otherwise be mistaken for one of ours). Not required with `--connect`, which has nothing
     /// to spawn.
-    #[arg(trailing_var_arg = true, required_unless_present = "connect")]
+    // Not `required_unless_present` at the clap level - clap's debug assertions reject
+    // referencing a `#[command(subcommand)]` field that way ("does not exist" as a plain
+    // argument/group id). Enforced manually in `main()` instead, for exactly the one case left
+    // once a subcommand or `--connect` has already returned early.
+    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
@@ -164,6 +214,14 @@ fn main() -> ExitCode {
             return if e.exit_code() == 0 { ExitCode::SUCCESS } else { exit_code(exitcode::USAGE) };
         }
     };
+
+    if let Some(subcommand) = &cli.subcommand {
+        return match subcommand {
+            Commands::Attach { name } => run_attach(name.as_deref()),
+            Commands::Ls => run_ls(),
+            Commands::Kill { name } => run_kill(name),
+        };
+    }
 
     // Interactive, non-headless, attached to a real terminal: the one case where something
     // else (the child) owns the actual screen, so none of our own diagnostic output can safely
@@ -195,34 +253,13 @@ fn main() -> ExitCode {
         return run_connect(path, cli.text);
     }
 
-    let listen_path: Option<PathBuf> = if cli.no_listen {
-        None
-    } else {
-        match cli.listen {
-            Some(explicit) if explicit.as_os_str() != "\0" => Some(explicit),
-            // Bare `--listen`, or no `--listen` at all: the latter is read-only observation on
-            // by default now (`docs/decisions.md`) since attaching later is the common case
-            // this project actually has - but only because `default_socket_path` makes that
-            // safe. An explicit `--listen` failing to set up its default directory is still a
-            // hard error (the user asked for it specifically); the *implicit* default failing
-            // (e.g. not Unix) just means this run isn't attachable, same as `--no-listen` -
-            // not worth refusing to run the program over.
-            Some(_) => match vtee::default_socket_path() {
-                Ok(path) => Some(path),
-                Err(e) => {
-                    print_error(&format!("--listen (no path given) couldn't set up a default socket directory: {e}"));
-                    return exit_code(exitcode::OSERR);
-                }
-            },
-            None => vtee::default_socket_path().ok(),
-        }
-    };
-
     let (cols, rows) = terminal_size(cli.cols, cli.rows);
 
     let Some((program, rest)) = cli.command.split_first() else {
-        // Unreachable in practice: `required_unless_present` already enforced this unless
-        // `--connect` was given, and that path already returned above.
+        // The real enforcement point, not a backup - `command` isn't `required_unless_present`
+        // at the clap level at all (see its own doc comment for why), and both other ways to
+        // reach this point without a program (a subcommand, or `--connect`) already returned
+        // above, so getting here means genuinely neither was given.
         print_error("a command is required");
         return exit_code(exitcode::USAGE);
     };
@@ -231,28 +268,89 @@ fn main() -> ExitCode {
     // `std::process::exit` themselves, specifically so every local (including a spawned `Tap`)
     // drops before this function's own return does - calling `std::process::exit` while a
     // `Tap` is still alive would skip its child-killing `Drop` and orphan the child.
-    match &cli.script {
-        Some(script_path) => run_script(
+    if let Some(script_path) = &cli.script {
+        return run_script(
             program,
             rest,
             ScriptOpts { log_path: cli.log.as_deref(), script_path, text_mode: cli.text, cols, rows, env: &cli.env },
-        ),
-        None => run_interactive(
-            program,
-            rest,
-            InteractiveOpts {
-                log_path: cli.log.as_deref(),
-                listen_path: listen_path.as_deref(),
-                write_policy: cli.writable.map(Into::into),
-                no_stdin: cli.no_stdin,
-                dump_on_exit: cli.dump_on_exit,
-                headless: cli.headless,
-                cols,
-                rows,
-                env: &cli.env,
-            },
-        ),
+        );
     }
+
+    // `--no-listen` means *no footprint in the session directory at all* (`docs/decisions.md`'s
+    // original rationale for it - "would rather not have one appear in a shared /tmp at all" -
+    // extends to the pidfile too, not just the two sockets): skip naming, the duplicate check,
+    // and the pidfile entirely, rather than track a session with nothing to attach to anyway.
+    // `--script` is a one-shot, ephemeral run with no persistent named session either way (and
+    // `conflicts_with_all` above already keeps `--name`/`--attach-if-exists` from reaching
+    // here regardless).
+    let (listen_path, tty_path, pidfile): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) = if cli.no_listen {
+        (None, None, None)
+    } else {
+        let name = cli.name.clone().unwrap_or_else(|| default_session_name(program));
+
+        let attach_if_exists = if cli.attach_if_exists {
+            true
+        } else if cli.no_attach_if_exists {
+            false
+        } else {
+            confy::load::<VteeConfig>("vtee", None).map(|c| c.attach_if_exists).unwrap_or(false)
+        };
+
+        match vtee::session_is_live(&name) {
+            Ok(true) if attach_if_exists => return run_attach(Some(&name)),
+            Ok(true) => {
+                print_error(&format!("duplicate session: {name}"));
+                return exit_code(exitcode::USAGE);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                print_error(&format!("couldn't check for an existing session named {name:?}: {e}"));
+                return exit_code(exitcode::OSERR);
+            }
+        }
+
+        let session_paths = match vtee::session_paths(&name) {
+            Ok(paths) => paths,
+            Err(e) => {
+                print_error(&format!("couldn't set up session {name:?}: {e}"));
+                return exit_code(exitcode::OSERR);
+            }
+        };
+
+        let listen_path = match cli.listen {
+            // An explicit `--listen=<path>` is untouched by session naming entirely - still
+            // the caller's own responsibility, same as before.
+            Some(explicit) if explicit.as_os_str() != "\0" => explicit,
+            // Bare `--listen`, or no `--listen` at all: the latter is read-only observation on
+            // by default now (`docs/decisions.md`), at this session's own named NDJSON socket.
+            _ => session_paths.sock.clone(),
+        };
+        (Some(listen_path), Some(session_paths.tty_sock.clone()), Some(session_paths.pidfile.clone()))
+    };
+
+    run_spawn(
+        program,
+        rest,
+        InteractiveOpts {
+            pidfile: pidfile.as_deref(),
+            listen_path: listen_path.as_deref(),
+            tty_path: tty_path.as_deref(),
+            log_path: cli.log.as_deref(),
+            write_policy: cli.writable.map(Into::into),
+            no_stdin: cli.no_stdin,
+            dump_on_exit: cli.dump_on_exit,
+            headless: cli.headless,
+            cols,
+            rows,
+            env: &cli.env,
+        },
+    )
+}
+
+/// `vtee tf` -> session `tf`; strips a leading path if `program` was given as one (e.g.
+/// `vtee ./bin/tf` still names the session `tf`, not `./bin/tf`).
+fn default_session_name(program: &str) -> String {
+    Path::new(program).file_name().and_then(|n| n.to_str()).unwrap_or(program).to_string()
 }
 
 /// Where the diagnostic log file ended up, for the one-time notice printed before raw mode
@@ -312,12 +410,21 @@ fn terminal_size(cols_override: Option<u16>, rows_override: Option<u16>) -> (u16
     (cols_override.unwrap_or(auto_cols), rows_override.unwrap_or(auto_rows))
 }
 
-/// `run_interactive`'s own flags, bundled rather than positional - this is the mode `Cli` keeps
+/// `run_spawn`'s own flags, bundled rather than positional - this is the mode `Cli` keeps
 /// adding options to (`--headless` just now, more virtual-tty-spec flags expected per
 /// `docs/roadmap.md`), and a positional arg list was already at `clippy::too_many_arguments`.
 struct InteractiveOpts<'a> {
+    /// `None` under `--no-listen` - no session bookkeeping at all then, not even a pidfile
+    /// (`docs/decisions.md`: "no footprint in a shared /tmp" extends to this too).
+    pidfile: Option<&'a Path>,
     log_path: Option<&'a Path>,
     listen_path: Option<&'a Path>,
+    /// The raw-TTY socket (`docs/architecture.md`, "two peer protocols") - purely additive, for
+    /// a later `vtee attach` or a different human; this invocation's own display/input stays
+    /// direct `forward_input`/`forward_output` below, completely unchanged, so the already-
+    /// tested `HumanPriority`/exclusive-handoff machinery keeps meaning exactly what it always
+    /// has. `None` under `--no-listen`, same as `listen_path`.
+    tty_path: Option<&'a Path>,
     write_policy: Option<vtee::WritePolicy>,
     no_stdin: bool,
     dump_on_exit: bool,
@@ -327,7 +434,26 @@ struct InteractiveOpts<'a> {
     env: &'a [(String, String)],
 }
 
-fn run_interactive(program: &str, rest: &[String], cli: InteractiveOpts) -> ExitCode {
+/// Removes a named session's files on the way out, whichever way `run_spawn` returns - the
+/// same "a guard's `Drop` is the cleanup path, not a manually-called function at every return
+/// site" shape `RawModeGuard`/`Tap`'s own `Drop` already use. Harmless if a path was never
+/// created (e.g. `--no-listen`, no socket files at all) - `remove_file` on a missing path is
+/// swallowed, not propagated.
+struct SessionFiles<'a> {
+    pidfile: Option<&'a Path>,
+    listen_path: Option<&'a Path>,
+    tty_path: Option<&'a Path>,
+}
+
+impl Drop for SessionFiles<'_> {
+    fn drop(&mut self) {
+        for p in [self.pidfile, self.listen_path, self.tty_path].into_iter().flatten() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+fn run_spawn(program: &str, rest: &[String], cli: InteractiveOpts) -> ExitCode {
     // `--headless` forces both off outright, not just input: there's no human stdin to forward
     // and no point forwarding to a stdout nobody's watching either, since the AI side is meant
     // to use `--listen`/snapshot instead (`docs/decisions.md`).
@@ -350,6 +476,18 @@ fn run_interactive(program: &str, rest: &[String], cli: InteractiveOpts) -> Exit
             return exit_code(exitcode::OSERR);
         }
     };
+
+    // Named session bookkeeping (`docs/architecture.md`, "session naming") - written now that
+    // the child is confirmed alive, so `vtee ls`/`kill`/`attach` can find this process.
+    // `None` under `--no-listen`, which skips this entirely. The guard cleans up on every
+    // return path below, success or failure alike.
+    if let Some(pidfile) = cli.pidfile
+        && let Err(e) = std::fs::write(pidfile, std::process::id().to_string())
+    {
+        print_error(&format!("couldn't write pidfile {}: {e}", pidfile.display()));
+        return exit_code(exitcode::OSERR);
+    }
+    let _session_files = SessionFiles { pidfile: cli.pidfile, listen_path: cli.listen_path, tty_path: cli.tty_path };
 
     // The same check `RawModeGuard`/`watch_resize` act on: if there's a real terminal here,
     // it's the one real screen size that means anything, so a remote `Resize` would just fight
@@ -380,6 +518,18 @@ fn run_interactive(program: &str, rest: &[String], cli: InteractiveOpts) -> Exit
             return exit_code(exitcode::OSERR);
         }
         log::info!("listening for observers ({write_policy:?}) at {}", path.display());
+    }
+
+    if let Some(path) = cli.tty_path {
+        // Always `Open` (`docs/architecture.md`) - the raw byte protocol has no framing for an
+        // `acquire_write`/`release_write` handshake, so `Exclusive` isn't a meaningful policy
+        // here; a remote TTY attacher can always type, same as this invocation's own local
+        // typing already can via `forward_input`, independent of this policy entirely.
+        if let Err(e) = vtee::Tap::serve_tty(tap.clone(), path, vtee::WritePolicy::Open) {
+            raw_guard.take();
+            print_error(&format!("couldn't bind the attach socket: {e}"));
+            return exit_code(exitcode::OSERR);
+        }
     }
 
     let status = tap.wait();
@@ -584,6 +734,195 @@ fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
 #[cfg(not(unix))]
 fn run_connect(_path: &Path, _text_mode: bool) -> ExitCode {
     print_error("--connect needs Unix (requirement 8 defers Windows)");
+    exit_code(exitcode::OSERR)
+}
+
+/// `vtee attach [name]` (`docs/architecture.md`): a pure client, no `Tap` access at all - it
+/// connects to an existing session's raw-TTY socket and relays, nothing more. Can't propagate
+/// the wrapped program's real exit code this way (the raw byte protocol has no framing for it,
+/// unlike the originating `vtee <program>` invocation's own direct `tap.wait()`) - a known,
+/// documented v1 limitation, not an oversight; this always returns `SUCCESS` once the session
+/// ends (socket EOF) rather than claim an exit code it has no way to know.
+#[cfg(unix)]
+fn run_attach(name: Option<&str>) -> ExitCode {
+    let name = match name {
+        Some(n) => n.to_string(),
+        None => match resolve_default_session() {
+            Ok(n) => n,
+            Err(message) => {
+                print_error(&message);
+                return exit_code(exitcode::USAGE);
+            }
+        },
+    };
+    let paths = match vtee::session_paths(&name) {
+        Ok(p) => p,
+        Err(e) => {
+            print_error(&format!("couldn't resolve session {name:?}: {e}"));
+            return exit_code(exitcode::OSERR);
+        }
+    };
+    let stream = match std::os::unix::net::UnixStream::connect(&paths.tty_sock) {
+        Ok(s) => s,
+        Err(e) => {
+            print_error(&format!("failed to attach to {name:?}: {e}"));
+            return exit_code(exitcode::NOHOST);
+        }
+    };
+    let _raw_guard = vtee::RawModeGuard::new();
+    match relay_tty(stream) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            print_error(&format!("attach session {name:?} ended with an error: {e}"));
+            exit_code(exitcode::OSERR)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn run_attach(_name: Option<&str>) -> ExitCode {
+    print_error("attach needs Unix (requirement 8 defers Windows)");
+    exit_code(exitcode::OSERR)
+}
+
+/// Bare `vtee attach` (no name): tmux's own `attach-session` resolution - the only live
+/// session if there's exactly one, else the most-recently-active. "Most-recently-active" is
+/// approximated by the pidfile's own mtime, since nothing richer (a real last-activity
+/// timestamp) is tracked yet - a reasonable, documented proxy, not an exact reproduction of
+/// tmux's own bookkeeping.
+#[cfg(unix)]
+fn resolve_default_session() -> Result<String, String> {
+    let names = vtee::session_names().map_err(|e| format!("couldn't list sessions: {e}"))?;
+    let mut live = Vec::new();
+    for name in names {
+        if vtee::session_is_live(&name).unwrap_or(false) {
+            let mtime = vtee::session_paths(&name)
+                .ok()
+                .and_then(|p| std::fs::metadata(&p.pidfile).ok())
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            live.push((name, mtime));
+        }
+    }
+    match live.len() {
+        0 => Err("no live sessions to attach to".to_string()),
+        1 => Ok(live.into_iter().next().unwrap().0),
+        _ => {
+            live.sort_by_key(|(_, mtime)| *mtime);
+            Ok(live.pop().expect("just checked len() > 1").0)
+        }
+    }
+}
+
+/// Raw bidirectional byte forwarding between `stream` and our own real stdin/stdout - the raw-
+/// TTY protocol's client side, shared by `vtee attach` here. Mirrors `Tap::forward_input`'s
+/// own raw (not line-buffered) read loop deliberately: arbitrary control bytes/escape sequences
+/// must pass through untouched, the same reason that function doesn't use `.lines()` either.
+#[cfg(unix)]
+fn relay_tty(stream: std::os::unix::net::UnixStream) -> io::Result<()> {
+    let reader_stream = stream.try_clone()?;
+    let mut writer = stream;
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = reader_stream;
+        let mut stdout = std::io::stdout();
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdout.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = stdout.flush();
+                }
+            }
+        }
+    });
+
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if writer.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+    // Same reasoning as `run_connect`'s own `shutdown` call: a plain `drop(writer)` wouldn't
+    // signal EOF to the server here either, for the same `try_clone`-duplicates-the-fd reason.
+    let _ = writer.shutdown(std::net::Shutdown::Write);
+    let _ = reader_thread.join();
+    Ok(())
+}
+
+/// `vtee ls`: every session name found in the default session directory, each marked `live`
+/// (its socket actually answers) or `stale` (a leftover from a session that ended without
+/// cleaning up after itself - e.g. `SIGKILL`, `docs/decisions.md`'s documented gap).
+#[cfg(unix)]
+fn run_ls() -> ExitCode {
+    let names = match vtee::session_names() {
+        Ok(n) => n,
+        Err(e) => {
+            print_error(&format!("couldn't list sessions: {e}"));
+            return exit_code(exitcode::OSERR);
+        }
+    };
+    if names.is_empty() {
+        println!("no sessions");
+        return ExitCode::SUCCESS;
+    }
+    for name in names {
+        let live = vtee::session_is_live(&name).unwrap_or(false);
+        let pid = vtee::session_paths(&name).ok().and_then(|p| std::fs::read_to_string(&p.pidfile).ok());
+        let status = if live { "live" } else { "stale" };
+        match pid {
+            Some(pid) => println!("{name}\tpid={}\t{status}", pid.trim()),
+            None => println!("{name}\t{status}"),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(unix))]
+fn run_ls() -> ExitCode {
+    print_error("ls needs Unix (requirement 8 defers Windows)");
+    exit_code(exitcode::OSERR)
+}
+
+/// `vtee kill <name>`: signal the holder process and clean up its files directly, rather than
+/// relying on the holder's own `SessionFiles` guard - `watch_sigterm`'s handler calls
+/// `std::process::exit` directly, which skips every destructor including that guard's, so
+/// without this the files would be left behind despite the process actually stopping.
+#[cfg(unix)]
+fn run_kill(name: &str) -> ExitCode {
+    let paths = match vtee::session_paths(name) {
+        Ok(p) => p,
+        Err(e) => {
+            print_error(&format!("couldn't resolve session {name:?}: {e}"));
+            return exit_code(exitcode::OSERR);
+        }
+    };
+    let pid: i32 = match std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse().ok()) {
+        Some(pid) => pid,
+        None => {
+            print_error(&format!("no session named {name:?} (no pidfile)"));
+            return exit_code(exitcode::NOHOST);
+        }
+    };
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let _ = std::fs::remove_file(&paths.sock);
+    let _ = std::fs::remove_file(&paths.tty_sock);
+    let _ = std::fs::remove_file(&paths.pidfile);
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(unix))]
+fn run_kill(_name: &str) -> ExitCode {
+    print_error("kill needs Unix (requirement 8 defers Windows)");
     exit_code(exitcode::OSERR)
 }
 

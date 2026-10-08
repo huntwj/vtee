@@ -170,6 +170,68 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     }
 }
 
+/// Reconstructs `snap`'s visible screen as raw ANSI bytes, for a freshly-attached raw-TTY client
+/// (`Tap::serve_tty`, `docs/architecture.md`) - sent before the live byte feed starts, so
+/// attaching mid-session shows the current picture immediately, the way `tmux attach` does,
+/// rather than a blank screen waiting for new output. No existing `alacritty_terminal` API does
+/// this (checked its 0.26.0 source directly, not assumed) - it only ever consumes ANSI, never
+/// re-emits it.
+///
+/// Scope, deliberately: visual state only (cells + cursor position/visibility). Emits SGR
+/// unconditionally per cell rather than only on an attribute change - correct, not the most
+/// compact possible output, and not worth optimizing until a real session makes it matter.
+/// Does *not* restore input-affecting modes (app-cursor-keys, mouse reporting) for the new
+/// client's own keystrokes - a known, smaller follow-on, not a correctness gap in what's drawn.
+pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    if snap.alt_screen {
+        out.extend_from_slice(b"\x1b[?1049h");
+    }
+    out.extend_from_slice(b"\x1b[2J");
+    for (r, row) in snap.cells.iter().enumerate() {
+        out.extend_from_slice(format!("\x1b[{};1H", r + 1).as_bytes());
+        for cell in row {
+            out.extend_from_slice(b"\x1b[0m");
+            let mut codes = Vec::new();
+            if cell.bold {
+                codes.push("1".to_string());
+            }
+            if cell.dim {
+                codes.push("2".to_string());
+            }
+            if cell.italic {
+                codes.push("3".to_string());
+            }
+            if cell.underline {
+                codes.push("4".to_string());
+            }
+            if cell.reverse {
+                codes.push("7".to_string());
+            }
+            if cell.strike {
+                codes.push("9".to_string());
+            }
+            push_color_codes(&mut codes, cell.fg, true);
+            push_color_codes(&mut codes, cell.bg, false);
+            if !codes.is_empty() {
+                out.extend_from_slice(format!("\x1b[{}m", codes.join(";")).as_bytes());
+            }
+            out.extend_from_slice(cell.ch.as_bytes());
+        }
+    }
+    out.extend_from_slice(format!("\x1b[{};{}H", snap.cursor.row + 1, snap.cursor.col + 1).as_bytes());
+    out.extend_from_slice(if snap.cursor.hidden { b"\x1b[?25l" } else { b"\x1b[?25h" });
+    out
+}
+
+fn push_color_codes(codes: &mut Vec<String>, color: Color, foreground: bool) {
+    match color {
+        Color::Default => {}
+        Color::Indexed(i) => codes.push(format!("{};5;{i}", if foreground { 38 } else { 48 })),
+        Color::Rgb(r, g, b) => codes.push(format!("{};2;{r};{g};{b}", if foreground { 38 } else { 48 })),
+    }
+}
+
 fn build_scrollback(term: &Term<ObserverListener>) -> Vec<String> {
     let grid = term.grid();
     let history = grid.history_size();
