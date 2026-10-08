@@ -276,9 +276,13 @@ with stdin/stdout already being raw-forwarding channels, would need its own fd f
 ## Later
 
 An MCP front end (wraps whichever protocol v1 picks), Windows (ConPTY, blocked on an upstream bug - see
-`decisions.md`), multiple sessions (one process managing several `Tap`s, vs. one process per `Tap` - affects the
-protocol: a socket per process is simplest, a daemon multiplexing several needs session IDs in every message -
-not decided).
+`decisions.md`). Multiple sessions - **substantially addressed, 2026-10-08, without actually needing a
+daemon**: named sessions, `vtee ls`/`attach`/`kill` (`docs/architecture.md`, "Named sessions and `vtee
+attach`") give most of the practical value multiple-sessions-behind-one-process would have (discoverability,
+attach-by-name, several clients per session) while staying one process per `Tap` - a socket per process really
+was the simplest answer once sessions had names to find them by. Whether to ever build an actual daemon
+multiplexing several `Tap`s behind one process remains undecided, and now looks like a "only if something
+concrete needs it" question rather than a near-term one.
 
 ## Open decisions
 

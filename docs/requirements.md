@@ -16,11 +16,15 @@ status to track per-requirement rather than as one blob.
    without the session having been started with `--listen` in anticipation of that, and
    inject input too - with `--writable` when no human is competing (`WritePolicy::Open`), or with
    `--writable=exclusive`/`exclusive-shared` when one is, via an explicit `acquire_write`/`release_write` handoff
-   (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). What's still open: free-for-all
-   and mutually-exclusive-with-a-human remain unbuilt modes of the same `WritePolicy` enum (nobody's needed them
-   yet), and multiple sessions behind one process/daemon. "Without a human" is now a declared mode, not an
-   accident of environment detection: `--headless` (`decisions.md`) turns off human stdin/stdout forwarding and
-   the raw-mode/signal machinery outright, rather than leaving it to whatever `is_terminal()` happens to see.
+   (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). What's still open:
+   free-for-all and mutually-exclusive-with-a-human remain unbuilt modes of the same `WritePolicy` enum
+   (nobody's needed them yet). "Without a human" is now a declared mode, not an accident of environment
+   detection: `--headless` (`decisions.md`) turns off human stdin/stdout forwarding and the raw-mode/signal
+   machinery outright, rather than leaving it to whatever `is_terminal()` happens to see. A human in a
+   *separate* process can now attach to a live session too, not just query it - named sessions,
+   `vtee attach`/`ls`/`kill`, a second raw-TTY protocol alongside the existing NDJSON one
+   (`architecture.md`, "Named sessions and `vtee attach`"), multiple clients of either kind at once,
+   verified end to end including a remote attach client's own typing reaching the child.
 2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
    256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
    and combining characters. We should not cap the target at what one program uses today.
