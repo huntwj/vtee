@@ -25,16 +25,36 @@ fn main() -> ExitCode {
 
     let log_path = take_path_flag(&mut args, "--log");
     let script_path = take_path_flag(&mut args, "--script");
-    let listen_path: Option<PathBuf> = match take_listen_flag(&mut args) {
-        None => None,
-        Some(Some(explicit)) => Some(explicit),
-        Some(None) => match vtee::default_socket_path() {
-            Ok(path) => Some(path),
-            Err(e) => {
-                eprintln!("vtee: --listen (no path given) couldn't set up a default socket directory: {e}");
-                return exit_code(exitcode::OSERR);
-            }
-        },
+    let listen_flag = take_listen_flag(&mut args);
+    // Escape hatch for anything that doesn't want the new always-on default below - a CI test
+    // script driving `vtee` through plain stdin/stdout has no use for an attachable socket,
+    // and would rather not have one appear in a shared `/tmp` at all.
+    let no_listen = take_switch(&mut args, "--no-listen");
+    if no_listen && listen_flag.is_some() {
+        eprintln!("vtee: --listen and --no-listen can't both be given");
+        return exit_code(exitcode::USAGE);
+    }
+    let listen_path: Option<PathBuf> = if no_listen {
+        None
+    } else {
+        match listen_flag {
+            Some(Some(explicit)) => Some(explicit),
+            // `--listen` with no path, or no `--listen` at all: the latter is read-only
+            // observation on by default now (`docs/decisions.md`) since attaching later is the
+            // common case this project actually has - but only because `default_socket_path`
+            // makes that safe. An explicit `--listen` failing to set up its default directory is
+            // still a hard error (the user asked for it specifically); the *implicit* default
+            // failing (e.g. not Unix) just means this plain run isn't attachable, same as if
+            // `--no-listen` had been passed - not worth refusing to run the program over.
+            Some(None) => match vtee::default_socket_path() {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!("vtee: --listen (no path given) couldn't set up a default socket directory: {e}");
+                    return exit_code(exitcode::OSERR);
+                }
+            },
+            None => vtee::default_socket_path().ok(),
+        }
     };
     // Stage 3a/3b ("Full duplex", `docs/roadmap.md`): opt-in, default `None` (read-only),
     // matching this project's pattern everywhere else of defaulting to the narrower/safer
@@ -44,13 +64,18 @@ fn main() -> ExitCode {
     // (input isn't), so a `--connect --writable` client has the pty to itself. Independent of
     // `write_policy` on purpose - `--no-stdin` without `--writable` just means nobody can type.
     let no_stdin = take_switch(&mut args, "--no-stdin");
+    // Leftover from before this project had a real caller (`docs/decisions.md`): a human
+    // running `vtee` plain already watched the real screen render live via `forward_output`,
+    // so the final-state dump this prints is almost always just repeating what they already
+    // saw, in uglier `Debug`-escaped form - opt-in now rather than default-on.
+    let dump_on_exit = take_switch(&mut args, "--dump-on-exit");
 
     let args: &[String] = if args.first().map(String::as_str) == Some("--") { &args[1..] } else { &args[..] };
 
     let Some((program, rest)) = args.split_first() else {
         eprintln!(
-            "usage: vtee [--log <path>] [--listen [<path>] [--writable[=open|exclusive|exclusive-shared]]] \
-             [--no-stdin] [--] <command> [args...]\n       \
+            "usage: vtee [--log <path>] [--listen [<path>] [--writable[=open|exclusive|exclusive-shared]] | --no-listen] \
+             [--no-stdin] [--dump-on-exit] [--] <command> [args...]\n       \
              vtee --script <path> [--text] [--log <path>] [--] <command> [args...]\n       \
              vtee --connect <path> [--text]"
         );
@@ -63,7 +88,15 @@ fn main() -> ExitCode {
     // `Tap` is still alive would skip its child-killing `Drop` and orphan the child.
     match script_path {
         Some(script_path) => run_script(program, rest, log_path.as_deref(), &script_path, text_mode),
-        None => run_interactive(program, rest, log_path.as_deref(), listen_path.as_deref(), write_policy, no_stdin),
+        None => run_interactive(
+            program,
+            rest,
+            log_path.as_deref(),
+            listen_path.as_deref(),
+            write_policy,
+            no_stdin,
+            dump_on_exit,
+        ),
     }
 }
 
@@ -94,6 +127,7 @@ fn run_interactive(
     listen_path: Option<&Path>,
     write_policy: Option<vtee::WritePolicy>,
     no_stdin: bool,
+    dump_on_exit: bool,
 ) -> ExitCode {
     let (cols, rows) = terminal_size();
     let opts = vtee::SpawnOptions { cols, rows, log_path, forward_input: !no_stdin, forward_output: true };
@@ -134,20 +168,22 @@ fn run_interactive(
 
     match status {
         Ok(status) => {
-            let snap = tap.snapshot();
-            eprintln!(
-                "\n--- vtee: child exited (success={}, exit_code={}), {} bytes seen ---",
-                status.success(),
-                status.exit_code(),
-                snap.byte_offset
-            );
-            for (i, line) in snap.lines.iter().enumerate() {
-                eprintln!("{i:2}: {line:?}");
+            if dump_on_exit {
+                let snap = tap.snapshot();
+                eprintln!(
+                    "\n--- vtee: child exited (success={}, exit_code={}), {} bytes seen ---",
+                    status.success(),
+                    status.exit_code(),
+                    snap.byte_offset
+                );
+                for (i, line) in snap.lines.iter().enumerate() {
+                    eprintln!("{i:2}: {line:?}");
+                }
+                eprintln!(
+                    "cursor={:?} modes={:?} alt_screen={} title={:?}",
+                    snap.cursor, snap.modes, snap.alt_screen, snap.title
+                );
             }
-            eprintln!(
-                "cursor={:?} modes={:?} alt_screen={} title={:?}",
-                snap.cursor, snap.modes, snap.alt_screen, snap.title
-            );
             // Propagate the child's own exit code rather than collapsing every failure to a
             // fixed value - a caller scripting around vtee (CI, TF's harness) likely cares
             // which code the wrapped program actually exited with, the way `env`/`time` do.
