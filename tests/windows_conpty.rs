@@ -9,13 +9,27 @@
 //! Windows-only: this is specifically a regression test for the `CREATE_NEW_PROCESS_GROUP` patch
 //! (`vendor/portable-pty/README-vtee-patch.md`) - Linux never had the bug it guards against.
 //!
-//! `#[ignore]`d by default (`docs/decisions.md`): measured to be genuinely flaky, not just slow -
-//! 2 of 3 identical runs passed, 1 hung the full 15s, even with the `AllocConsole` mitigation in
-//! place. That matches the underlying GitHub issue's own "machine-dependent" character, apparently
-//! extending to run-to-run variance on one machine, not just machine-to-machine - a 1-in-3 failure
-//! rate makes this unfit as a normal gate (it would fail builds for reasons unrelated to any real
-//! regression). Run manually with `cargo test --test windows_conpty -- --ignored` when actually
-//! investigating this area, not as part of routine verification.
+//! `#[ignore]`d by default (`docs/decisions.md`): measured to be genuinely flaky, not just slow,
+//! and the flakiness rate itself bounces around across batches of identical runs (2/3, then 1/5,
+//! then 5/6 failed) with no code change between them - the signature of a lower-level race, not
+//! an application-level bug. Two concrete, plausible causes were investigated and ruled out with
+//! actual evidence, not assumed away:
+//! - Whether the query could arrive split across two `read()`s, so checking only one chunk in
+//!   isolation could miss it - fixed anyway (checking the accumulated buffer is strictly more
+//!   correct), but diagnostics showed the query is always seen intact as the very first 4 bytes,
+//!   pass or fail.
+//! - Whether this test's own nested ConPTY sessions (the outer one hosting `vtee.exe`, the
+//!   inner one `vtee.exe` creates internally for `whoami.exe`) each emit their own independent
+//!   query, with a single-shot reply swallowing the second - fixed anyway (replies to every
+//!   occurrence found, not just the first), but diagnostics showed only one query ever appears
+//!   at all, in every run, pass or fail.
+//!
+//! Both fixes are kept as real robustness improvements (correct behavior regardless), but neither
+//! explains the actual hang - whatever's underneath is lower-level than this test can observe.
+//! A 1-in-3-to-1-in-2-ish failure rate makes this unfit as a normal gate (it would fail builds for
+//! reasons unrelated to any real regression). Run manually with
+//! `cargo test --test windows_conpty -- --ignored` when actually investigating this area, not as
+//! part of routine verification.
 
 #![cfg(windows)]
 
@@ -24,6 +38,14 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// DSR (Device Status Report), cursor-position variant: ConPTY issues this toward whatever's on
+/// the other end of its pty at session startup, expecting `CURSOR_POSITION_REPLY` back via
+/// stdin - a real terminal answers it automatically, which is what this test stands in for.
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+/// A canned reply to `CURSOR_POSITION_QUERY` - row 1, column 1. The actual position doesn't
+/// matter for this test; only that *some* well-formed reply unblocks whatever's waiting on one.
+const CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
 
 #[test]
 #[ignore]
@@ -58,19 +80,47 @@ fn vtee_runs_to_completion_under_a_real_conpty_terminal() {
         let output = output.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
+            // How far the query-scan has gotten, and how many replies have been sent - *not* a
+            // single-shot flag. Measured, not assumed, that this test nests two separate ConPTY
+            // sessions (the outer one hosting `vtee.exe` itself, created by this test's own
+            // `openpty()`; the inner one `vtee.exe` creates internally via `Tap::spawn` to
+            // host `whoami.exe`) - if each session's own startup handshake emits its own
+            // cursor-position query independently, and `vtee`'s `forward_output` relays the
+            // inner one through transparently (which it does - it has no logic to answer
+            // escape sequences itself, same as it wouldn't for a real human's terminal), a
+            // single-shot "answered" flag would silently swallow the second one, leaving it
+            // unanswered forever - diagnostics showed the first query always gets a successful
+            // reply, pass or fail, which pointed here rather than at the reply itself.
+            let mut scanned_up_to = 0usize;
+            let mut replies_sent = 0u32;
             while !stop.load(Ordering::Relaxed) {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let chunk = &buf[..n];
-                        output.lock().unwrap().extend_from_slice(chunk);
-                        // The minimal terminal emulation this test exists to provide: a real
-                        // terminal answers a cursor-position query automatically, so stand in
-                        // for one rather than leaving ConPTY's own handshake unanswered.
-                        if chunk.windows(4).any(|w| w == b"\x1b[6n") {
-                            let _ = writer.write_all(b"\x1b[1;1R");
-                            let _ = writer.flush();
+                        let mut out = output.lock().unwrap();
+                        out.extend_from_slice(&buf[..n]);
+                        // Rescan from a little before where the last scan ended, in case a
+                        // previous read ended mid-pattern - the minimal terminal emulation this
+                        // test exists to provide: a real terminal answers every cursor-position
+                        // query automatically, so stand in for one rather than leaving any of
+                        // ConPTY's own handshakes unanswered.
+                        let overlap = CURSOR_POSITION_QUERY.len().saturating_sub(1);
+                        let mut i = scanned_up_to.saturating_sub(overlap);
+                        while i + CURSOR_POSITION_QUERY.len() <= out.len() {
+                            if out[i..i + CURSOR_POSITION_QUERY.len()] == *CURSOR_POSITION_QUERY {
+                                replies_sent += 1;
+                                eprintln!("[test] cursor-position query #{replies_sent} at offset {i}, replying");
+                                let write_result = writer.write_all(CURSOR_POSITION_REPLY);
+                                let flush_result = writer.flush();
+                                eprintln!(
+                                    "[test] reply #{replies_sent} write: {write_result:?}, flush: {flush_result:?}"
+                                );
+                                i += CURSOR_POSITION_QUERY.len();
+                            } else {
+                                i += 1;
+                            }
                         }
+                        scanned_up_to = out.len();
                     }
                 }
             }

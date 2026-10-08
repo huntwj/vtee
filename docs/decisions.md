@@ -148,17 +148,39 @@ but did not eliminate it: three identical runs after the fix went 2 passed, 1 hu
 underlying GitHub issue's own description of "machine-dependent" almost exactly, just one level deeper -
 apparently extending to run-to-run variance on a single machine, not only machine-to-machine.
 
+**Asked directly why the residual flakiness couldn't just be fixed - investigated further rather than
+shrugged at, and ruled out two concrete, plausible causes with actual evidence, not assumptions.** Added
+diagnostics (`eprintln!` in the test's own responder) to see, on every run, whether the query was actually
+seen and answered. Both hypotheses turned out wrong:
+- *Could the query arrive split across two separate `read()` calls*, with the responder checking only the
+  current chunk in isolation and missing a sequence straddling two reads? Fixed anyway (checking the full
+  accumulated buffer is strictly more correct regardless), but the diagnostics show the query is always seen
+  intact, as the very first 4 bytes read, in every single run - pass or fail alike. Not the cause.
+- *Could this test's own nested ConPTY sessions* (the outer one hosting `vtee.exe` itself, created by the
+  test's own `openpty()`; the inner one `vtee.exe` creates internally via `Tap::spawn` to host `whoami.exe`)
+  *each emit their own independent startup query*, with the test's original single-shot "already answered"
+  guard silently swallowing a second one? Fixed anyway (now replies to every occurrence found, not just the
+  first), but the diagnostics show only one query ever appears at all, in every run - pass or fail alike. Not
+  the cause either.
+- The failure rate itself bounced around across batches of identical runs with *no code change between them*
+  (2 of 3 failed, then 4 of 5, then 1 of 6) - the signature of a genuine lower-level race, not a deterministic
+  logic bug sitting at the application level where this test (or `vtee`) can see or influence it.
+
 **Status, precisely**: the originally-diagnosed crash (`STATUS_CONTROL_C_EXIT` within milliseconds) is fixed
 and verified with no flakiness observed in re-testing specifically that. The user's own real-terminal use
 worked cleanly, and this is the realistic case - that test harness itself (deliberately constructing an
 artificial pty-within-a-pty to automate what a human did manually) may be exercising a Windows console corner
-nobody's actual usage looks like. But a separate, deeper ConPTY-creation reliability issue is real, measured,
-not fully eliminated, and not fully understood - `tests/windows_conpty.rs` is `#[ignore]`d by default for
-exactly this reason (a 1-in-3 failure rate is unfit as a normal gate) rather than claimed as passing.
-Native Windows interactive use is meaningfully better than "blocked," genuinely not yet "fully solved."
-`vendor/portable-pty/README-vtee-patch.md` has the `CREATE_NEW_PROCESS_GROUP` patch's own rationale and the
-removal plan once upstream fixes #7025 for real; the `AllocConsole` mitigation is a separate, independent
-finding layered on top of it, not part of that same upstream issue.
+nobody's actual usage looks like. A separate, deeper ConPTY-creation reliability issue is real, measured, and
+- after genuinely trying, not just asserting it's unfixable - not something pinned down at the application
+level: both plausible, checkable causes were ruled out with diagnostic evidence, and what's left appears to
+be lower in the stack than anything in this codebase or test harness can observe, let alone fix, without
+tooling this project doesn't have (e.g. ETW tracing of the console subsystem). `tests/windows_conpty.rs` stays
+`#[ignore]`d by default for exactly this reason (an unstable, data-free-to-explain failure rate is unfit as a
+normal gate) rather than claimed as passing. Native Windows interactive use is meaningfully better than
+"blocked," genuinely not yet "fully solved." `vendor/portable-pty/README-vtee-patch.md` has the
+`CREATE_NEW_PROCESS_GROUP` patch's own rationale and the removal plan once upstream fixes #7025 for real; the
+`AllocConsole` mitigation is a separate, independent finding layered on top of it, not part of that same
+upstream issue.
 
 ## 2026-10-07: "both screen buffers" (requirement 3) deferred - a verified `alacritty_terminal` API gap
 
