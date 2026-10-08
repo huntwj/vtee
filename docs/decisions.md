@@ -213,6 +213,96 @@ Verified end to end in the Linux container: a plain run with no flags creates th
 the same "listening for observers" line `--listen` always has; `--no-listen` suppresses it entirely; passing
 both `--listen` and `--no-listen` is a usage error (exit code 64) rather than silently picking one.
 
+## 2026-10-08: `--headless` (the third primary use case) and `--cols`/`--rows`
+
+Prompted by actually naming the use cases this project serves: automated tests (`--script`), an interactive
+session with a human and an optionally-attached AI (`--listen`, the default now), and an AI-only session with
+no human at all. The third one already technically worked - `RawModeGuard`/`forward_input`/`forward_output`
+already no-op correctly when stdin/stdout aren't a real tty - but only as an *accident* of however the process
+happened to be launched, never a thing the CLI itself knew about or declared.
+
+**Decision: `--headless` makes it explicit.** Forces `forward_input`/`forward_output` off outright (not just
+stdin - there's no stdout worth forwarding to either, since the AI side is meant to use `--listen`/snapshot),
+skips `RawModeGuard`/the SIGKILL watchdog and `watch_resize` entirely rather than leaving it to `is_terminal()`
+to decide, and forces `resize_owned_by_terminal` false so a remote `resize` is never rejected as "owned by the
+real terminal" when there isn't one. Refuses to start combined with `--no-listen` - a headless session with no
+forwarding and no socket would be unreachable by anything, human or AI, which is never what's wanted.
+
+**`--cols`/`--rows`** override the virtual tty's size independently of whatever the real terminal reports (or
+the 80x24 fallback) - the first of what's meant to grow into a fuller virtual tty spec per the user ("width and
+height are the obvious starters, but terminal emulation modes, color support, and other things might be good
+down the road"); no abstraction for that was built yet, just the two flags actually asked for.
+
+Verified end to end in the Linux container: `--headless --no-listen` together is a usage error (exit 64);
+`--headless` alone still gets the default socket (read-only); a remote `resize` succeeds under `--headless`
+where it would be rejected with a real terminal attached; `--cols 100 --rows 40` is reflected in a live
+`snapshot`'s `cols`/`rows` fields over `--connect`.
+
+## 2026-10-08: adopting the Rust CLI ecosystem's standard crates
+
+Prompted by a direct question ("are you using standard rust crates... clap, color_eyre, etc.?") - the honest
+answer was no, the CLI was entirely hand-rolled (`take_path_flag`, `take_switch`, a hand-written `--listen`
+optional-value parser, a hand-written `--cols`/`--rows` numeric parser), which was a reasonable call at two or
+three flags but had stopped being one: adding `--headless` just above needed its own hand-written conflict
+check, and the growing flag list had already pushed `run_interactive`'s own signature past
+`clippy::too_many_arguments` (fixed separately by bundling them into `InteractiveOpts`). Checked "Command Line
+Applications in Rust" (the Rust CLI working group's book, `rust-cli.github.io/book`) against what this project
+actually needs rather than adopting its whole list:
+
+- **`clap`** (derive): replaces every hand-rolled flag parser. `--listen`/`--writable`'s optional-value shape
+  (`num_args(0..=1)`, `require_equals(true)`, `default_missing_value(...)`) turns out to be exactly `grep
+  --color[=WHEN]`'s own shape, and POSIX's `getopt_long(3)` is explicit that an optional-argument long option
+  *requires* the `=` form - confirmed against the actual man page, not assumed. **Measured, not assumed, bug
+  found along the way**: `default_missing_value("")` (empty string, for "bare `--listen` means use the
+  default") was silently rejected by `clap` - it falls back to demanding a value rather than treating empty as
+  the "no value given" sentinel. Fixed with `"\0"` instead (a real path can never contain a NUL byte, on any
+  platform this runs on). **Second fix, also found while verifying this**: `Cli::parse()` exits with code `2`
+  on a bad argument - `clap`'s own convention, not this project's `exitcode`/sysexits one adopted earlier this
+  session specifically for consistency. Switched to `Cli::try_parse()` and route a real error through
+  `exitcode::USAGE` (64) via `clap::Error::exit_code()` (0 for `--help`/`--version`, which stay on their own
+  correct exit code and stream via `Error::print()`), so every usage error in this CLI still means the same
+  thing regardless of which layer caught it.
+- **`human-panic`**: a friendly crash report instead of a raw backtrace - relevant here specifically because
+  the real terminal can be in raw mode when a panic happens. Not fully verified (no panic was deliberately
+  triggered to check it) - a known gap in how far this was tested, not a claim it's flawless. One real caveat
+  worth being honest about: `human-panic`'s own message prints the instant the panic hook runs, *before* stack
+  unwinding drops `RawModeGuard`, so in the rare case of an actual panic during an interactive session that
+  message can still land on the same raw-mode terminal the child is drawing on - better than a bare backtrace,
+  but not the same clean separation the fix below gives ordinary error paths.
+- **`log` + `env_logger` + `clap-verbosity-flag`**: leveled, `-v`/`-vv`-controlled diagnostics (connection
+  accept/disconnect, `acquire_write`/`release_write`/revoke events in `serve_connection`/`forward_input`) where
+  previously there was none. **The actual reason this needed its own design, not just "add a logging crate"**:
+  during an interactive session with a real terminal, `vtee` only ever shows the *child's* screen - there is
+  no safe moment to write anything of our own to that same stderr without interleaving with it. Tracing this
+  through surfaced a real pre-existing bug: the `--listen` setup-failure message was already being printed via
+  plain `eprintln!` *after* `RawModeGuard` had put the terminal in raw mode, with the child potentially already
+  drawing - fixed by dropping the guard first, restoring cooked mode, *then* printing. Generalized into a rule:
+  diagnostic/non-fatal messages (the "listening for observers" notice, all new `log::info!`/`debug!` calls) go
+  to a file beside the session's own socket (`default_log_path`, sharing `default_socket_path`'s hardened
+  per-uid directory via a new shared `default_session_dir` helper) whenever a real terminal is actively showing
+  the child (`!headless && stdin is a tty`); fatal/abort messages stay on stderr directly, since the process is
+  exiting right there regardless. `env_logger`'s `write_style(Never)` is forced for the file target specifically
+  so colour escapes never land in a log file - verified nothing is misdetected by actually reading the file's
+  bytes (`cat -A`), not just eyeballing it.
+- **`owo-colors`** (`supports-colors` feature): status/error output coloured (red for `print_error`, dimmed for
+  the one pre-session `print_info` notice) only when the destination stream actually supports it -
+  auto-detected per-stream, so piped/redirected output and the log file both stay plain text. Verified by
+  piping stderr to a file and checking for literal escape bytes (`cat -A`): none.
+- **`assert_cmd` + `predicates`**: replaces the ad-hoc shell-script-in-Docker approach for CLI-*argument*
+  behaviour (conflicts, bad values, the `--listen`-with-a-space pitfall) with real `#[test]`s
+  (`tests/cli.rs`) that run on every platform, since `clap` validates before any pty is ever touched. Tests
+  that actually spawn a child stay Unix-only, same reasoning as `tests/replay.rs`. **Found and fixed a test
+  bug, not a product bug, while writing these**: the Unix-only tests initially shared one fixed default
+  session directory and raced each other under `cargo test`'s default parallelism (`cargo_test` runs tests
+  concurrently) - fixed by giving each test its own `TMPDIR`, the same isolation a real caller would use, not
+  by serializing the tests.
+- **Looked at and declined**: `anyhow`/`color_eyre` (this project's `main` deliberately returns `ExitCode`
+  per-call-site rather than bubbling a `?`-propagated `Result`, which is the problem those crates solve);
+  `indicatif` (nothing here has a progress-bar-shaped operation); `confy` (no persistent config exists);
+  `tokio` (would mean rewriting the thread-per-connection model for no current need); `ctrlc` (redundant with
+  `signal-hook`, already in use for the SIGHUP-immunization/watchdog tricks `ctrlc` doesn't offer); `ansi_term`
+  (the book's own pick for colour, but archived/unmaintained - `owo-colors` above instead).
+
 ## Open
 
 - **Protocol**, **licence**: unchanged from README's "Open decisions."

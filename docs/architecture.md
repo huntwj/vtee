@@ -303,14 +303,52 @@ has the full comparison): not socket-file permissions, but a private per-UID dir
 (`$TMPDIR/vtee-<uid>/`, mode `0700`, passed straight to `mkdir` rather than `chmod`'d afterwards) that nothing
 else can even traverse into. If that directory already exists, it's verified rather than trusted - rejected
 outright if it isn't a plain directory (`symlink_metadata`, so a symlink is caught the same way a wrong-type
-file would be), isn't owned by the current UID, or has any group/other permission bit set at all. `main.rs`'s
-`take_listen_flag` routes a bare `--listen` (no path argument) through this; `--listen <path>` is untouched and
-stays the caller's own responsibility. The socket inside is named `<pid>.sock`; `Tap::serve`'s pre-bind
-`remove_file` (above) already handles a stale file left by a killed, pid-reused session.
+file would be), isn't owned by the current UID, or has any group/other permission bit set at all. `Cli`'s
+`listen` field (`src/main.rs`) routes a bare `--listen`, or no `--listen` at all, through this; an explicit
+`--listen=<path>` is untouched and stays the caller's own responsibility. The socket inside is named
+`<pid>.sock`; `Tap::serve`'s pre-bind `remove_file` (above) already handles a stale file left by a killed,
+pid-reused session. `default_log_path` (below) shares the same directory via a common `default_session_dir`
+helper, so a session's socket and its diagnostic log always live side by side.
 
 This narrows who can *reach* the socket at all - it adds nothing on top for a client that does connect, which
 still gets exactly what `WritePolicy` on that connection allows, with no per-client identity beyond the
 sequential id `ExclusiveLock` uses to arbitrate the write lock.
+
+## The CLI: `clap`, three primary modes, and where diagnostics go (2026-10-08)
+
+`src/main.rs`'s `Cli` struct (a `clap::Parser` derive) replaced a hand-rolled flag parser
+(`take_path_flag`/`take_switch`/etc.) that had grown past what was comfortable to maintain by hand - seven
+different ad-hoc parsing functions, one of which (`run_interactive`'s own flags) had already pushed that
+function's signature past `clippy::too_many_arguments` (fixed separately by bundling them into
+`InteractiveOpts`). `docs/decisions.md` has the full crate-by-crate reasoning; this is the shape it produced.
+
+Three primary modes, selected by which flags are present rather than a `clap` subcommand, so every existing
+invocation keeps working as more flags are added: `--script <path>` (batch), `--connect <path>` (observation
+client, nothing spawned), and plain `[--] <command> [args...]` (interactive - itself split into "a human's
+there" and `--headless`, "nobody is"). `command` is `#[arg(trailing_var_arg = true, allow_hyphen_values =
+true, required_unless_present = "connect")]` - everything after the last recognized flag (or after an explicit
+`--`) is the program and its own arguments, the same shape `cargo run --` already uses.
+
+`--listen`/`--writable` are both `clap`'s "optional value" shape (`num_args(0..=1)`, `require_equals(true)`,
+`default_missing_value(...)`) - `--flag` alone means one thing, `--flag=value` means another, matching
+`grep --color[=WHEN]` and POSIX's own rule that an optional-argument long option *requires* the `=` form.
+`Cli::try_parse()` (not `Parser::parse()`) is used specifically so a bad argument's exit code can be remapped
+from `clap`'s own convention (`2`) to this project's `exitcode`/sysexits one (`exitcode::USAGE`, 64) via
+`clap::Error::exit_code()` - `--help`/`--version` are errors in `clap`'s own model too but exit 0 and print to
+stdout, which `Error::print()` already routes correctly on its own.
+
+**Where diagnostic output goes** is its own small piece of logic, because during an interactive session with a
+real terminal, `vtee` only ever shows the *child's* screen - there is no stderr of our own that's safe to
+write to without interleaving with it. `mux_shows_child_live` (`main()`) is true exactly when something else
+currently owns the real terminal (`!headless && stdin is a tty`); when true, `log`/`env_logger` is pointed at
+a file from `default_log_path` (colour forced off via `write_style(Never)`, so escape codes never land in a
+log file) instead of stderr, and a one-time `print_info` notice says where before raw mode is ever entered.
+Fatal/abort messages (`print_error`) always go straight to stderr regardless, coloured via `owo-colors` when
+the stream supports it (auto-detected, so piped output and the log file both stay plain text) - printing
+through the file-backed logger here would hide the one thing a human absolutely needs to see right as the
+process exits. Tracing this through surfaced one real pre-existing bug: the `--listen` setup-failure message
+was being printed via plain `eprintln!` *after* `RawModeGuard` had already put the terminal in raw mode, with
+the child potentially already drawing - fixed by dropping the guard (restoring cooked mode) before printing.
 
 ## Known rough edges (tracked, not silently ignored)
 
