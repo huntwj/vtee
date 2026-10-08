@@ -36,7 +36,7 @@ impl From<WritableMode> for vtee::WritePolicy {
 /// `--listen`, and plain `[--] <command> [args...]` for everything else (interactive, with
 /// `--headless` for an AI-only session - `docs/decisions.md`).
 #[derive(Parser)]
-#[command(name = "vtee", trailing_var_arg = true)]
+#[command(name = "vtee", version)]
 struct Cli {
     #[command(flatten)]
     verbosity: clap_verbosity_flag::Verbosity<InfoLevel>,
@@ -58,8 +58,14 @@ struct Cli {
     log: Option<PathBuf>,
 
     /// Run a newline-delimited-JSON script of `Command`s non-interactively (`docs/roadmap.md`,
-    /// the batch CLI TinyFugue asked for) instead of the plain interactive mode.
-    #[arg(long, value_name = "PATH")]
+    /// the batch CLI TinyFugue asked for) instead of the plain interactive mode. Conflicts with
+    /// every interactive-only flag below rather than silently ignoring them - `run_script` never
+    /// looks at any of them, so accepting them without comment would be misleading, not lenient.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["listen", "no_listen", "writable", "no_stdin", "dump_on_exit", "headless"]
+    )]
     script: Option<PathBuf>,
 
     /// Observation/control socket (`docs/decisions.md`). Read-only observation is on by default
@@ -82,11 +88,13 @@ struct Cli {
     no_listen: bool,
 
     /// Allow write commands on the observation socket (`docs/roadmap.md`, "Full duplex").
-    /// Meaningless without a socket to allow them on. `open`: any connected writer, no
-    /// arbitration - fine when nothing else is also writing. `exclusive`/`exclusive-shared`:
-    /// "take the pen" - one holder at a time via `acquire_write`/`release_write`; the two differ
-    /// only in whether a human's own typing also revokes whoever currently holds it.
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "open", value_name = "MODE")]
+    /// Meaningless without a socket to allow them on - rejected alongside `--no-listen` for the
+    /// same reason `--headless` is, rather than being silently accepted and silently ignored.
+    /// `open`: any connected writer, no arbitration - fine when nothing else is also writing.
+    /// `exclusive`/`exclusive-shared`: "take the pen" - one holder at a time via
+    /// `acquire_write`/`release_write`; the two differ only in whether a human's own typing
+    /// also revokes whoever currently holds it.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "open", value_name = "MODE", conflicts_with = "no_listen")]
     writable: Option<WritableMode>,
 
     /// Don't forward our own stdin to the child - a human can watch (output still forwarded)
@@ -121,7 +129,7 @@ struct Cli {
     /// (or after an explicit `--`, needed if the program's own name or first argument could
     /// otherwise be mistaken for one of ours). Not required with `--connect`, which has nothing
     /// to spawn.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required_unless_present = "connect")]
+    #[arg(trailing_var_arg = true, required_unless_present = "connect")]
     command: Vec<String>,
 }
 
