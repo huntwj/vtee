@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      repeat_pty_tests:
+        description: "Run the pty/ConPTY test files 10 extra times to hunt flakiness"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Formatting, lints and docs: platform-independent, so checked once.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        timeout-minutes: 10
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+        timeout-minutes: 10
+
+  # Everything that needs no pty children beyond a shell: unit, CLI and replay tests.
+  fast:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        timeout-minutes: 15
+      - run: cargo test --locked --lib --bins --test cli --test replay
+        timeout-minutes: 15
+
+  # Real pty children (shells, less, vim, python3) on Linux. VTEE_REQUIRE_TOOLS makes a
+  # missing program a failure instead of a printed skip, so this job can't pass by testing nothing.
+  linux-pty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VTEE_REQUIRE_TOOLS: "1"
+      RUST_TEST_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install full-screen test programs
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends less vim-tiny procps python3
+        timeout-minutes: 5
+      - run: cargo build --locked --tests
+        timeout-minutes: 15
+      - run: cargo test --locked --test linux_sessions
+        timeout-minutes: 10
+      - name: Repeat pty tests
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_pty_tests }}
+        run: |
+          for _ in $(seq 1 10); do
+            cargo test --locked --test linux_sessions --test cli || exit 1
+          done
+        timeout-minutes: 30
+
+  # Real ConPTY sessions on Windows. Hosted runners have no interactive console; these tests
+  # bring their own pty-in-pty harness. Git for Windows' less and vim drive the full-screen
+  # tests, so put them on PATH explicitly and fail loudly if they are missing.
+  windows-pty:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      VTEE_REQUIRE_TOOLS: "less,vim"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Put Git for Windows' less and vim on PATH
+        shell: pwsh
+        run: |
+          "C:\Program Files\Git\usr\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $env:PATH = "C:\Program Files\Git\usr\bin;$env:PATH"
+          foreach ($tool in "less.exe", "vim.exe") {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+              throw "$tool not found; the full-screen tests would silently skip"
+            }
+          }
+      - run: cargo build --locked --tests
+        timeout-minutes: 20
+      - run: cargo test --locked --test windows_conpty --test windows_behavior --test windows_sessions
+        timeout-minutes: 20
+      - name: Repeat pty tests
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_pty_tests }}
+        shell: bash
+        run: |
+          for _ in $(seq 1 10); do
+            cargo test --locked --test windows_conpty --test windows_behavior --test windows_sessions || exit 1
+          done
+        timeout-minutes: 40
+
+  # Builds with the oldest Rust the crate claims to support. Runs only once Cargo.toml sets
+  # `rust-version`.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - if: steps.msrv.outputs.version != ''
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - if: steps.msrv.outputs.version != ''
+        uses: Swatinem/rust-cache@v2
+      - if: steps.msrv.outputs.version != ''
+        run: cargo check --locked --all-targets
+      - if: steps.msrv.outputs.version == ''
+        run: echo "::notice::Cargo.toml has no rust-version, so there is no MSRV to check"
