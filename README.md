@@ -1,30 +1,101 @@
 # vtee
 
-A terminal multiplexer built for AI and for testing. A Rust crate.
+A terminal multiplexer for AI agents and for testing. A Rust crate and command-line tool.
 
-`tmux` lets a human juggle terminals. `vtee` runs a program in a pseudo-terminal, keeps the terminal's state in
-memory, and lets a script or an AI agent query it and (later) send input, while a human, if there is one, uses
-their own terminal as usual. Think of it as `tee` for a TUI: the stream is copied without disturbing the original,
-but the copy is a screen you can query, not raw bytes.
+`vtee` runs a program in a pseudo-terminal and keeps the terminal's screen in memory. A script or an AI agent
+can read that screen as structured data (text, colours, cursor, title, modes) and send keystrokes to the program.
+A human can attach to the same session from another shell and see and type into it, the way `tmux attach` works.
 
-**Status: v0 is done** on Linux and Windows (see `docs/decisions.md`), and being hardened now
-(`docs/roadmap.md`). The name is a working name.
+- **Tests and agents** get a queryable screen instead of raw bytes, and a way to wait for text to appear instead
+  of sleeping.
+- **Humans** keep their own terminal. In the default interactive mode the program's output is forwarded unchanged;
+  the emulator only watches.
+- **Several clients at once.** One session can have any number of attached terminals and any number of JSON
+  clients.
 
-It came out of testing TinyFugue (`~/ai/mud`): its display code, status line and input editing cannot be tested
-without a terminal, and the regression harness has no way to see one. The same tool lets an AI agent see and
-drive a full-screen program, and lets a human run something while an agent watches it.
+It started as a way to test TinyFugue, whose display code cannot be tested without a terminal. See
+[docs/README.md](docs/README.md) for the full documentation index.
 
-## Where to read next
+## Status
 
-- **`HANDOFF.md`** - start here if you're new to this project: where it came from, the research behind it, and
-  the working conventions (jj, commits, Docker for anything Unix-specific) for this repo.
-- **`docs/requirements.md`** - what `vtee` has to do, what it deliberately doesn't, and the current status of
-  each requirement.
-- **`docs/architecture.md`** - how it's actually built: the tap, the emulator boundary, the snapshot API, the
-  raw log and replay, and the known rough edges.
-- **`docs/roadmap.md`** - what's done, what's being hardened right now, what v1 needs (scoped, not yet built),
-  the standing open decisions (protocol, input merging, licence), and open questions for TinyFugue's own testing
-  work.
-- **`docs/decisions.md`** - dated, measured, one-way-door choices (the emulator crate, the pty crate) with their
-  evidence.
-- **`docs/probe-results.md`** - the empirical survey of existing tools that led here.
+Pre-1.0. The core feature set works on Linux and Windows and is covered by automated tests, but the project has
+not had a release yet, the CI workflow has not run on real runners, and the interface may still change. Version
+numbers follow semantic versioning driven by commit messages: see [docs/releasing.md](docs/releasing.md).
+
+License: not yet chosen.
+
+## Install
+
+There are no binary releases yet. Build from source with a current stable Rust toolchain (edition 2024, so Rust
+1.85 or newer):
+
+```
+cargo build --release
+```
+
+The binary is `target/release/vtee` (`vtee.exe` on Windows).
+
+## Quick start
+
+Start a session that an agent will drive (no human terminal, JSON socket open for writing):
+
+```
+vtee --headless --name demo --writable -- bash --norc
+```
+
+From another shell, list it, read the screen, and type into it:
+
+```
+$ vtee ls
+demo	pid=2221	live
+
+$ echo '{"cmd":"snapshot"}' | vtee --connect "${TMPDIR:-/tmp}/vtee-$(id -u)/demo.sock" --text
+--- snapshot (byte_offset=2) ---
+$
+```
+
+Attach a terminal to the same session (closing the window detaches; the session keeps running):
+
+```
+vtee attach demo
+```
+
+End it:
+
+```
+vtee kill demo
+```
+
+To run a program with your own terminal as usual while still exposing it to other tools, leave out `--headless`:
+`vtee -- vim notes.txt`. To drive a program from a script file without any interactive session, use
+`--script`. See [Getting started](docs/guide/getting-started.md).
+
+## Platforms
+
+| Platform | State |
+| --- | --- |
+| Linux | Supported. Primary development and test platform. |
+| Windows 10 1803 or later | Supported through ConPTY. Sessions, `attach`, `ls` and `kill` work. Known gaps are listed in [the Windows guide](docs/guide/windows.md). |
+| macOS | Not tested. It is Unix, so it may work. |
+
+## Known limitations
+
+- Mouse and bracketed-paste modes are tracked in snapshots, but there is no command to send mouse or paste input.
+- Only the active screen buffer is exposed (not the primary and alternate buffers separately).
+- `wait_for` waits for text on a single line; there is no richer wait condition yet.
+- Underline styles (curly, double) are reported as plain underline. Blink is never reported.
+- If the process holding a session is killed with `SIGKILL`, the wrapped program is orphaned. See
+  [Troubleshooting](docs/guide/troubleshooting.md).
+
+The roadmap has the full list: [docs/roadmap.md](docs/roadmap.md).
+
+## Documentation
+
+- User guide: [getting started](docs/guide/getting-started.md), [CLI reference](docs/guide/cli-reference.md),
+  [sessions](docs/guide/sessions.md), [JSON protocol](docs/guide/protocol.md),
+  [driving a session as an AI agent](docs/guide/agents.md), [Windows](docs/guide/windows.md),
+  [troubleshooting](docs/guide/troubleshooting.md).
+- Development: [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
+  [testing](docs/development/testing.md), [CI](docs/development/ci.md),
+  [platform internals](docs/development/internals.md).
+- History: [decisions](docs/decisions.md), [requirements](docs/requirements.md), [roadmap](docs/roadmap.md).

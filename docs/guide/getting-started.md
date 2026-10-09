@@ -1,0 +1,112 @@
+# Getting started
+
+`vtee` has four ways to be used. They differ in who is at the keyboard.
+
+| You want to... | Use | Section |
+| --- | --- | --- |
+| Run a program yourself, but let tools watch it | `vtee -- <program>` | [Interactive](#interactive) |
+| Let an agent drive a program with no human terminal | `vtee --headless --writable -- <program>` | [Headless](#headless-for-agents) |
+| Run a fixed list of commands against a program, for a test | `vtee --script file.ndjson -- <program>` | [Script](#script-mode) |
+| Look at or type into a session someone else started | `vtee attach [name]` or `vtee --connect <socket>` | [Attach and connect](#attach-and-connect) |
+
+Build the binary first: `cargo build --release` (see the [README](../../README.md)). The examples below assume
+`vtee` is on your `PATH`. Output shown was produced by running the commands; screens are trimmed.
+
+## Interactive
+
+```
+vtee -- bash
+```
+
+Your terminal behaves as it normally would. `vtee` sets your terminal to raw mode, forwards the program's
+output unchanged, forwards your keystrokes to it, and tracks the screen in the background. It also opens a
+read-only socket (and a terminal socket) so other processes can see the same session. When the program exits,
+`vtee` exits with the program's exit code.
+
+The session name defaults to the program's basename (`bash` here). Use `--name` to choose another, and
+`--no-listen` if you do not want any sockets created at all. See [Sessions](sessions.md).
+
+## Headless (for agents)
+
+```
+vtee --headless --name demo --writable -- bash --norc
+```
+
+`--headless` means no human terminal is involved: `vtee` forwards nothing to or from its own stdin and stdout
+and does not touch the terminal mode. The program runs inside the session and `vtee` keeps running until the
+program exits. `--writable` allows write commands (`send`, `send_key`, `resize`) on the JSON socket; without it
+the socket is read-only.
+
+`vtee` stays in the foreground, so background it or give it its own terminal tab:
+
+```
+vtee --headless --name demo --writable -- bash --norc &
+```
+
+Then use the session from anywhere:
+
+```
+$ vtee ls
+demo	pid=2221	live
+
+$ echo '{"cmd":"snapshot"}' | vtee --connect "${TMPDIR:-/tmp}/vtee-$(id -u)/demo.sock" --text
+--- snapshot (byte_offset=2) ---
+$
+```
+
+`--connect` reads commands from its stdin, one JSON object per line, and prints one result line for each command
+that has a result. `--text` prints just the screen lines instead of the whole JSON. The commands are listed in the
+[protocol reference](protocol.md); an agent should read [the agents guide](agents.md).
+
+## Script mode
+
+A script is a file with one JSON command per line. `vtee` starts the program, runs the commands in order,
+prints the result of each `snapshot` and `wait_for`, kills the program, and exits.
+
+`hello.ndjson`:
+
+```
+{"cmd":"wait_for","text":"$ ","timeout_ms":5000}
+{"cmd":"send","text":"echo hello from vtee\r"}
+{"cmd":"wait_for","text":"hello from vtee","timeout_ms":5000}
+{"cmd":"snapshot"}
+```
+
+```
+$ vtee --script hello.ndjson --text --env PS1='$ ' -- bash --norc
+--- wait_for matched=true (byte_offset=2) ---
+$
+(...)
+```
+
+Without `--text` each result is one JSON line. The last line is the final snapshot; its `lines` field began:
+
+```
+{"cmd":"snapshot","snapshot":{"byte_offset":47,"cols":80,"rows":24,"lines":["$ echo hello from vtee                                                        ","hello from vtee                                                               ","$                                                                               ", ...
+```
+
+Every line in `lines` is padded with spaces to the screen width.
+
+The exit status is 0 when every command ran. A command that cannot be parsed ends the run with status 65, and a
+script file that cannot be opened with 66. See the [exit codes](cli-reference.md#exit-codes).
+
+`--script` cannot be combined with the interactive flags (`--headless`, `--listen`, `--name` and so on).
+
+## Attach and connect
+
+There are two ways into a running session, and they do different jobs:
+
+- `vtee attach [name]` gives you a real terminal view. You see the current screen immediately, then live output,
+  and your typing goes to the program. This is for humans. With no name it picks the only live session, or the
+  most recently active one.
+- `vtee --connect <socket>` speaks the JSON command protocol. This is for scripts and agents.
+
+Both work at the same time, and any number of each can be connected. Closing an attached terminal detaches
+it; the session keeps running. (Ctrl-C goes to the program, not to `attach`.) Details in [Sessions](sessions.md).
+
+## Next
+
+- [CLI reference](cli-reference.md): every flag and exit code.
+- [Protocol](protocol.md): every command and the snapshot format.
+- [Agents](agents.md): the usual send, wait, read loop and its pitfalls.
+- [Troubleshooting](troubleshooting.md).

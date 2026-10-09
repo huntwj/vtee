@@ -1,13 +1,53 @@
 # Architecture
 
-How `vtee` is actually built, as of 2026-10-06 (v0). Written because this didn't exist anywhere as a single
-document before now - it was scattered across source comments and `HANDOFF.md`'s design notes. See
-`requirements.md` for what this is trying to satisfy and `roadmap.md` for what's still missing.
+How `vtee` is built. The first part is a short tour for someone new to the code; the rest is the detailed
+reference, written stage by stage as each piece was built (the dated headings), kept as history and corrected when
+files moved. See `requirements.md` for what this is trying to satisfy, `roadmap.md` for what's still missing, and
+`development/internals.md` for the OS-specific details.
+
+## How the pieces fit
+
+**One process per session.** The process that owns a session (the *holder*) spawns the wrapped program in a
+pseudo-terminal and runs for as long as the program does. Everything else is a client of the holder.
+
+**Threads inside the holder** (`src/tap.rs`, `src/sockets.rs`):
+
+- an *output thread* reads the program's output. For each chunk it forwards the raw bytes to our own stdout (only
+  in an interactive session), appends them to the optional raw log, feeds them to the `alacritty_terminal`
+  emulator, and broadcasts them to attached terminals;
+- an *input thread* (interactive only) copies our stdin to the program;
+- one accept loop per socket, and a thread per connection;
+- a *writer thread* per attached terminal, so a slow terminal cannot block the output thread;
+- a resize watcher (`SIGWINCH` on Unix, console-size polling on Windows).
+
+**One lock for the screen.** The emulator, the byte counter and the list of attached terminals sit behind a single
+mutex (`TapState`). A snapshot takes it, so a snapshot's screen and its `byte_offset` always agree; an attaching
+terminal takes it to get a redraw of the current screen and start receiving later output as one atomic step.
+
+**Two sockets, two protocols**, both in the per-user session directory (`src/session.rs`) and named after the
+session:
+
+- `<name>.sock`, newline-delimited JSON commands (`src/command.rs`): snapshot, wait, send, resize and the
+  write-handoff commands. Meant for programs. Write access is governed by the `WritePolicy` chosen at start.
+- `<name>.tty.sock`, raw bytes both ways (`vtee attach`). Meant for humans. A new client first receives a redraw
+  of the current screen (`redraw_sequence`, `src/snapshot.rs`), then the live byte stream. Its typing goes to the
+  program.
+
+Any number of clients of either kind can be connected. A third file, `<name>.pid`, lets `ls` and `kill` find the
+holder.
+
+**Terminal queries.** Programs sometimes ask the terminal a question (`ESC[6n`, "where is the cursor?"). With a
+real terminal attached it answers. With none, the emulator's own answer is written back so the program does not
+wait forever; while an attach client is connected the emulator stays silent so the program never gets two replies.
+
+**Platform differences** are confined to a few modules: sockets (`src/net.rs`, AF_UNIX on both platforms), session
+directory rules (`src/session.rs`), raw mode and its restore watchdog (`src/rawmode.rs`), and console-event
+handling (`src/tap.rs`). See `development/internals.md`.
 
 ## Source layout (2026-10-08)
 
-`src/lib.rs` and `src/main.rs` were split on 2026-10-08; sections below that cite `src/lib.rs` or `src/main.rs`
-were written against the old single files. Where things live now:
+`src/lib.rs` and `src/main.rs` were split on 2026-10-08. Where things live now (the dated sections below were
+written against the old single files, and have been corrected where a path mattered):
 
 | File | Contents |
 | --- | --- |
@@ -21,6 +61,9 @@ were written against the old single files. Where things live now:
 | `main.rs` | CLI parsing and the spawn path |
 | `session_cmds.rs`, `client.rs`, `output.rs` | `attach`/`ls`/`kill`; `--connect`/`--script`; error and exit-code helpers |
 
+The sections from here on are the detailed reference and the record of how each stage was built. Headings with a
+date describe the design as of that date; `decisions.md` has the measurements and alternatives behind them.
+
 ## Shape
 
 ```
@@ -33,7 +76,7 @@ human  ------------> forward_input thread  ------------------------------->  chi
                                        (behind one Mutex, shared with Tap::snapshot()/resize())
 ```
 
-Two threads per `Tap`, both spawned from `Tap::spawn` (`src/lib.rs`):
+Two threads per `Tap`, both spawned from `Tap::spawn` (`src/tap.rs`):
 
 - **`forward_input`**: blocking reads from our own `stdin`, writes straight to the pty master's writer. No
   processing, no buffering beyond the OS's. Detached (not joined) - it's expected to still be blocked in a read
@@ -52,7 +95,7 @@ they can never disagree about size.
 
 ## Why `term` and `bytes_seen` share one lock
 
-`TapState` (private to `src/lib.rs`) is `{ term: Term<ObserverListener>, bytes_seen: u64 }` behind a single
+`TapState` (private to `src/tap.rs`) is `{ term: Term<ObserverListener>, bytes_seen: u64, tty_sinks }` behind a single
 `Mutex`. This is deliberate, not just convenient: requirement 4 wants a snapshot "as of byte N" to never disagree
 with itself. If `bytes_seen` were a separate `AtomicU64` (an earlier version of this code did exactly that),
 there'd be a window - however small - between the emulator being updated and the counter catching up, where a
@@ -62,7 +105,7 @@ in `forward_output`, makes that pairing atomic by construction instead of "usual
 ## The emulator boundary: `ObserverListener`
 
 `alacritty_terminal::Term` takes an `EventListener` type parameter and calls back into it synchronously, from
-inside the same `advance()` call that's already holding `TapState`'s lock (`src/lib.rs`, `ObserverListener`).
+inside the same `advance()` call that's already holding `TapState`'s lock (`src/tap.rs`, `ObserverListener`).
 Title updates (`Event::Title`/`Event::ResetTitle`) are the only event this project currently cares about, and
 they're stored in their *own*, separate `Arc<Mutex<Option<String>>>` rather than as a field of `TapState` - on
 purpose, because the callback fires while `TapState`'s lock is already held on that same thread, and `std::sync::
@@ -98,8 +141,7 @@ order," not "these bytes, with this timing"), and returns a `Snapshot` built the
 ## What a caller sees: `Tap`'s public surface
 
 `Tap::spawn(program, args, SpawnOptions) -> Tap`, `Tap::snapshot() -> Snapshot`, `Tap::resize(cols, rows)`,
-`Tap::wait() -> ExitStatus`, `Tap::watch_resize()` (Unix; no-op stub on other platforms, so callers don't need to
-`cfg`-gate the call site), `Tap::bytes_seen() -> u64`, `Tap::send_bytes`/`send_text`/`send_key`,
+`Tap::wait() -> ExitStatus`, `Tap::watch_resize()` (`SIGWINCH` on Unix, console-size polling on Windows), `Tap::bytes_seen() -> u64`, `Tap::send_bytes`/`send_text`/`send_key`,
 `Tap::wait_for_text`, `Tap::app_cursor_mode`. `SpawnOptions::forward_input`/`forward_output` are the independent
 switches between this project's modes (`roadmap.md`, "Full duplex" stage 3b mode (d)): both `true` forwards our
 own stdin to the child and the child's raw output to our own stdout (requirement 7, the human-at-a-real-terminal
@@ -111,16 +153,15 @@ replacing it - an empty slice (the default) changes nothing. `RawModeGuard` stay
 purpose either way - it manages *our own* controlling terminal's mode, not the child's pty, and nothing in
 non-interactive mode has a real terminal of its own to manage.
 
-There is currently **no process boundary** for the *live* case - an in-process `Tap` is still the only way to
-drive one interactively. The batch CLI below is a process boundary of a much narrower kind: one script, run to
-completion, no ongoing connection. A general out-of-process protocol for a live/interactive session is still v1
-work, scoped in `roadmap.md`, not built yet.
+A `Tap` can be used in-process as a library, or out of process: the batch CLI below runs one script to
+completion, and the observation, full-duplex and named-session sections further down add live sockets so other
+processes can query and drive a running session.
 
 ## The command core: `src/command.rs`, `src/keys.rs`
 
 `Command` is the one vocabulary this project uses for "do something to a running tap and maybe get a `Snapshot`
 back" - `Send { text }`, `SendKey { key }`, `Resize { cols, rows }`, `WaitMs { ms }`,
-`WaitFor { text, timeout_ms }`, `Snapshot`. `Command::execute(&self, tap: &Tap)` runs one against a `Tap` and
+`WaitFor { text, timeout_ms }`, `Snapshot`, and the write-handoff pair `AcquireWrite`/`ReleaseWrite`. `Command::execute(&self, tap: &Tap)` runs one against a `Tap` and
 returns `Option<CommandResult>` - `None` for everything except `Snapshot` and `WaitFor`, which produce a tagged
 `CommandResult::Snapshot { snapshot }` / `CommandResult::WaitFor { matched, snapshot }`. This exists as its own
 module, independent of how the commands arrive, specifically so a later live protocol can drive the identical
@@ -168,7 +209,7 @@ entirely, so calling it while a `Tap` is still alive would bypass this no matter
 is. `Tap` also kills its child in its own `Drop` impl as a second, independent safety net, not the primary
 mechanism - it covers any future caller (library or CLI) that drops a `Tap` through a path this file didn't
 anticipate. Exit codes themselves follow sysexits.h (the `exitcode` crate) rather than ad hoc `0`/`1`/`2` -
-`run_interactive` specifically propagates the wrapped program's *own* exit code on failure rather than
+`run_spawn` specifically propagates the wrapped program's *own* exit code on failure rather than
 collapsing every non-zero outcome to a fixed value, the way `env`/`time` do, since a caller scripting around
 `vtee` (CI, TF's harness) is more likely to care which code the wrapped program actually exited with than
 whether `vtee` itself has an opinion about it.
@@ -184,7 +225,7 @@ except every command is checked first against `ServeOptions` via `Command::autho
 it into a `CommandResult::Error` instead of ever reaching `execute`.
 
 Needed one refactor first: `Tap::serve` takes `Arc<Tap>`, because the accept loop and each connection's handler
-have to outlive the call and run concurrently with whatever `run_interactive` does next - an ordinary borrow
+have to outlive the call and run concurrently with whatever `run_spawn` does next - an ordinary borrow
 couldn't. That meant every field of `Tap` had to actually be `Sync`, not just usable one thread at a time -
 `child: Box<dyn Child + Send + Sync>` and `output_done: Receiver<()>` both had to move behind a `Mutex` (`Receiver`
 is `Send` but not `Sync` - measured via the compiler refusing `Arc<Tap>: Send` with a clear trail back to that
@@ -208,7 +249,7 @@ Observation's read-only gate is now a real authorization check, `Command::author
 connection only gets when the server was started with `--writable` (`ServeOptions`, default
 `WritePolicy::ReadOnly` - observation's original behaviour, unchanged unless asked for). `Resize` has one more
 rule on top, checked independently of the write policy: rejected outright whenever
-`resize_owned_by_terminal` is true, which `run_interactive` sets from the same `is_terminal()` check
+`resize_owned_by_terminal` is true, which `run_spawn` sets from the same `is_terminal()` check
 `RawModeGuard`/`watch_resize` already act on - a remote resize has no business fighting with a real human's
 actual terminal size.
 
@@ -233,7 +274,7 @@ screen on a `--writable` one, and a remote `resize` actually changing a live ses
 disables raw mode (a safe no-op if it was never enabled) and kills the child via `self.child.clone_killer()`
 rather than through `&mut Tap` - this runs on its own thread, and whatever thread holds `&mut Tap` may be
 blocked inside `Tap::wait()` when the signal arrives, so it can't be reached that way. Called from both
-`run_interactive` and `run_script` (`main.rs`) unconditionally - harmless in script mode, which never enables
+`run_spawn` (`main.rs`) and `run_script` (`client.rs`) unconditionally - harmless in script mode, which never enables
 raw mode in the first place.
 
 `SIGKILL` cannot be caught, full stop - no handler, no exception, a Unix guarantee. The only way to survive it
@@ -275,7 +316,7 @@ Verified, not assumed: 5 consecutive real-pty runs of both `SIGTERM` and `SIGKIL
 ## Full duplex, stage 3b: exclusive handoff (`--writable=exclusive`/`exclusive-shared`, 2026-10-07)
 
 `WritePolicy::Exclusive { human_priority: HumanPriority }` adds the "take the pen" mode scoped in `roadmap.md`:
-only one connection may `Send`/`SendKey`/`Resize` at a time, via a new `ExclusiveLock` (`src/lib.rs`) - a
+only one connection may `Send`/`SendKey`/`Resize` at a time, via a new `ExclusiveLock` (`src/serve.rs`) - a
 `Mutex<Option<u64>>` holding the id of whichever connection currently holds write access, or `None`. `Tap` owns
 one `Arc<ExclusiveLock>`, created once per `Tap` regardless of whether `serve` is ever called with `Exclusive` at
 all (inert otherwise - nothing ever checks it under `ReadOnly`/`Open`). `Tap::serve`'s accept loop hands each
@@ -320,7 +361,7 @@ hazard at once, the same win `pty.fork()` already gave the `SIGTERM`/`SIGKILL` t
 
 ## Socket security: the default `--listen` path (2026-10-08)
 
-`vtee::default_socket_path()` (`src/lib.rs`) is tmux's own answer to "who can connect" (`docs/decisions.md`
+`default_session_dir()` (`src/session.rs`, which replaced the earlier `default_socket_path()`) is tmux's own answer to "who can connect" (`docs/decisions.md`
 has the full comparison): not socket-file permissions, but a private per-UID directory
 (`$TMPDIR/vtee-<uid>/`, mode `0700`, passed straight to `mkdir` rather than `chmod`'d afterwards) that nothing
 else can even traverse into. If that directory already exists, it's verified rather than trusted - rejected
@@ -340,7 +381,7 @@ sequential id `ExclusiveLock` uses to arbitrate the write lock.
 
 `src/main.rs`'s `Cli` struct (a `clap::Parser` derive) replaced a hand-rolled flag parser
 (`take_path_flag`/`take_switch`/etc.) that had grown past what was comfortable to maintain by hand - seven
-different ad-hoc parsing functions, one of which (`run_interactive`'s own flags) had already pushed that
+different ad-hoc parsing functions, one of which (`run_spawn`'s own flags) had already pushed that
 function's signature past `clippy::too_many_arguments` (fixed separately by bundling them into
 `InteractiveOpts`). `docs/decisions.md` has the full crate-by-crate reasoning; this is the shape it produced.
 
@@ -383,7 +424,7 @@ for a *different*, later process to attach to a live session at all - `--connect
 structured NDJSON protocol, never a live, continuously-updating raw view.
 
 **Sessions are named now**, replacing the old pid-based socket naming entirely. `vtee::session_paths(name)`
-(`src/lib.rs`) resolves three paths inside the same hardened per-uid directory `default_session_dir` already
+(`src/session.rs`) resolves three paths inside the same hardened per-uid directory `default_session_dir` already
 provides: the NDJSON socket (`<name>.sock`, unchanged protocol), a new raw-TTY socket (`<name>.tty.sock`), and
 a pidfile (`<name>.pid`) `vtee ls`/`kill`/`attach` use to find and signal the holder process. The default
 name is the program's own basename (`vtee tf` → session `tf`); `--name <NAME>` overrides it.
@@ -462,7 +503,7 @@ removable, the same way `Tap::serve` already treats a stale socket file).
   channel and moves on. On Linux this is a non-issue in practice (EOF arrives essentially immediately); the
   timeout exists for robustness against platforms/situations where it doesn't, not because Linux needs it.
 - Only the active screen buffer is exposed by `Snapshot`, not both - deferred, see `roadmap.md`/`decisions.md`.
-- `Tap::spawn` doesn't let a caller set `TERM` or other environment variables on the child yet (requirement 6).
+- `Tap::spawn` takes environment variables through `SpawnOptions::env` (`--env`), including `TERM`; there is no separate `TERM` setting.
 
 ## Named sessions on Windows (2026-10-09)
 
@@ -470,7 +511,7 @@ Sessions, `attach`/`ls`/`kill` and both sockets work on native Windows. The piec
 
 - **Transport:** AF_UNIX sockets (Windows 10 1803+) through `uds_windows`, re-exported by `src/net.rs` so the
   servers and clients are written once. Named pipes were rejected (`decisions.md`).
-- **Session directory:** `%LOCALAPPDATA%i-mux` (temp dir if unset), private to the user by the profile's ACL; a
+- **Session directory:** `%LOCALAPPDATA%\vtee` (temp dir if unset), private to the user by the profile's ACL; a
   reparse point or non-directory there is refused. Session names are capped so `<name>.tty.sock` stays under the
   107-byte AF_UNIX path limit.
 - **`kill`:** after the same liveness check as Unix, `OpenProcess` + `TerminateProcess` on the holder; ConPTY reaps

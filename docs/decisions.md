@@ -635,7 +635,7 @@ limit (longer paths fail with `InvalidInput`).
 cost of AF_UNIX is the Windows 10 1803 floor and one single-maintainer crate.
 
 **Built:** `src/net.rs` re-exports the right socket types, so the servers and clients are shared; a
-`%LOCALAPPDATA%i-mux` session directory; `kill` via `TerminateProcess`; a console control handler for
+`%LOCALAPPDATA%\vtee` session directory; `kill` via `TerminateProcess`; a console control handler for
 close/break/shutdown (verified with a real `CTRL_BREAK_EVENT`: exit 143, no child left).
 
 **The riskiest unknown, measured: no socket handle leaks into the child.** Windows inherits handles at
