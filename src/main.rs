@@ -27,7 +27,7 @@ enum Commands {
     /// Attach to a live session - bare resolves like tmux's own `attach-session`: the only one
     /// if there's exactly one, else the most-recently-active.
     Attach { name: Option<String> },
-    /// List live sessions (name, pid, age) - and stale leftovers, clearly marked as such.
+    /// List sessions: name, holder pid and live or stale, plus sock=<path> for a --listen socket.
     Ls,
     /// End a session: signal its holder process, clean up both its sockets and its pidfile.
     Kill { name: String },

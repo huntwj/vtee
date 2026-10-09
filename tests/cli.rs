@@ -38,6 +38,17 @@ fn attach_refuses_without_a_terminal() {
         .stderr(predicate::str::contains("attach needs a terminal"));
 }
 
+/// `ls` prints name, pid and live/stale (plus `sock=`); its help once promised an age column.
+#[test]
+fn ls_help_describes_the_columns_it_prints() {
+    vtee()
+        .args(["ls", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("holder pid").and(predicate::str::contains("live or stale")))
+        .stdout(predicate::str::contains(", age").not());
+}
+
 #[test]
 fn requires_a_command_unless_connecting() {
     // Enforced manually now, not via clap's own `required_unless_present` (which can't
