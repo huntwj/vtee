@@ -26,6 +26,9 @@ struct VteeConfig {
 enum Commands {
     /// Attach to a live session - bare resolves like tmux's own `attach-session`: the only one
     /// if there's exactly one, else the one attached to most recently.
+    ///
+    /// There is no detach key, and Ctrl-C goes to the program, not to attach. To leave, close the
+    /// terminal or stop the attach process; the session keeps running.
     Attach { name: Option<String> },
     /// List sessions: name, holder pid and live or stale, plus sock=<path> for a --listen socket.
     Ls,

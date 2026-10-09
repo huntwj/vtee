@@ -31,6 +31,13 @@ including when it receives `SIGTERM` or `SIGKILL` on Linux (a small helper proce
 terminal is left in raw mode anyway, run `reset` (or `stty sane`) on Linux. On Windows no helper exists; the next
 shell prompt usually resets the console, and if not, close the window.
 
+## How do I leave an attach session?
+
+There is no detach key, and Ctrl-C does not leave `attach`: it is sent to the program, like every other key. To
+leave, close the terminal window, or stop the `vtee attach` process from another shell (`kill <pid>`, or Task
+Manager on Windows). The session keeps running, and `vtee ls` still shows it as `live`. If the program itself
+exits, the attach client ends by itself. To end the session as well, run `vtee kill <name>`.
+
 ## `vtee attach` says it needs a terminal
 
 ```

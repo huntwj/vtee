@@ -64,8 +64,10 @@ The raw-terminal socket that `attach` uses always allows typing. `--writable` go
 Attach your terminal to a live session. You see the current screen first, then live output; your keystrokes go to
 the program. With no `NAME` it uses the only live session, or the one attached to most recently if there are several (the
 one started last, if none has been attached to yet).
-There is no detach key: closing the window, or stopping the `vtee attach` process, ends the attach client and
-leaves the session running. Ctrl-C is forwarded to the program.
+**There is no detach key, and Ctrl-C does not leave `attach`.** Every key, Ctrl-C included, goes to the program.
+To leave, close the terminal window or stop the `vtee attach` process from another shell (`kill` it, or end it
+in Task Manager on Windows). That ends the attach client and leaves the session running. The same text is in
+`vtee attach --help`.
 
 `attach` needs a terminal on both stdin and stdout, because the screen arrives as escape codes. With either one
 redirected it refuses before looking for the session and exits 64. To read a session from a script, use

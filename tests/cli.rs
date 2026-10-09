@@ -38,6 +38,16 @@ fn attach_refuses_without_a_terminal() {
         .stderr(predicate::str::contains("attach needs a terminal"));
 }
 
+/// Leaving `attach` is not obvious (no detach key, Ctrl-C goes to the program), so `--help` says so.
+#[test]
+fn attach_help_explains_how_to_leave() {
+    vtee()
+        .args(["attach", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no detach key").and(predicate::str::contains("Ctrl-C goes to the program")));
+}
+
 /// `ls` prints name, pid and live/stale (plus `sock=`); its help once promised an age column.
 #[test]
 fn ls_help_describes_the_columns_it_prints() {

@@ -146,13 +146,14 @@ session's record file is stamped when the session starts and again each time a c
 stamp wins. Until anyone has attached, that is the session started last. Attaching by name counts, so
 `vtee attach work` makes `work` the one a later bare `vtee attach` goes to.
 
-There is no detach key. The attach client is just another connection, so you detach by ending it: close the
-terminal window, or stop the `vtee attach` process from another shell. The session keeps running either way.
+**There is no detach key, and Ctrl-C does not leave `attach`.** `attach` puts your terminal in raw mode and
+forwards every byte, so Ctrl-C is delivered to the program (as it would be inside tmux). To leave, end the attach
+client, which is just another connection: close the terminal window, or stop the `vtee attach` process from
+another shell. The session keeps running either way, and the attach client also ends by itself when the session
+ends. See [Troubleshooting](troubleshooting.md#how-do-i-leave-an-attach-session).
+
 This is deliberate. A detach key would have to be intercepted from the program's input and could clash with what
 the program needs. It also means a session never depends on an attached terminal being there.
-
-`attach` puts your terminal in raw mode and forwards every byte, so Ctrl-C is delivered to the program (as it would
-be inside tmux) and does not detach. The attach client also ends by itself when the session ends.
 
 ## Several clients at once
 
