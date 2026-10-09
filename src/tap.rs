@@ -345,32 +345,56 @@ impl Tap {
         }
     }
 
-    /// Propagate the real terminal's resizes (`SIGWINCH`) to the pty and emulator. Unix only
-    /// (requirement 8); a script drives resizes explicitly instead.
+    /// Propagate the real terminal's resizes to the pty and emulator: `SIGWINCH` on Unix, a
+    /// console-size poll on Windows (which has no such signal). A script drives resizes
+    /// explicitly instead.
     pub fn watch_resize(&self) {
+        let master = self.master.clone();
+        let shared = self.shared.clone();
+        // A 0x0 report is a transient non-size (seen under `docker run -t`), not a resize to
+        // nothing; skip it rather than clamp to a visible 1x1.
+        let apply = move |cols: u16, rows: u16| {
+            if cols == 0 || rows == 0 {
+                return;
+            }
+            let _ = master.lock_unpoisoned().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            shared.state.lock_unpoisoned().term.resize(Size { cols: cols as usize, rows: rows as usize });
+        };
+
         #[cfg(unix)]
         {
             use signal_hook::consts::SIGWINCH;
             use signal_hook::iterator::Signals;
 
-            let master = self.master.clone();
-            let shared = self.shared.clone();
             let Ok(mut signals) = Signals::new([SIGWINCH]) else { return };
             thread::spawn(move || {
                 for _ in signals.forever() {
-                    // A 0x0 report is a transient non-size (seen under `docker run -t`), not a
-                    // resize to nothing; skip it rather than clamp to a visible 1x1.
                     if let Ok((cols, rows)) = crossterm::terminal::size() {
-                        if cols == 0 || rows == 0 {
-                            continue;
-                        }
-                        let _ =
-                            master.lock_unpoisoned().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-                        shared.state.lock_unpoisoned().term.resize(Size { cols: cols as usize, rows: rows as usize });
+                        apply(cols, rows);
                     }
                 }
             });
         }
+        #[cfg(windows)]
+        {
+            // Only a *change* from what the terminal reported at start counts, so a
+            // `--cols/--rows` override isn't undone while the terminal stays put.
+            let Ok(mut last) = crossterm::terminal::size() else { return };
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_millis(200));
+                    match crossterm::terminal::size() {
+                        Ok(size) if size != last => {
+                            last = size;
+                            apply(size.0, size.1);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        #[cfg(not(any(unix, windows)))]
+        drop(apply);
     }
 
     /// Catch `SIGTERM`: restore the terminal mode, kill the child, exit. Uses `clone_killer`

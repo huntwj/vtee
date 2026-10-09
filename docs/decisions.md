@@ -592,3 +592,10 @@ Each was reproduced in Docker before fixing:
 
 Checked and fine per the review: session-dir TOCTOU, `valid_session_name`, client-to-client escape injection (only
 child output is broadcast), the unaligned termios read.
+
+## 2026-10-09: Windows resize follows the outer terminal
+
+`tests/windows_behavior.rs` found that `Tap::watch_resize` did nothing on Windows (no `SIGWINCH`), so a resized
+terminal never reached the child. It now polls `crossterm::terminal::size()` every 200 ms and applies a *change*
+through the same pty-plus-emulator resize as the Unix path; a `--cols/--rows` override is left alone while the
+terminal stays put. The previously ignored `resizing_the_outer_terminal_reaches_the_child` passes (10 of 10).

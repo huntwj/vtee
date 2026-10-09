@@ -290,13 +290,9 @@ fn cols_and_rows_override_reaches_the_childs_console() {
     assert!(text.contains("31"), "child didn't see 31 lines:\n{text}");
 }
 
-/// Resizing the *outer* terminal while `vtee` runs interactively should reach the child; on
-/// Unix `watch_resize` does that with `SIGWINCH`. Windows has no such signal and `watch_resize`
-/// is a no-op there (`src/tap.rs`), so the child keeps its startup size. Known gap, kept as an
-/// ignored test so it flips to a real regression test once someone implements it (e.g. by
-/// polling the console size).
+/// Resizing the *outer* terminal while `vtee` runs interactively reaches the child: Unix uses
+/// `SIGWINCH`, Windows has no such signal so `watch_resize` (`src/tap.rs`) polls the console size.
 #[test]
-#[ignore = "bug: interactive Windows sessions don't follow the outer terminal's resizes (watch_resize is unix-only)"]
 fn resizing_the_outer_terminal_reaches_the_child() {
     let _guard = serial();
     let bat = batch_file("resize", "mode con\nping -n 8 127.0.0.1 >nul\nmode con");
