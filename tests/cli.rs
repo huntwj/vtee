@@ -134,6 +134,30 @@ mod unix_behavior {
             .stdout(predicate::str::contains("hello-from-vtee"));
     }
 
+    /// With no terminal on the other end (`--script`: stdin and stdout are pipes), the tap is
+    /// the child's terminal, so it must answer the child's queries itself - here a
+    /// cursor-position report (`ESC[6n` -> `ESC[row;colR`), the one ConPTY itself sends at
+    /// startup on Windows (`tests/windows_conpty.rs`); a shell or editor asks the same thing on
+    /// any platform. The child echoes whatever reply it reads so the script can match on it.
+    #[test]
+    fn script_mode_answers_the_childs_cursor_position_query() {
+        let script = std::env::temp_dir().join(format!("vtee-dsr-{}.ndjson", std::process::id()));
+        std::fs::write(&script, "{\"cmd\":\"wait_for\",\"text\":\"reply=[1;1R\",\"timeout_ms\":5000}\n").unwrap();
+        let result = vtee()
+            .args([
+                "--script",
+                script.to_str().unwrap(),
+                "--",
+                "bash",
+                "-c",
+                "printf '\\033[6n'; IFS= read -rsn6 x; echo \"reply=${x:1}\"",
+            ])
+            .timeout(Duration::from_secs(15))
+            .assert();
+        let _ = std::fs::remove_file(&script);
+        result.success().stdout(predicate::str::contains("\"matched\":true"));
+    }
+
     /// A value containing `=` (e.g. a `PATH`-shaped override) must not be truncated at the
     /// first `=` on the *value* side - only the key/value split itself stops at the first one.
     #[test]

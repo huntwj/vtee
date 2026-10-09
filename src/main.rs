@@ -416,15 +416,26 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
         env: cli.env,
     };
 
+    // Raw mode *before* the spawn, not after: `Tap::spawn` starts the stdin-forwarding thread,
+    // whose first blocking read must not begin while the console is still in cooked mode. On
+    // Windows a cooked read stays cooked after the mode changes, and it eats the terminal's
+    // `ESC[row;colR` reply to ConPTY's startup cursor query - a hang on roughly every other run
+    // (`docs/decisions.md`, 2026-10-08). Dropped again before any error is printed.
+    let mut raw_guard = if cli.headless { None } else { Some(vtee::RawModeGuard::new()) };
+
     let tap = match vtee::Tap::spawn(program, rest, opts) {
         Ok(t) => Arc::new(t),
-        Err(e) => return fail(exitcode::OSERR, format!("failed to spawn {program}: {e}")),
+        Err(e) => {
+            raw_guard.take();
+            return fail(exitcode::OSERR, format!("failed to spawn {program}: {e}"));
+        }
     };
 
     // Written once the child is confirmed alive, so `ls`/`kill`/`attach` can find this process.
     if let Some(pidfile) = cli.pidfile
         && let Err(e) = std::fs::write(pidfile, std::process::id().to_string())
     {
+        raw_guard.take();
         return fail(exitcode::OSERR, format!("couldn't write pidfile {}: {e}", pidfile.display()));
     }
     let _session_files = SessionFiles { pidfile: cli.pidfile, listen_path: cli.listen_path, tty_path: cli.tty_path };
@@ -432,7 +443,6 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
     // With a real terminal here, it alone owns the pty's size, so a remote resize would fight it.
     let resize_owned_by_terminal = !cli.headless && std::io::stdin().is_terminal();
 
-    let mut raw_guard = if cli.headless { None } else { Some(vtee::RawModeGuard::new()) };
     if !cli.headless {
         tap.watch_resize();
     }

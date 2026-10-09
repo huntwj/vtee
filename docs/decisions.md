@@ -182,6 +182,53 @@ normal gate) rather than claimed as passing. Native Windows interactive use is m
 `AllocConsole` mitigation is a separate, independent finding layered on top of it, not part of that same
 upstream issue.
 
+**2026-10-08, later: the "lower-level race" was ours after all - found, fixed, and the test is no longer
+`#[ignore]`d.** Re-measured first (20 runs of the test binary with a per-run timeout: 16 pass / 4 hang;
+`--script` against `whoami.exe`: 0 of 10 ever see its output, every snapshot stuck at `byte_offset: 4` -
+exactly the `ESC[6n`), then instrumented `vtee` itself rather than the test: the raw bytes each of
+`forward_output`/`forward_input` saw, and the console input mode at the moment `forward_input` issued its
+*first* `ReadConsole`. That gave the whole mechanism, verified, not inferred:
+
+- ConPTY, created with `PSEUDOCONSOLE_INHERIT_CURSOR` (which `portable-pty` always sets), sends `ESC[6n` at
+  session start and blocks *everything* - including the real child's output - until a `ESC[row;colR` reply
+  arrives on its input pipe. That is what "the child hangs" always was.
+- In the pty-in-pty test, the inner session's query is forwarded to `vtee`'s stdout, and the *outer*
+  conhost answers it itself, writing `ESC[1;1R` into `vtee`'s console input ~300us later (the test's
+  own terminal-emulation never sees a second query - which is why the earlier "only one query ever
+  appears" diagnostic was true yet pointed nowhere). From there the reply has to travel through
+  `forward_input` into the inner pty.
+- `Tap::spawn` started the `forward_input` thread, and `run_spawn` only *then* created the
+  `RawModeGuard`. Whichever won the race decided the run: in every hung run (11 of 20 in the
+  instrumented batch) the console mode captured at the first read was `0x1f7` - `ENABLE_LINE_INPUT` still
+  on - and that read never returned a byte; in every run that saw it as `0x1f0` (raw) the reply came
+  straight through. A Windows cooked read stays cooked once begun, and `ESC` *clears the line* in a cooked
+  read, so the reply was gone for good. Forcing a 50ms gap before the guard: 0 of 10 pass. Reordering so raw
+  mode is on before the spawn: 0 hangs in the 40-run batch below. The "machine-dependent", "rate bounces
+  between batches" character was just thread scheduling.
+- `--script`/`--headless`/`--no-stdin`/pipes-on-either-side were a separate, deterministic case of the same
+  thing: nobody is there to answer at all. `alacritty_terminal` already *produces* the right answer for
+  every such query (`Event::PtyWrite`, for `ESC[6n`, `ESC[c`, `DECRQM`, ...) - `ObserverListener` was
+  simply ignoring it. It now queues those replies when the tap is the child's only terminal
+  (`!(forward_input && forward_output && stdin is a tty && stdout is a tty)`), and `forward_output` writes
+  them back into the pty after each parsed chunk, outside the state lock. A human's real terminal keeps
+  answering in the interactive case, so the raw-passthrough principle (requirement 7, `architecture.md`)
+  is untouched there; on Linux this is a strict improvement for headless runs of shells/editors that ask
+  (`tests/cli.rs`, `script_mode_answers_the_childs_cursor_position_query`, exercises it with `bash`).
+
+**Not done, deliberately**: no change to the vendored `portable-pty` (making `INHERIT_CURSOR` a builder
+parameter was considered - it would also fix the headless case, by never asking - but it grows the fork for
+no benefit once the tap answers, and the emulator reply is platform-generic).
+
+**The `AllocConsole` mitigation was a misdiagnosis of this same race and is removed**, along with the
+`winapi` dependency it needed. `--script` never called it (gated on `forward_output`) and `openpty()`
+succeeded on every one of those runs - the 4 bytes arrived; only the reply was missing. Measured after the
+fix with `vtee --script` launched via `CREATE_NO_WINDOW` (a process with no console at all): 10 of 10
+pass.
+
+**Measured after** (same harness, per-run timeouts, strays killed between runs): the two tests in
+`tests/windows_conpty.rs` 40 of 40 consecutive runs pass; `--script whoami.exe` 10 of 10 (from 0 of 10);
+`cargo clippy --all-targets` clean; the Linux suite still passes in `rust:slim`.
+
 ## 2026-10-07: "both screen buffers" (requirement 3) deferred - a verified `alacritty_terminal` API gap
 
 **Measured against the crate (0.26.0) and alacritty's own current upstream `main` branch** (not just assumed):

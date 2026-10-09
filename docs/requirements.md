@@ -65,16 +65,14 @@ status to track per-requirement rather than as one blob.
    anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
    `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
-   **Linux: met. Windows: better than blocked, not yet fully solved.** A local patch to `portable-pty`
-   (`vendor/portable-pty/`, `decisions.md`) fixes the crash this was blocked on (`STATUS_CONTROL_C_EXIT` within
-   milliseconds of spawning anything) - confirmed, no flakiness observed re-testing specifically that part.
-   Confirmed end to end from a real terminal: `vtee -- whoami.exe` spawns, runs, prints real output, and
-   exits cleanly. But automating that same check (`tests/windows_conpty.rs`, `#[ignore]`d) surfaced a separate,
-   deeper issue: pty creation itself is measurably unreliable depending on the calling process's own console
-   state, mitigated (failure rate reduced) but not eliminated by a defensive `AllocConsole` call - three
-   identical runs went 2 passed, 1 hung. Not yet separately re-verified on Windows at all: full-screen TUIs,
-   resize (`SIGWINCH` doesn't exist there), signal handling (requirement 7's `SIGTERM`/`SIGKILL` survival was
-   only ever measured on Linux).
+   **Linux: met. Windows: met for spawning and `--script`; resize and signals unverified.** A local patch to
+   `portable-pty` (`vendor/portable-pty/`, `decisions.md`) fixed the original crash (`STATUS_CONTROL_C_EXIT`).
+   The later intermittent hang turned out to be ours, not a lower-level race: ConPTY's startup cursor query
+   went unanswered (a stdin read begun in cooked mode, or nobody to answer in `--script`/`--headless`).
+   Raw mode is now enabled before the spawn and the tap answers the child's terminal queries itself when no
+   human terminal can; `tests/windows_conpty.rs` is no longer `#[ignore]`d and passed 40/40 consecutive runs.
+   Not yet separately verified on Windows: full-screen TUIs, resize (`SIGWINCH` doesn't exist there), and
+   signal handling (`SIGTERM`/`SIGKILL` survival was only ever measured on Linux).
 
 ## Not goals, for now
 
