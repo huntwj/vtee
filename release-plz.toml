@@ -1,0 +1,33 @@
+# Versions, changelog, tags and GitHub Releases are all computed from Conventional Commits on `main`.
+# How it works and the one-time repo setup: docs/releasing.md.
+
+[workspace]
+# Never run `cargo publish`; releases are a git tag + GitHub Release (Cargo.toml also says `publish = false`).
+publish = false
+# Required for an unpublished crate: without it release-plz ignores a `publish = false` package, and with
+# publishing on it demands a crates.io entry. Versions are read from git tags (`vX.Y.Z`) instead.
+git_only = true
+git_tag_enable = true
+git_release_enable = true
+# cargo-semver-checks needs a published baseline to compare against.
+semver_check = false
+# Only release when a release PR was merged, not on every push to main.
+release_always = false
+changelog_update = true
+pr_labels = ["release"]
+# While the version is 0.x: `feat` bumps the minor version (release-plz's default would bump only the patch)
+# and a breaking change also bumps the minor version. From 1.0 on: feat -> minor, breaking -> major.
+features_always_increment_minor = true
+# Only these commits cause a release: feat, fix, perf, and anything marked breaking with `!`.
+# docs/test/chore/ci/style/refactor/build alone never trigger one.
+release_commits = '^(feat|fix|perf)(\(.+\))?!?:|^[a-z]+(\(.+\))?!:'
+
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^(docs|test|chore|ci|style|build)", skip = true },
+]

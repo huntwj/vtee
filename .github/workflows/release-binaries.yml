@@ -1,0 +1,70 @@
+name: Release binaries
+
+# Unverified until it has run on GitHub.
+# Called by release-plz.yml after a release is created (tags made with GITHUB_TOKEN do not trigger
+# `on: push: tags`), and runnable by hand to rebuild the archives for an existing tag.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v0.1.0"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: vtee
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: vtee.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+        run: |
+          name="vtee-${TAG}-${TARGET}"
+          mkdir "$name"
+          cp "target/release/${BIN}" README.md CHANGELOG.md "$name"/
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            7z a "${name}.zip" "$name" > /dev/null
+            archive="${name}.zip"
+          else
+            tar czf "${name}.tar.gz" "$name"
+            archive="${name}.tar.gz"
+          fi
+          sha256sum "$archive" > "${archive}.sha256"
+          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: gh release upload "$TAG" "$ARCHIVE" "${ARCHIVE}.sha256" --clobber
