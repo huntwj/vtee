@@ -13,7 +13,8 @@ were written against the old single files. Where things live now:
 | --- | --- |
 | `tap.rs` | `Tap`, `SpawnOptions`, shared state, output/input forwarding threads |
 | `serve.rs` | `ServeOptions`, `ExclusiveLock` (including `permits`), the public `serve`/`serve_tty` entry points |
-| `sockets.rs` | Unix-only: accept loops, connection caps, the NDJSON and raw-TTY connection handlers |
+| `net.rs` | `UnixListener`/`UnixStream`: `std`'s on Unix, `uds_windows` (AF_UNIX) on Windows |
+| `sockets.rs` | Accept loops, connection caps, the NDJSON and raw-TTY connection handlers (both platforms) |
 | `session.rs` | Session directory, name validation, `session_paths`/`session_is_live`/`session_names` |
 | `rawmode.rs` | `RawModeGuard` and the terminal-restore watchdog |
 | `command.rs`, `snapshot.rs`, `keys.rs`, `log.rs` | Protocol types and `authorize`/`Denied`, snapshot + redraw, named keys, asciicast log |
@@ -44,7 +45,8 @@ Two threads per `Tap`, both spawned from `Tap::spawn` (`src/lib.rs`):
   out, *then* touch shared state - is what the "the emulator only watches, never alters what's forwarded"
   guarantee actually rests on in the code (not just a design intention).
 
-A third thread (`watch_resize`, Unix only) blocks on `SIGWINCH` via `signal_hook`, and on each one re-reads the
+A third thread (`watch_resize`) blocks on `SIGWINCH` via `signal_hook` (Unix) or polls the console size every 200 ms
+(Windows has no `SIGWINCH`), and on each change re-reads the
 real terminal's size and pushes it to both the pty (`MasterPty::resize`) and the emulator (`Term::resize`) so
 they can never disagree about size.
 
@@ -176,7 +178,7 @@ whether `vtee` itself has an opinion about it.
 "Connect and watch during active use" (`roadmap.md`'s crawl/walk/run plan, stage 2) - a separate process reading
 live state from an already-running interactive session, without touching it. Reuses the `Command`/`CommandResult`
 core exactly as designed for this (`roadmap.md`'s "shared command core"): `Tap::serve` binds a Unix domain socket
-(`requirement 8` defers a Windows equivalent - named pipes) and, per connection, reads the same newline-delimited
+(an AF_UNIX socket on Windows too - see "Named sessions on Windows") and, per connection, reads the same newline-delimited
 `Command` JSON the batch CLI reads from a script file, executes it, and writes back a `CommandResult` line -
 except every command is checked first against `ServeOptions` via `Command::authorize` (below), which can turn
 it into a `CommandResult::Error` instead of ever reaching `execute`.
@@ -235,7 +237,7 @@ blocked inside `Tap::wait()` when the signal arrives, so it can't be reached tha
 raw mode in the first place.
 
 `SIGKILL` cannot be caught, full stop - no handler, no exception, a Unix guarantee. The only way to survive it
-is a second, independent process. `RawModeGuard` spawns one (Unix only; `requirement 8` defers Windows) using a
+is a second, independent process. `RawModeGuard` spawns one (Unix only; Windows has no termios and no watchdog yet) using a
 `UnixStream::pair()` dead-man's-switch: one end becomes the watchdog's stdin, the other is held by the guard for
 its lifetime. When the main process dies for *any* reason - clean exit, panic, or `SIGKILL` - the OS closes all
 its file descriptors with no cooperation needed from the dying process, the watchdog's blocking read on its end
@@ -461,3 +463,22 @@ removable, the same way `Tap::serve` already treats a stale socket file).
   timeout exists for robustness against platforms/situations where it doesn't, not because Linux needs it.
 - Only the active screen buffer is exposed by `Snapshot`, not both - deferred, see `roadmap.md`/`decisions.md`.
 - `Tap::spawn` doesn't let a caller set `TERM` or other environment variables on the child yet (requirement 6).
+
+## Named sessions on Windows (2026-10-09)
+
+Sessions, `attach`/`ls`/`kill` and both sockets work on native Windows. The pieces that differ from Unix:
+
+- **Transport:** AF_UNIX sockets (Windows 10 1803+) through `uds_windows`, re-exported by `src/net.rs` so the
+  servers and clients are written once. Named pipes were rejected (`decisions.md`).
+- **Session directory:** `%LOCALAPPDATA%i-mux` (temp dir if unset), private to the user by the profile's ACL; a
+  reparse point or non-directory there is refused. Session names are capped so `<name>.tty.sock` stays under the
+  107-byte AF_UNIX path limit.
+- **`kill`:** after the same liveness check as Unix, `OpenProcess` + `TerminateProcess` on the holder; ConPTY reaps
+  the wrapped program. Files are removed by `kill` itself. There is no PID-reuse guard beyond the liveness check.
+- **Termination events:** `watch_sigterm` registers a console control handler for close/break/shutdown that kills
+  the child and exits 143. Session files are left for `ls`/`kill`, as after a `SIGKILL`.
+- **No terminal-restore watchdog:** nothing restores console modes if the holder is force-killed (shells reset
+  them at the next prompt). `RawModeGuard` is a plain raw-mode toggle on Windows.
+- **Handle inheritance:** not an issue. The child is spawned before any socket exists, and the vendored ConPTY
+  spawn calls `CreateProcessW` with `bInheritHandles = FALSE` (measured, `tests/windows_sessions.rs`).
+

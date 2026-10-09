@@ -270,13 +270,13 @@ answer 6).
 socket with line-delimited JSON (what `ht` does, and what the `Command` design above already assumed) -
 `Tap::serve`/`vtee --connect`, `architecture.md`. Considered and set aside: stdio-based JSON-RPC (conflicts
 with stdin/stdout already being raw-forwarding channels, would need its own fd for no clear win); HTTP/WebSocket
-(more flexible than anything here needs). Windows equivalent (named pipes) is still later, same as ConPTY itself
-- `Tap::serve` returns an explicit "needs Unix" error there rather than silently doing nothing.
+(more flexible than anything here needs). On Windows the same design runs over AF_UNIX sockets (`uds_windows`, 2026-10-09; `architecture.md`, "Named sessions on
+Windows"); named pipes were rejected.
 
 ## Later
 
-An MCP front end (wraps whichever protocol v1 picks), Windows (ConPTY, blocked on an upstream bug - see
-`decisions.md`). Multiple sessions - **substantially addressed, 2026-10-08, without actually needing a
+An MCP front end (wraps whichever protocol v1 picks), Windows polish (ConPTY itself works now - see
+`decisions.md`; still open: a terminal-restore watchdog and the VT console-mode flags for `attach`). Multiple sessions - **substantially addressed, 2026-10-08, without actually needing a
 daemon**: named sessions, `vtee ls`/`attach`/`kill` (`docs/architecture.md`, "Named sessions and `vtee
 attach`") give most of the practical value multiple-sessions-behind-one-process would have (discoverability,
 attach-by-name, several clients per session) while staying one process per `Tap` - a socket per process really
