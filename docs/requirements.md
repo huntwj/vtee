@@ -21,7 +21,7 @@ status to track per-requirement rather than as one blob.
    (nobody's needed them yet). "Without a human" is now a declared mode, not an accident of environment
    detection: `--headless` (`decisions.md`) turns off human stdin/stdout forwarding and the raw-mode/signal
    machinery outright, rather than leaving it to whatever `is_terminal()` happens to see. A human in a
-   *separate* process can now attach to a live session too, not just query it - named sessions,
+   *separate* process can now attach to a live session too (on Linux and on Windows), not just query it - named sessions,
    `vtee attach`/`ls`/`kill`, a second raw-TTY protocol alongside the existing NDJSON one
    (`architecture.md`, "Named sessions and `vtee attach`"), multiple clients of either kind at once,
    verified end to end including a remote attach client's own typing reaching the child.
@@ -65,18 +65,14 @@ status to track per-requirement rather than as one blob.
    anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
    `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
-   **Linux: met. Windows: met, minus the watchdog and a hand-set ACL (below).** A local patch to
-   `portable-pty` (`vendor/portable-pty/`, `decisions.md`) fixed the original crash (`STATUS_CONTROL_C_EXIT`).
-   The later intermittent hang turned out to be ours, not a lower-level race: ConPTY's startup cursor query
-   went unanswered (a stdin read begun in cooked mode, or nobody to answer in `--script`/`--headless`).
-   Raw mode is now enabled before the spawn and the tap answers the child's terminal queries itself when no
-   human terminal can; `tests/windows_conpty.rs` is no longer `#[ignore]`d and passed 40/40 consecutive runs.
-   Resize follows the outer terminal (polled, since there is no `SIGWINCH`), Ctrl-C reaches the child, and
-   `more`/`vim`/`less`/`edit` run (`tests/windows_behavior.rs`). Named sessions, `attach`/`ls`/`kill` and both
-   sockets work too (AF_UNIX via `uds_windows`, `tests/windows_sessions.rs`); a close/break/shutdown event ends the
-   session cleanly, and a force-killed `vtee` does not orphan its child (ConPTY reaps it, tested). Not done on
-   Windows: a terminal-restore watchdog for a force-killed holder, and an owner-only ACL on the session directory
-   beyond the user profile's own.
+   **Met on both.** Linux was first. On Windows, a patch to `portable-pty` (`vendor/portable-pty/`,
+   `decisions.md`) fixed the original startup crash. The later intermittent hang turned out to be ours: ConPTY's
+   startup cursor query went unanswered (a stdin read begun in cooked mode, or nobody to answer in
+   `--script`/`--headless`). Raw mode now comes before the spawn and the tap answers the child's terminal queries
+   when no human terminal can. Resize (console-size polling) and Ctrl-C work, and named sessions, `attach`, `ls`,
+   `kill` and both sockets run over AF_UNIX sockets (`architecture.md`, "Named sessions on Windows"). Remaining
+   Windows gaps: no terminal-restore watchdog, `attach` does not set the console's virtual-terminal flags, and
+   continuous integration has not run on a hosted runner (`roadmap.md`, "Beta readiness").
 
 ## Not goals, for now
 

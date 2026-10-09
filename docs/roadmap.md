@@ -4,7 +4,37 @@ Staged plan, what's being built now, what v1 still needs beyond that, the standi
 TinyFugue's testing side told us about its actual near-term needs. See `requirements.md` for what each stage is
 aiming at and `architecture.md` for how the done parts work.
 
-## v0 - done, 2026-10-06 (Linux; Windows blocked, see `decisions.md`)
+## Beta readiness
+
+State as of 2026-10-09. The core feature set works on Linux and Windows. What is left before calling it a beta:
+
+- [ ] **First CI run.** `.github/workflows/ci.yml` has never run on real runners; expect runner-specific fixes
+  (ConPTY on `windows-latest`, tools the Windows tests look up). See `development/ci.md`.
+- [ ] **A license.** None is chosen yet.
+- [ ] **Release automation.** Versions follow commit messages; the automation is described in `releasing.md`
+  and needs its first release to prove it.
+- [ ] **Test gaps** (`development/testing.md`): the full snapshot attribute set, the `redraw_sequence` round trip,
+  `--log` through the CLI, the config-file path, terminal restore after a signal, and write-policy enforcement on
+  read-only sockets.
+- [ ] **Mouse and bracketed-paste input.** The modes are tracked in snapshots; there is no way to send mouse or
+  paste events.
+- [ ] **Underline styles.** Curly and double underline are reported as plain underline.
+- [ ] **Both screen buffers.** Only the active buffer is exposed. Blocked by `alacritty_terminal` (see
+  `decisions.md`, 2026-10-07).
+- [ ] **Richer wait conditions.** `wait_for` is a substring match on one screen line; there is no regular
+  expression, region or "screen unchanged" condition.
+- [ ] **Masking volatile regions** (a clock) for golden comparisons. Left to the caller so far.
+- [ ] **Windows terminal-restore watchdog.** Nothing restores the console if the holder is force-killed.
+- [ ] **Windows `attach` console flags.** `attach` does not set the console's virtual-terminal input and output
+  modes; special keys are untested through it.
+- [ ] **Known defects.** `--listen=<path>` sessions are invisible to `ls` and `kill`; bare `attach` picks the most
+  recently *started* session, not the most recently active; `attach` does not refuse a non-terminal.
+
+Done: spawn and bidirectional forwarding, snapshots, raw log and replay, the JSON socket with write policies,
+named sessions with `attach`/`ls`/`kill`, several clients at once, terminal restore after `SIGTERM` and `SIGKILL` on
+Linux, and native Windows support (ConPTY, resize, Ctrl-C, sessions over AF_UNIX).
+
+## v0 - done, 2026-10-06 (Linux; Windows followed, see `decisions.md`)
 
 Spawn, bidirectional forward, resize, terminal restore on normal exit/panic, a snapshot API (cells, attributes,
 cursor, modes, offset, title, scrollback), a raw byte log, and replay - verified against the live snapshot for
