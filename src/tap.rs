@@ -190,6 +190,12 @@ impl Tap {
         // ConPTY itself: created with `PSEUDOCONSOLE_INHERIT_CURSOR` (as `portable-pty` does)
         // it issues `ESC[6n` at startup and blocks everything, including the real child's
         // output, until a `ESC[row;colR` arrives (`docs/decisions.md`, 2026-10-08).
+        // A parent started with CREATE_NEW_PROCESS_GROUP (a CI runner, an agent harness, `start
+        // /b`) hands every descendant an "ignore CTRL+C" attribute, and the child inherits it
+        // from us; a terminal's child would not. Restore the default before spawning.
+        #[cfg(windows)]
+        restore_default_ctrl_c();
+
         let terminal_answers =
             opts.forward_input && opts.forward_output && io::stdin().is_terminal() && io::stdout().is_terminal();
         let answer_queries = !terminal_answers;
@@ -508,6 +514,19 @@ fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human
         if human_revokes_lock.load(Ordering::Relaxed) && exclusive_lock.revoke() {
             ::log::debug!("human keystroke revoked the remote write lock");
         }
+    }
+}
+
+#[cfg(windows)]
+fn restore_default_ctrl_c() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(handler: *const std::ffi::c_void, add: i32) -> i32;
+    }
+    // (NULL, FALSE) restores normal CTRL+C processing for this process and its future children.
+    // Failing (no console at all) is harmless: there is no Ctrl-C to handle either.
+    unsafe {
+        SetConsoleCtrlHandler(std::ptr::null(), 0);
     }
 }
 

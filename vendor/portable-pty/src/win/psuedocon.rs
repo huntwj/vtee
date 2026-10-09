@@ -136,13 +136,15 @@ impl PsuedoCon {
 
         let cwd = cmd.current_directory();
 
-        // vtee local patch (see /vendor/portable-pty/README-vtee-patch.md and
-        // docs/decisions.md): added CREATE_NEW_PROCESS_GROUP. Without it the child inherits our
-        // process group, and Windows delivers console-control events by process-group
-        // membership rather than strictly by which console a process is attached to - so a
-        // break event aimed at us could still reach the child even through ConPTY's own hidden
-        // console, killing it almost immediately (STATUS_CONTROL_C_EXIT). Upstream:
-        // https://github.com/wezterm/wezterm/issues/7025 (open, unaddressed as of 2026-10-08).
+        // vtee local patch (vendor/portable-pty/README-vtee-patch.md, docs/decisions.md):
+        // CREATE_NEW_PROCESS_GROUP is opt-in via VTEE_NEW_PROCESS_GROUP=1. It was added for
+        // wezterm#7025 (child dies with STATUS_CONTROL_C_EXIT at startup on some machines), but
+        // Windows documents it as disabling CTRL+C for the whole new group, so by default the
+        // child must not get it or Ctrl-C can never interrupt it.
+        let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+        if std::env::var_os("VTEE_NEW_PROCESS_GROUP").is_some_and(|v| v != "0") {
+            creation_flags |= CREATE_NEW_PROCESS_GROUP;
+        }
         let res = unsafe {
             CreateProcessW(
                 exe.as_mut_slice().as_mut_ptr(),
@@ -150,7 +152,7 @@ impl PsuedoCon {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP,
+                creation_flags,
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())

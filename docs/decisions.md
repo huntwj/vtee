@@ -599,3 +599,25 @@ child output is broadcast), the unaligned termios read.
 terminal never reached the child. It now polls `crossterm::terminal::size()` every 200 ms and applies a *change*
 through the same pty-plus-emulator resize as the Unix path; a `--cols/--rows` override is left alone while the
 terminal stays put. The previously ignored `resizing_the_outer_terminal_reaches_the_child` passes (10 of 10).
+
+## 2026-10-09: Windows Ctrl-C reaches the child; the new-process-group flag is now opt-in
+
+`tests/windows_behavior.rs` found that Ctrl-C never interrupted a Windows child. Measured, with a bare
+`portable-pty` ConPTY running `ping -n 31` and a Ctrl-C written to its input (no `vtee` involved):
+
+- **Two independent causes, both required to be absent.** (1) Any ancestor started with
+  `CREATE_NEW_PROCESS_GROUP` (CI runners, agent harnesses, `start /b`) gives every descendant an "ignore
+  CTRL+C" attribute, which the child inherits through `vtee`; calling `SetConsoleCtrlHandler(NULL, FALSE)` in
+  the probe cleared it. (2) The vendored patch's own `CREATE_NEW_PROCESS_GROUP` disables CTRL+C for the child's
+  group by documented design. With (1) cleared and (2) removed, `ping` exits in ~50 ms with
+  `STATUS_CONTROL_C_EXIT`; with (2) present it never does, raw `0x03` or Win32-input-mode Ctrl+C alike.
+- **The original startup crash could not be reproduced without the flag.** Flagless builds ran `whoami.exe`
+  without a crash in 50+ harness runs, 10 `--script` runs, 10 `Start-Process` runs with redirected pipes (the
+  2026-10-06 repro conditions), and with the cursor-query answering disabled. The crash is documented upstream
+  (wezterm#7025) as machine-dependent, so that is absence of evidence on this machine, not proof it cannot happen.
+
+**Decision.** `Tap::spawn` calls `SetConsoleCtrlHandler(NULL, FALSE)` before spawning, so the child gets
+default Ctrl-C handling however `vtee` was launched, as a terminal's child would. The vendored crate now adds
+`CREATE_NEW_PROCESS_GROUP` only when `VTEE_NEW_PROCESS_GROUP=1` is set: a machine that hits #7025 can opt back in
+and loses Ctrl-C for that session; everyone else gets working Ctrl-C. `ctrl_c_ends_a_long_running_child_and_leaves_no_orphan`
+passes (10 of 10 full-suite runs) and `the_new_process_group_opt_in_still_runs_children` keeps the escape hatch tested.

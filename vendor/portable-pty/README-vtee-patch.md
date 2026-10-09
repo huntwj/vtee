@@ -1,8 +1,10 @@
 # Local patch: this is not upstream `portable-pty`
 
-Vendored from `portable-pty` 0.9.0 (crates.io), unmodified except for one line in
+Vendored from `portable-pty` 0.9.0 (crates.io), unmodified except in
 `src/win/psuedocon.rs`'s `CreateProcessW` call: adds `CREATE_NEW_PROCESS_GROUP` to the creation
-flags. Everything else - source, `Cargo.toml`, `LICENSE.md` - is the published crate as-is.
+flags **only when `VTEE_NEW_PROCESS_GROUP=1` is set** (as of 2026-10-09 it is opt-in: Windows documents
+the flag as disabling CTRL+C for the child, and the startup crash it guards against no longer reproduced
+without it - see `docs/decisions.md`, 2026-10-09). Everything else - source, `Cargo.toml`, `LICENSE.md` - is the published crate as-is.
 
 **Why**: without that flag, a spawned child inherits `vtee`'s own process group, and Windows
 delivers console-control events (Ctrl+C/Break) by process-group membership rather than strictly
