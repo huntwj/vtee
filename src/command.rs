@@ -1,7 +1,5 @@
-//! The shared command vocabulary (`docs/roadmap.md`, "Now: a shared command core"). The batch
-//! CLI (`src/main.rs`) drives these from a script file; a later live protocol would drive the
-//! same enum from a socket instead - this is deliberately the one place that vocabulary is
-//! defined, so the two never drift apart.
+//! The command vocabulary shared by the batch CLI (script files) and the socket protocol, so
+//! the two never drift apart.
 
 use std::io;
 use std::time::Duration;
@@ -45,12 +43,10 @@ pub enum Command {
     ReleaseWrite,
 }
 
-/// What a command that produces output looks like on the wire - one of these per line for
-/// every `snapshot` or `wait_for` command, nothing for the others. `Error` is only ever
-/// produced by a driver (e.g. `Tap::serve`'s connection handler), never by `execute` itself -
-/// a long-lived connection needs to report a bad command inline and keep going, where the
-/// batch CLI's `execute` contract is "the caller decides what a failure means" (it treats one
-/// as fatal to the whole script, `main.rs`).
+/// One line on the wire per `snapshot`/`wait_for` command, nothing for the others. `Error` is
+/// produced only by a driver such as the connection handler, never by `execute`: a long-lived
+/// connection reports a bad command inline and keeps going, while the batch CLI treats one as
+/// fatal.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum CommandResult {
@@ -72,37 +68,24 @@ pub enum CommandResult {
     },
 }
 
-/// Under `WritePolicy::Exclusive`, whether the interactive stdin-forwarding thread's own
-/// writes participate in the same lock remote `--connect` clients compete for
-/// (`docs/roadmap.md`, "I think that's just one more setting/option, right?" - a setting, not
-/// a fixed answer). Human keystrokes are never delayed or blocked by this either way - the
-/// only question is whether typing *also* revokes whatever remote client currently holds
-/// write access.
+/// Under `WritePolicy::Exclusive`, whether a human's typing also revokes a remote holder.
+/// Human keystrokes are never delayed either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HumanPriority {
-    /// The human's typing always reaches the child, and the lock only arbitrates among remote
-    /// clients - a remote holder keeps write access regardless of what the human does.
+    /// The lock only arbitrates among remote clients; a remote holder keeps access.
     AlwaysWins,
-    /// The human's typing always reaches the child *and* revokes whatever remote client
-    /// currently holds write access, the instant a keystroke arrives - no idle-time guessing
-    /// (requirement 4 already rejected that shape of heuristic for output; this avoids it for
-    /// input too by reacting to a real event, not an inferred one). A remote client finds out
-    /// by its next command failing, and can reacquire once the human stops "holding" it.
+    /// Each keystroke revokes the current remote holder, whose next command then fails; it can
+    /// reacquire afterwards. Reacts to a real event rather than guessing at idleness.
     Participant,
 }
 
-/// How a `Tap::serve` connection may write, if at all (`docs/roadmap.md`, "Full duplex"). An
-/// enum to grow into, not a single bool: the user decided the write policies should all be
-/// selectable modes rather than this project picking one fixed answer, and the same for
-/// `Exclusive`'s own `HumanPriority` setting.
+/// How a connection may write, if at all (`docs/roadmap.md`, "Full duplex"). Every policy is a
+/// selectable mode rather than one fixed answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritePolicy {
-    /// No `Send`/`SendKey`/`Resize` at all - observation's (stage 2) original behaviour, and
-    /// the default.
+    /// No `Send`/`SendKey`/`Resize` at all. The default.
     ReadOnly,
-    /// Any connected writer may inject at any time, no arbitration between writers. Sound
-    /// whenever nothing else is also writing (stage 3a's only case - no human competing), and
-    /// one of several modes once a human is also typing (stage 3b).
+    /// Any connected writer may inject at any time, with no arbitration.
     Open,
     /// "Take the pen": only one connection may hold write access at a time, via
     /// `Command::AcquireWrite`/`ReleaseWrite`, auto-released on disconnect.
@@ -110,17 +93,10 @@ pub enum WritePolicy {
 }
 
 impl Command {
-    /// Whether `self` is structurally reachable under `policy`, given whether the real
-    /// terminal (if any) is actively managing the pty's size via `Tap::watch_resize`. This is
-    /// the policy-shaped check only - `WritePolicy::Exclusive` additionally requires the
-    /// *caller* to currently hold the lock for `Send`/`SendKey`/`Resize`, which isn't checked
-    /// here at all (this function has no notion of which connection is asking) but by
-    /// `Tap::serve`'s connection handler, which does.
-    ///
-    /// `Resize` is checked against `resize_owned_by_terminal` independently of `policy`: a
-    /// remote resize would fight with a human's own terminal resizing the session regardless
-    /// of which write policy is otherwise in effect, since there's only one real screen size
-    /// that means anything once a human is looking at one.
+    /// Whether `self` is allowed under `policy`. Under `Exclusive` it does not check that the
+    /// caller holds the lock; this function doesn't know which connection is asking, so the
+    /// connection handler does. `Resize` is rejected whenever a real terminal owns the pty's
+    /// size, whatever the policy, since a remote resize would fight with it.
     pub fn authorize(&self, policy: WritePolicy, resize_owned_by_terminal: bool) -> Result<(), String> {
         match self {
             Command::Snapshot | Command::WaitFor { .. } | Command::WaitMs { .. } => Ok(()),
@@ -167,13 +143,7 @@ impl Command {
                 Ok(Some(CommandResult::WaitFor { matched, snapshot }))
             }
             Command::Snapshot => Ok(Some(CommandResult::Snapshot { snapshot: tap.snapshot() })),
-            // Handled entirely by `Tap::serve`'s connection handler, which is the only place
-            // that knows which connection is asking - `execute` never sees these reach here in
-            // practice (`authorize` only lets them through under `Exclusive`, and the
-            // connection handler intercepts them before calling `execute` at all), but they
-            // need *some* arm, and silently doing nothing is more honest than a `todo!()` that
-            // would panic a connection handler thread over a command that just means "this
-            // path isn't how these are handled."
+            // The connection handler intercepts these; only it knows which connection is asking.
             Command::AcquireWrite | Command::ReleaseWrite => Ok(None),
         }
     }

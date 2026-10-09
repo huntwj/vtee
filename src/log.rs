@@ -35,9 +35,8 @@ impl RawLog {
         Ok(RawLog { writer, start: Instant::now() })
     }
 
-    /// Record one chunk of the child's output. Non-UTF8 bytes are replaced lossily - the same
-    /// limitation `avt`'s own `feed_str`-only API has (see docs/decisions.md); acceptable for a
-    /// debugging/replay log, not for the forwarded bytes themselves (which this never touches).
+    /// Record one chunk of the child's output. Non-UTF8 bytes are replaced lossily, which is
+    /// fine for a replay log; the forwarded bytes themselves are never touched.
     pub fn write_event(&mut self, data: &[u8]) -> io::Result<()> {
         let t = self.start.elapsed().as_secs_f64();
         let text = String::from_utf8_lossy(data);

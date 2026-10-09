@@ -24,18 +24,13 @@ signal-hook = "0.4.5"
 vte = { version = "0.15.0", features = ["ansi"] }
 
 [target.'cfg(windows)'.dependencies]
-# AllocConsole, called defensively before creating a pty (src/lib.rs, docs/decisions.md) -
-# measured to matter, not a precaution added on spec: pty creation itself was observed to hang
-# when the calling process had no console of its own, independent of anything vtee does.
+# AllocConsole before creating a pty (src/tap.rs, docs/decisions.md).
 winapi = { version = "0.3.9", features = ["consoleapi"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 
-# Local one-line fix for the Windows ConPTY bug (docs/decisions.md, vendor/portable-pty/
-# README-vtee-patch.md) - CREATE_NEW_PROCESS_GROUP missing from CreateProcessW, tracked
-# upstream at wezterm/wezterm#7025. Remove this and the vendor/ directory once a released
-# portable-pty actually fixes it.
+# Local ConPTY fix (vendor/portable-pty/README-vtee-patch.md); drop once wezterm#7025 ships.
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
