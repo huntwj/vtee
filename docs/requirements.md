@@ -71,8 +71,9 @@ status to track per-requirement rather than as one blob.
    went unanswered (a stdin read begun in cooked mode, or nobody to answer in `--script`/`--headless`).
    Raw mode is now enabled before the spawn and the tap answers the child's terminal queries itself when no
    human terminal can; `tests/windows_conpty.rs` is no longer `#[ignore]`d and passed 40/40 consecutive runs.
-   Not yet separately verified on Windows: full-screen TUIs, resize (`SIGWINCH` doesn't exist there), and
-   signal handling (`SIGTERM`/`SIGKILL` survival was only ever measured on Linux).
+   Resize follows the outer terminal (polled, since there is no `SIGWINCH`), Ctrl-C reaches the child, and
+   `more`/`vim`/`less`/`edit` run (`tests/windows_behavior.rs`). Not verified: `SIGTERM`-style termination (no
+   Windows equivalent), and a force-killed `vtee` does not orphan its child (ConPTY reaps it, tested).
 
 ## Not goals, for now
 
