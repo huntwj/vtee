@@ -487,6 +487,52 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
+    /// Regression test for two review findings on the NDJSON socket, which is on by default: an
+    /// unbounded `resize` used to allocate a 65535x65535 grid and kill the session, and a line
+    /// with no newline used to be buffered without limit.
+    #[test]
+    fn hostile_ndjson_input_is_rejected_and_the_session_survives() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "hostile", &["--writable"]);
+        std::thread::sleep(Duration::from_millis(500));
+        let sock = dir.join("hostile.sock");
+
+        let mut s = UnixStream::connect(&sock).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(b"{\"cmd\":\"resize\",\"cols\":65535,\"rows\":65535}\n").unwrap();
+        let mut buf = [0u8; 512];
+        let n = s.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("exceeds"), "expected a size error");
+
+        let mut s = UnixStream::connect(&sock).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let junk = vec![b'x'; 64 * 1024];
+        for _ in 0..40 {
+            if s.write_all(&junk).is_err() {
+                break;
+            }
+        }
+        let mut sink = Vec::new();
+        let _ = s.read_to_end(&mut sink);
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":80"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
     /// Regression test for a real, adversarially-found bug: broadcasting to raw-TTY sinks used
     /// to do a blocking `write_all` to *every* sink under the one lock that also gates `term`,
     /// `bytes_seen`, and `snapshot()` - so one attach client that simply stops reading (a

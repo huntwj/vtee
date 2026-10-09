@@ -527,3 +527,21 @@ reading:
 
 Not an issue per the reviews: subcommand/flag collisions, `--script` conflicts, redraw/broadcast atomicity, attach
 client cleanup, concurrent disconnects.
+
+## 2026-10-08: Fable hardening pass - four reproduced bugs fixed
+
+Each was reproduced in Docker before fixing:
+
+- **Unbounded `resize` killed the session.** A 43-byte `resize 65535x65535` over the (default-on) socket made the
+  emulator allocate ~hundreds of GB. `Tap::resize` now rejects anything over 1000 per side.
+- **Unbounded NDJSON line buffering.** A client that never sent `\n` grew the holder's memory without limit
+  (6.7 MB to 211 MB in the repro). Lines are now capped at 1 MiB; the connection is dropped on overflow.
+- **Named ANSI colours were dropped.** SGR 30-37/40-47/90-97 came out as `Default` in every snapshot and redraw. They
+  now map to palette indices 0-15 (the `Dim*` variants to 0-7).
+- **Wide characters corrupted text and redraw.** The spacer half of a wide char was read as `' '`, so `你好X`
+  became `你 好 X` and every later column shifted. Spacer cells are now empty (grid dimensions unchanged).
+- Also: a cap of 64 concurrent connections per listener (each costs a thread), and `kill` ignores pidfile values of
+  0, 1 or negative so `kill(0)`/`kill(-1)` can never hit a process group.
+
+Checked and fine per the review: session-dir TOCTOU, `valid_session_name`, client-to-client escape injection (only
+child output is broadcast), the unaligned termios read.

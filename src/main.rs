@@ -920,7 +920,9 @@ fn run_kill(name: &str) -> ExitCode {
     let pidfile_existed = paths.pidfile.exists();
     match vtee::session_is_live(name) {
         Ok(true) => {
-            if let Some(pid) = std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok()) {
+            if let Some(pid) = std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok())
+                && pid > 1
+            {
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
                 }

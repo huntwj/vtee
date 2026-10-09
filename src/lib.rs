@@ -106,6 +106,39 @@ struct TapState {
 /// everything else.
 const TTY_SINK_QUEUE_CAPACITY: usize = 256;
 
+const MAX_TERMINAL_DIMENSION: u16 = 1000;
+
+/// One NDJSON command line; a client that never sends a newline would otherwise grow the
+/// holder's memory without bound.
+#[cfg(unix)]
+const MAX_COMMAND_LINE_BYTES: u64 = 1024 * 1024;
+
+/// Per listener. Each connection costs at least one thread.
+#[cfg(unix)]
+const MAX_CONNECTIONS: usize = 64;
+
+/// Decrements the live-connection count when its handler thread ends, panic or not.
+#[cfg(unix)]
+struct ConnectionSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(unix)]
+impl ConnectionSlot {
+    fn try_acquire(live: &Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
+        if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            live.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(ConnectionSlot(live.clone()))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Paired with the `Mutex` so `wait_for_text` can block efficiently instead of polling:
 /// `forward_output` notifies after every chunk it applies.
 struct Shared {
@@ -303,6 +336,16 @@ impl Tap {
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        // The emulator allocates cols x rows cells, so an unbounded remote resize can OOM the
+        // whole session.
+        if cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "terminal size {cols}x{rows} exceeds the {MAX_TERMINAL_DIMENSION}x{MAX_TERMINAL_DIMENSION} limit"
+                ),
+            ));
+        }
         self.master
             .lock()
             .unwrap()
@@ -525,11 +568,16 @@ impl Tap {
 
         let _ = std::fs::remove_file(path);
         let listener = std::os::unix::net::UnixListener::bind(path)?;
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                let Some(slot) = ConnectionSlot::try_acquire(&live) else { continue };
                 let tap = tap.clone();
-                thread::spawn(move || serve_connection(&tap, stream, opts));
+                thread::spawn(move || {
+                    let _slot = slot;
+                    serve_connection(&tap, stream, opts)
+                });
             }
         });
         Ok(())
@@ -553,11 +601,16 @@ impl Tap {
     pub fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::Result<()> {
         let _ = std::fs::remove_file(path);
         let listener = std::os::unix::net::UnixListener::bind(path)?;
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                let Some(slot) = ConnectionSlot::try_acquire(&live) else { continue };
                 let tap = tap.clone();
-                thread::spawn(move || serve_tty_connection(&tap, stream, policy));
+                thread::spawn(move || {
+                    let _slot = slot;
+                    serve_tty_connection(&tap, stream, policy)
+                });
             }
         });
         Ok(())
@@ -755,10 +808,21 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
     let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
     ::log::debug!("connection {id}: accepted");
     let Ok(reader_stream) = stream.try_clone() else { return };
-    let reader = io::BufReader::new(reader_stream);
+    let mut reader = io::BufReader::new(reader_stream);
     let mut writer = stream;
-    for line in io::BufRead::lines(reader) {
-        let Ok(line) = line else { break };
+    let mut raw_line = Vec::new();
+    loop {
+        raw_line.clear();
+        let read = io::BufRead::read_until(&mut (&mut reader).take(MAX_COMMAND_LINE_BYTES + 1), b'\n', &mut raw_line);
+        match read {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if raw_line.len() as u64 > MAX_COMMAND_LINE_BYTES && !raw_line.ends_with(b"\n") {
+            ::log::debug!("connection {id}: command line over {MAX_COMMAND_LINE_BYTES} bytes, closing");
+            break;
+        }
+        let line = String::from_utf8_lossy(&raw_line);
         if line.trim().is_empty() {
             continue;
         }
