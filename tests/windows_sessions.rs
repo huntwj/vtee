@@ -6,7 +6,7 @@
 #![cfg(windows)]
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -142,21 +142,34 @@ struct Holder {
 
 impl Holder {
     fn start(env: &Env, name: &str) -> Holder {
+        Holder::start_with(env, name, &[], &env.sock(name))
+    }
+
+    /// A holder whose NDJSON socket is at `custom` (`--listen=<path>`) instead of the session dir.
+    fn start_listening(env: &Env, name: &str, custom: &Path) -> Holder {
+        Holder::start_with(env, name, &[format!("--listen={}", custom.display())], custom)
+    }
+
+    /// Ready once `sock` answers and the record exists (it is written last, after both sockets are
+    /// bound).
+    fn start_with(env: &Env, name: &str, flags: &[String], sock: &Path) -> Holder {
         let stem = unique("child");
         let bat = std::env::temp_dir().join(format!("{stem}.cmd"));
         std::fs::write(&bat, "@echo off\r\nset /p a=ready?\r\necho got:%a%:done\r\nset /p b=hold?\r\n").unwrap();
         let child = env
             .cmd()
-            .args(["--headless", "--name", name, "--", "cmd", "/c"])
+            .args(["--headless", "--name", name])
+            .args(flags)
+            .args(["--", "cmd", "/c"])
             .arg(&bat)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let sock = env.sock(name);
+        let pidfile = env.pidfile(name);
         assert!(
-            wait_until(Duration::from_secs(20), || UnixStream::connect(&sock).is_ok()),
+            wait_until(Duration::from_secs(20), || pidfile.exists() && UnixStream::connect(sock).is_ok()),
             "session {name:?} never started listening"
         );
         Holder { child, stem }
@@ -222,7 +235,13 @@ fn a_session_creates_its_sockets_and_pidfile_and_ls_shows_it_live() {
 
     assert!(env.sock("alpha").exists());
     assert!(env.tty_sock("alpha").exists());
-    assert_eq!(std::fs::read_to_string(env.pidfile("alpha")).unwrap().trim(), holder.pid().to_string());
+    // The record: the holder's pid, then the sockets it actually bound.
+    let record = std::fs::read_to_string(env.pidfile("alpha")).unwrap();
+    let lines: Vec<&str> = record.lines().collect();
+    assert_eq!(lines.len(), 3, "record: {record:?}");
+    assert_eq!(lines[0], holder.pid().to_string());
+    assert_eq!(PathBuf::from(lines[1]), env.sock("alpha"));
+    assert_eq!(PathBuf::from(lines[2]), env.tty_sock("alpha"));
 
     let (ok, out, err) = env.run(&["ls"]);
     assert!(ok, "ls failed: {err}");
@@ -493,6 +512,99 @@ fn sockets_are_not_inherited_by_children_spawned_afterwards() {
     assert!(child_alive, "the probe child exited early, so this measured nothing");
     assert!(hung_up, "an accepted socket leaked into a later child: the peer never saw EOF");
     assert!(refused, "the listener leaked into a later child: it still accepts connections");
+}
+
+/// `--listen=<path>` moves the NDJSON socket out of the session directory; `ls`, `--connect` and
+/// `kill` must follow the socket the holder recorded rather than the conventional one.
+#[test]
+fn a_listen_session_is_live_in_ls_connectable_and_killable() {
+    let _guard = serial();
+    let env = Env::new();
+    let custom = env.local.join("custom.sock");
+    let mut holder = Holder::start_listening(&env, "remote", &custom);
+    assert!(!env.sock("remote").exists(), "the conventional socket shouldn't exist: --listen replaced it");
+
+    let (ok, out, err) = env.run(&["ls"]);
+    assert!(ok, "ls failed: {err}");
+    assert!(out.contains("remote") && out.contains("live") && !out.contains("stale"), "ls output: {out}");
+    assert!(out.contains(&format!("sock={}", custom.display())), "ls should show the real socket: {out}");
+
+    let mut connect =
+        env.cmd().arg("--connect").arg(&custom).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut stdin = connect.stdin.take().unwrap();
+    stdin.write_all(b"{\"cmd\":\"wait_for\",\"text\":\"ready?\",\"timeout_ms\":15000}\n").unwrap();
+    drop(stdin);
+    let out = connect.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"matched\":true"), "{:?}", out.stdout);
+
+    let (ok, _, err) = env.run(&["kill", "remote"]);
+    assert!(ok, "kill failed: {err}");
+    assert!(wait_until(Duration::from_secs(10), || holder.child.try_wait().unwrap().is_some()), "holder survived kill");
+    assert!(wait_until(Duration::from_secs(10), || cmd_pids(&holder.stem).is_empty()), "the child outlived kill");
+    for path in [custom, env.tty_sock("remote"), env.pidfile("remote")] {
+        assert!(!path.exists(), "{} was left behind", path.display());
+    }
+}
+
+/// A force-killed `--listen` holder is stale; `kill` cleans its custom socket and, since the
+/// recorded socket is dead, signals nothing even though the record names a live process.
+#[test]
+fn a_killed_listen_session_is_stale_and_kill_cleans_it_without_signalling_anything() {
+    let _guard = serial();
+    let env = Env::new();
+    let custom = env.local.join("custom.sock");
+    let mut holder = Holder::start_listening(&env, "remote-stale", &custom);
+    holder.child.kill().unwrap();
+    let _ = holder.child.wait();
+    assert!(custom.exists(), "a force-killed holder shouldn't have cleaned up");
+    assert!(wait_until(Duration::from_secs(10), || UnixStream::connect(&custom).is_err()));
+
+    let (_, out, _) = env.run(&["ls"]);
+    assert!(out.contains("stale") && !out.contains("live"), "ls output: {out}");
+    assert!(out.contains(&format!("sock={}", custom.display())), "ls output: {out}");
+
+    let mut sentinel = Command::new("ping")
+        .args(["-n", "120", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pidfile = env.pidfile("remote-stale");
+    std::fs::write(
+        &pidfile,
+        format!("{}\n{}\n{}\n", sentinel.id(), custom.display(), env.tty_sock("remote-stale").display()),
+    )
+    .unwrap();
+    // Old enough that only the liveness check, not the creation-time guard, protects the sentinel.
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::OpenOptions::new().write(true).open(&pidfile).unwrap().set_modified(long_ago).unwrap();
+
+    let (ok, _, err) = env.run(&["kill", "remote-stale"]);
+    assert!(ok, "kill failed: {err}");
+    std::thread::sleep(Duration::from_millis(500));
+    let survived = sentinel.try_wait().unwrap().is_none();
+    let _ = sentinel.kill();
+    let _ = sentinel.wait();
+    assert!(survived, "kill signalled a process because of a stale record");
+    assert!(!custom.exists() && !pidfile.exists(), "the stale files should be cleaned up");
+}
+
+/// A file holding only the pid, as older versions wrote it, still resolves to the conventional
+/// sockets.
+#[test]
+fn a_legacy_pid_only_pidfile_still_works() {
+    let _guard = serial();
+    let env = Env::new();
+    let mut holder = Holder::start(&env, "legacy");
+    std::fs::write(env.pidfile("legacy"), holder.pid().to_string()).unwrap();
+
+    let (_, out, _) = env.run(&["ls"]);
+    assert!(out.contains(&format!("legacy\tpid={}\tlive", holder.pid())), "ls output: {out}");
+    assert!(!out.contains("sock="), "ls output: {out}");
+
+    let (ok, _, err) = env.run(&["kill", "legacy"]);
+    assert!(ok, "kill failed: {err}");
+    assert!(wait_until(Duration::from_secs(10), || holder.child.try_wait().unwrap().is_some()), "holder survived kill");
 }
 
 /// A pidfile naming a process younger than the pidfile itself is a reused PID: `kill` must clean

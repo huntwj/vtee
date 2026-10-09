@@ -437,13 +437,7 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
         }
     };
 
-    // Written once the child is confirmed alive, so `ls`/`kill`/`attach` can find this process.
-    if let Some(pidfile) = cli.pidfile
-        && let Err(e) = std::fs::write(pidfile, std::process::id().to_string())
-    {
-        raw_guard.take();
-        return fail(exitcode::OSERR, format!("couldn't write pidfile {}: {e}", pidfile.display()));
-    }
+    // Built before anything is bound, so any early return below still removes what got created.
     let _session_files = SessionFiles { pidfile: cli.pidfile, listen_path: cli.listen_path, tty_path: cli.tty_path };
 
     // With a real terminal here, it alone owns the pty's size, so a remote resize would fight it.
@@ -471,6 +465,16 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
             raw_guard.take();
             return fail(exitcode::OSERR, format!("couldn't bind the attach socket: {e}"));
         }
+    }
+
+    // Written last, so `ls`/`kill`/`attach` find this process only once its sockets exist, and
+    // with the paths actually bound: `--listen=<path>` puts the NDJSON socket elsewhere.
+    if let Some(pidfile) = cli.pidfile
+        && let (Some(sock), Some(tty)) = (cli.listen_path, cli.tty_path)
+        && let Err(e) = vtee::write_session_record(pidfile, sock, tty)
+    {
+        raw_guard.take();
+        return fail(exitcode::OSERR, format!("couldn't write pidfile {}: {e}", pidfile.display()));
     }
 
     let status = tap.wait();
