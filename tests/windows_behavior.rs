@@ -396,6 +396,40 @@ fn child_exit_codes_are_propagated() {
     }
 }
 
+/// `--env` reaches the child on top of the inherited environment (requirement 6), including a
+/// value that itself contains `=`.
+#[test]
+fn env_vars_reach_the_child() {
+    let _guard = serial();
+    let bat = batch_file("env", "echo first:%VTEE_T%:\necho second:%VTEE_U%:\necho path-kept:%SystemRoot%:");
+    let run = run_script(
+        &[&wait_for_line("path-kept:C:", 15000), SNAPSHOT],
+        &["--env", "VTEE_T=xyz", "--env", "VTEE_U=a=b=c"],
+        &["cmd", "/c", s(&bat)],
+    );
+    let _ = std::fs::remove_file(&bat);
+    assert!(run.success, "script failed: {}", run.stderr);
+    assert!(run.matched(0), "the batch file never finished: {:?}", run.last_lines());
+    let lines = run.last_lines();
+    assert!(lines.iter().any(|l| l.contains("first:xyz:")), "--env missing: {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("second:a=b=c:")), "a value containing '=' was cut: {lines:?}");
+}
+
+/// A program that does not exist fails with the OS-error exit code and says so, rather than
+/// hanging or exiting 0.
+#[test]
+fn a_program_that_cannot_be_spawned_exits_with_oserr() {
+    let _guard = serial();
+    let output = assert_cmd::Command::cargo_bin("vtee")
+        .unwrap()
+        .args(["--no-listen", "--", "definitely-not-a-program-vtee.exe"])
+        .timeout(Duration::from_secs(30))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(71), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to spawn"), "{output:?}");
+}
+
 // ---- (3) full-screen-ish programs --------------------------------------------------------------
 
 /// Absolute path of `exe` as `where.exe` resolves it, if installed. Tests pass the absolute
@@ -405,6 +439,15 @@ fn find_exe(exe: &str) -> Option<PathBuf> {
     let out = std::process::Command::new("where.exe").arg(exe).output().ok()?;
     let first = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
     (out.status.success() && !first.is_empty()).then(|| PathBuf::from(first))
+}
+
+/// `VTEE_REQUIRE_TOOLS=1` (or a comma-separated list such as `less,vim`) turns a missing program
+/// from a printed skip into a failure, so CI can't go green by running nothing.
+fn tool_required(tool: &str) -> bool {
+    match std::env::var("VTEE_REQUIRE_TOOLS") {
+        Ok(v) => v == "1" || v.split(',').any(|t| t.trim() == tool),
+        Err(_) => false,
+    }
 }
 
 fn sample_text_file() -> PathBuf {
@@ -434,6 +477,7 @@ fn more_pages_a_file_into_the_snapshot() {
 #[test]
 fn ms_edit_draws_its_menu_bar_on_the_alternate_screen() {
     let Some(edit) = find_exe("edit.exe") else {
+        assert!(!tool_required("edit"), "edit.exe is required (VTEE_REQUIRE_TOOLS) but not installed");
         eprintln!("skipped: edit.exe not installed");
         return;
     };
@@ -448,6 +492,10 @@ fn ms_edit_draws_its_menu_bar_on_the_alternate_screen() {
 #[test]
 fn git_for_windows_vim_and_less_render_and_use_the_alternate_screen() {
     let (Some(vim), Some(less)) = (find_exe("vim.exe"), find_exe("less.exe")) else {
+        assert!(
+            !tool_required("vim") && !tool_required("less"),
+            "vim.exe and less.exe are required (VTEE_REQUIRE_TOOLS) but not found on PATH"
+        );
         eprintln!("skipped: Git for Windows vim/less not found");
         return;
     };

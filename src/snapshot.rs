@@ -271,3 +271,151 @@ mod tests {
         assert_eq!(convert_color(AnsiColor::Named(NamedColor::Background)), Color::Default);
     }
 }
+
+#[cfg(test)]
+mod emulator_tests {
+    use super::*;
+    use crate::Size;
+    use alacritty_terminal::term::Config;
+    use vte::ansi::Processor;
+
+    fn snap(bytes: &[u8], cols: usize, rows: usize) -> Snapshot {
+        let listener = ObserverListener::new();
+        let mut term = Term::new(Config::default(), &Size { cols, rows }, listener.clone());
+        Processor::<vte::ansi::StdSyncHandler>::new().advance(&mut term, bytes);
+        build(&term, bytes.len() as u64, listener.current_title())
+    }
+
+    fn row_text(s: &Snapshot, row: usize) -> String {
+        s.lines[row].trim_end().to_string()
+    }
+
+    #[test]
+    fn text_attributes_reach_the_cells() {
+        let s =
+            snap(b"\x1b[1mB\x1b[0m\x1b[2mD\x1b[0m\x1b[3mI\x1b[0m\x1b[4mU\x1b[0m\x1b[7mR\x1b[0m\x1b[9mS\x1b[0mP", 20, 3);
+        let c = &s.cells[0];
+        assert!(c[0].bold && !c[0].dim && !c[0].italic);
+        assert!(c[1].dim && !c[1].bold);
+        assert!(c[2].italic);
+        assert!(c[3].underline);
+        assert!(c[4].reverse);
+        assert!(c[5].strike);
+        let plain = &c[6];
+        assert!(!plain.bold && !plain.dim && !plain.italic && !plain.underline && !plain.reverse && !plain.strike);
+        assert_eq!(row_text(&s, 0), "BDIURSP");
+    }
+
+    #[test]
+    fn colors_survive_in_all_three_forms() {
+        let s = snap(b"\x1b[31mA\x1b[0m\x1b[38;5;200mB\x1b[0m\x1b[48;2;1;2;3mC\x1b[0m\x1b[94mD", 20, 3);
+        let c = &s.cells[0];
+        assert_eq!(c[0].fg, Color::Indexed(1));
+        assert_eq!(c[1].fg, Color::Indexed(200));
+        assert_eq!(c[2].bg, Color::Rgb(1, 2, 3));
+        assert_eq!(c[3].fg, Color::Indexed(12), "bright blue is palette index 12");
+        assert_eq!(c[0].bg, Color::Default);
+    }
+
+    #[test]
+    fn osc_title_and_hyperlinks_are_reported() {
+        let s = snap(b"\x1b]0;my title\x07\x1b]8;;http://example.com\x07link\x1b]8;;\x07 after", 30, 3);
+        assert_eq!(s.title.as_deref(), Some("my title"));
+        assert_eq!(s.cells[0][0].hyperlink.as_deref(), Some("http://example.com"));
+        assert_eq!(s.cells[0][3].hyperlink.as_deref(), Some("http://example.com"));
+        assert_eq!(s.cells[0][5].hyperlink, None);
+        assert_eq!(snap(b"plain", 10, 2).title, None);
+    }
+
+    #[test]
+    fn input_modes_and_the_alternate_screen_are_reported_and_cleared() {
+        let on = snap(b"\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b=\x1b[?1049h", 20, 4);
+        for mode in ["?1000", "?1006", "?2004", "?1", "DECKPAM"] {
+            assert!(on.modes.iter().any(|m| m == mode), "{mode} missing from {:?}", on.modes);
+        }
+        assert!(on.alt_screen);
+        let off =
+            snap(b"\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b=\x1b[?1049h\x1b[?1049l\x1b[?1000l\x1b[?2004l", 20, 4);
+        assert!(!off.alt_screen);
+        assert!(!off.modes.iter().any(|m| m == "?1000" || m == "?2004"), "{:?}", off.modes);
+        assert!(off.modes.iter().any(|m| m == "?1006"), "?1006 was never turned off");
+    }
+
+    #[test]
+    fn cursor_position_visibility_and_shape() {
+        let s = snap(b"ab\r\ncd\x1b[4 q", 10, 3);
+        assert_eq!((s.cursor.row, s.cursor.col), (1, 2));
+        assert_eq!(s.cursor.shape, CursorShape::Underline);
+        assert!(!s.cursor.hidden);
+        assert_eq!(snap(b"\x1b[6 q", 10, 3).cursor.shape, CursorShape::Bar);
+        assert_eq!(snap(b"\x1b[2 q", 10, 3).cursor.shape, CursorShape::Block);
+        assert!(snap(b"\x1b[?25l", 10, 3).cursor.hidden);
+    }
+
+    #[test]
+    fn lines_that_scroll_off_are_kept_as_scrollback_oldest_first() {
+        let s = snap(b"one\r\ntwo\r\nthree\r\nfour\r\nfive", 10, 3);
+        let scrolled: Vec<_> = s.scrollback.iter().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(scrolled, ["one", "two"]);
+        assert_eq!(row_text(&s, 0), "three");
+        assert_eq!(row_text(&s, 2), "five");
+    }
+
+    #[test]
+    fn wide_and_combining_characters_occupy_the_right_cells() {
+        let s = snap("你好X".as_bytes(), 10, 2);
+        assert_eq!(row_text(&s, 0), "你好X");
+        let c = &s.cells[0];
+        assert_eq!((c[0].ch.as_str(), c[1].ch.as_str(), c[2].ch.as_str(), c[3].ch.as_str()), ("你", "", "好", ""));
+        assert_eq!(c[4].ch, "X");
+        let combined = snap("e\u{301}x".as_bytes(), 10, 2);
+        assert_eq!(combined.cells[0][0].ch, "e\u{301}");
+        assert_eq!(combined.cells[0][1].ch, "x");
+    }
+
+    /// Replaying a snapshot's redraw into a fresh emulator must give back the same screen, which
+    /// is what an attaching client's terminal does with it. Hyperlinks and underline styles are
+    /// not part of the redraw, so they are excluded from the comparison.
+    fn assert_round_trips(bytes: &[u8], cols: usize, rows: usize) {
+        let before = snap(bytes, cols, rows);
+        let after = snap(&redraw_sequence(&before), cols, rows);
+        assert_eq!(after.lines, before.lines, "text changed");
+        assert_eq!(
+            (after.cursor.row, after.cursor.col, after.cursor.hidden),
+            (before.cursor.row, before.cursor.col, before.cursor.hidden)
+        );
+        assert_eq!(after.alt_screen, before.alt_screen);
+        let strip = |s: &Snapshot| -> Vec<Vec<Cell>> {
+            s.cells.iter().map(|r| r.iter().cloned().map(|c| Cell { hyperlink: None, ..c }).collect()).collect()
+        };
+        assert_eq!(strip(&after), strip(&before), "cell attributes changed");
+    }
+
+    #[test]
+    fn redraw_reproduces_plain_text_and_the_cursor() {
+        assert_round_trips(b"hello\r\nworld\x1b[2;3H", 20, 4);
+        assert_round_trips(b"line\x1b[?25l", 20, 4);
+    }
+
+    #[test]
+    fn redraw_reproduces_colors_and_attributes() {
+        assert_round_trips(
+            b"\x1b[1;31mred bold\x1b[0m \x1b[4;42munder on green\x1b[0m\r\n\x1b[38;2;10;20;30;48;5;99mrgb\x1b[7m rev",
+            40,
+            4,
+        );
+        assert_round_trips(b"\x1b[2mdim\x1b[0m \x1b[3mitalic\x1b[0m \x1b[9mstrike", 40, 3);
+    }
+
+    #[test]
+    fn redraw_reproduces_wide_characters_and_the_alternate_screen() {
+        assert_round_trips("你好 world 世界".as_bytes(), 30, 3);
+        assert_round_trips(b"main screen\x1b[?1049h\x1b[2J\x1b[5;5Halt screen text", 30, 8);
+    }
+
+    #[test]
+    fn redraw_of_a_full_width_screen_does_not_scroll() {
+        let wide: Vec<u8> = (0..4).flat_map(|_| b"0123456789".iter().copied()).collect();
+        assert_round_trips(&wide, 10, 4);
+    }
+}

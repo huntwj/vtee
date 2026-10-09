@@ -446,12 +446,22 @@ fn scratch_file(contents: &str) -> PathBuf {
     path
 }
 
+/// `VTEE_REQUIRE_TOOLS=1` (or a comma-separated list such as `less,vim`) turns a missing program
+/// from a printed skip into a failure, so CI can't go green by running nothing.
+fn tool_required(tool: &str) -> bool {
+    match std::env::var("VTEE_REQUIRE_TOOLS") {
+        Ok(v) => v == "1" || v.split(',').any(|t| t.trim() == tool),
+        Err(_) => false,
+    }
+}
+
 fn numbered_lines() -> String {
     (1..=200).map(|i| format!("line{i}\n")).collect()
 }
 
 fn fullscreen_roundtrip(binary: &str, command: &str, quit_keys: &str) {
     if !on_path(binary) {
+        assert!(!tool_required(binary), "{binary} is required (VTEE_REQUIRE_TOOLS) but not installed");
         eprintln!("skipping: {binary} is not installed");
         return;
     }
@@ -617,11 +627,12 @@ fn garbage_and_malformed_json_never_take_the_session_down() {
                 Err(_) => break,
             }
         }
-        // A connection closed by an oversized line is acceptable; a dead session is not.
+        // Every payload line is far under the line cap, so the connection must survive the
+        // garbage and still answer; a second connection must work too.
+        assert!(got_snapshot, "round {round}: the abused connection stopped answering");
         let mut fresh = session.nd();
         let snap = fresh.snapshot();
         assert!(snap["cols"].as_u64().unwrap() >= 1, "round {round}: bad snapshot {snap}");
-        let _ = got_snapshot;
     }
     let mut nd = session.nd();
     nd.send(&json!({"cmd": "resize", "cols": 80, "rows": 24}));

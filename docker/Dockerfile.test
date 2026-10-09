@@ -1,0 +1,9 @@
+# Linux test image: rust:slim plus what the integration tests drive. Without less/vim/python3 the
+# corresponding tests print "skipping" and pass; set VTEE_REQUIRE_TOOLS=1 to make that a failure.
+#   docker build -f docker/Dockerfile.test -t vtee-test .
+#   docker run --rm -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target vtee-test cargo test
+FROM rust:slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends less vim-tiny procps python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add clippy rustfmt
