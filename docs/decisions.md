@@ -505,3 +505,25 @@ built and checked against what it would cost, not just how it looked on paper.
 - **Input merging**: substantially decided and built 2026-10-07 (exclusive handoff, both `HumanPriority`
   settings - `roadmap.md`/`architecture.md`). Still open: free-for-all and mutually-exclusive-with-a-human as
   unbuilt modes of the same enum, and which mode/`HumanPriority` is the default when none is requested.
+
+## 2026-10-08: adversarial review of the attach work - three real bugs found and fixed
+
+Three parallel adversarial reviews of the named-session/attach code, each finding verified by running it, not by
+reading:
+
+- **`--name` path injection (critical).** `session_paths` joined the name straight onto the session directory, so
+  `--name ../../../tmp/evil` escaped the hardened directory. Fixed inside `session_paths` (one plain path component
+  required), so `attach`/`ls`/`kill` are covered too.
+- **`kill` trusted the pidfile (high).** A stale pidfile pointing at a reused PID would `SIGTERM` an unrelated
+  process. `kill` now signals only after `session_is_live` confirms the socket answers.
+- **A stalled TTY client wedged the session (high).** `forward_output` did a blocking `write_all` to every sink under
+  the lock that also guards `snapshot()`; one client that stopped reading froze all other clients and snapshots.
+  Each sink now has a bounded queue and its own writer thread; the broadcast only `try_send`s and drops a sink that
+  falls behind. The regression test hangs without the fix (checked by reverting it). A second symptom showed up
+  only under load: a flooding child re-took the unfair std mutex before `snapshot()` could, so `forward_output` now
+  yields after each chunk.
+- Smaller: the usage line showed `[COMMAND]... [COMMAND]` (the program argument is now `PROGRAM`), and a malformed
+  config file was silently ignored (now warns on stderr).
+
+Not an issue per the reviews: subcommand/flag collisions, `--script` conflicts, redraw/broadcast atomicity, attach
+client cleanup, concurrent disconnects.

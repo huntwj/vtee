@@ -186,7 +186,7 @@ struct Cli {
     // referencing a `#[command(subcommand)]` field that way ("does not exist" as a plain
     // argument/group id). Enforced manually in `main()` instead, for exactly the one case left
     // once a subcommand or `--connect` has already returned early.
-    #[arg(trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true, value_name = "PROGRAM")]
     command: Vec<String>,
 }
 
@@ -293,7 +293,13 @@ fn main() -> ExitCode {
         } else if cli.no_attach_if_exists {
             false
         } else {
-            confy::load::<VteeConfig>("vtee", None).map(|c| c.attach_if_exists).unwrap_or(false)
+            match confy::load::<VteeConfig>("vtee", None) {
+                Ok(c) => c.attach_if_exists,
+                Err(e) => {
+                    eprintln!("vtee: ignoring unreadable config file: {e}");
+                    false
+                }
+            }
         };
 
         match vtee::session_is_live(&name) {
