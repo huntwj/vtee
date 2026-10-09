@@ -20,7 +20,13 @@ pub enum Color {
 
 fn convert_color(c: AnsiColor) -> Color {
     match c {
-        AnsiColor::Named(_) => Color::Default,
+        AnsiColor::Named(n) => match n as usize {
+            i @ 0..=15 => Color::Indexed(i as u8),
+            // Dim* variants (DimBlack..DimWhite); the dim attribute itself is carried by `Flags`.
+            i @ 259..=266 => Color::Indexed((i - 259) as u8),
+            // Foreground/Background/Cursor and their bright/dim forms are "the terminal default".
+            _ => Color::Default,
+        },
         AnsiColor::Indexed(i) => Color::Indexed(i),
         AnsiColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
     }
@@ -100,9 +106,13 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
         for c in 0..cols {
             let cell = &grid[Point::new(line, Column(c))];
             let mut ch = String::new();
-            ch.push(cell.c);
-            if let Some(zw) = cell.zerowidth() {
-                ch.extend(zw);
+            // The second half of a wide char is padding the first half already covers; keeping
+            // it as ' ' would shift every later column in the text and in `redraw_sequence`.
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ch.push(cell.c);
+                if let Some(zw) = cell.zerowidth() {
+                    ch.extend(zw);
+                }
             }
             text.push_str(&ch);
             let f = cell.flags;
@@ -243,7 +253,26 @@ fn build_scrollback(term: &Term<ObserverListener>) -> Vec<String> {
         .rev()
         .map(|i| {
             let line = Line(-(i as i32));
-            (0..cols).map(|c| grid[Point::new(line, Column(c))].c).collect::<String>()
+            (0..cols)
+                .map(|c| &grid[Point::new(line, Column(c))])
+                .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+                .map(|cell| cell.c)
+                .collect::<String>()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vte::ansi::NamedColor;
+
+    #[test]
+    fn named_colors_map_to_palette_indices() {
+        assert_eq!(convert_color(AnsiColor::Named(NamedColor::Red)), Color::Indexed(1));
+        assert_eq!(convert_color(AnsiColor::Named(NamedColor::BrightWhite)), Color::Indexed(15));
+        assert_eq!(convert_color(AnsiColor::Named(NamedColor::DimRed)), Color::Indexed(1));
+        assert_eq!(convert_color(AnsiColor::Named(NamedColor::Foreground)), Color::Default);
+        assert_eq!(convert_color(AnsiColor::Named(NamedColor::Background)), Color::Default);
+    }
 }

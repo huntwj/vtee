@@ -17,7 +17,7 @@ pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot, redraw_sequence};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,10 +87,56 @@ impl Dimensions for Size {
 /// would leave a real window where a chunk lands in neither the snapshot nor the live feed (or
 /// in both). One lock serializing "update state and broadcast this chunk" against "snapshot
 /// current state and register for future chunks" closes that window by construction.
+///
+/// Each entry is a bounded channel, not the sink itself: confirmed by an adversarial review that
+/// writing straight to the sink here - blocking `write_all` under this very lock - lets one
+/// stalled TTY client (a backgrounded terminal, a slow reader, a hostile one that just never
+/// reads) wedge the lock indefinitely, which stalls every other sink, `snapshot()`, and
+/// eventually the pty itself. A dedicated writer thread per sink owns the actual blocking
+/// `write_all`; this lock only ever does a bounded, non-blocking `try_send` (`forward_output`),
+/// so a sink that falls behind gets dropped instead of blocking everyone else.
 struct TapState {
     term: Term<ObserverListener>,
     bytes_seen: u64,
-    tty_sinks: Vec<(u64, Box<dyn Write + Send>)>,
+    tty_sinks: Vec<(u64, SyncSender<Vec<u8>>)>,
+}
+
+/// Bytes, not chunk count: at the 8KiB read-buffer size `forward_output` uses, this bounds a
+/// single stalled sink to ~2MiB of buffered output before it's dropped rather than let it block
+/// everything else.
+const TTY_SINK_QUEUE_CAPACITY: usize = 256;
+
+const MAX_TERMINAL_DIMENSION: u16 = 1000;
+
+/// One NDJSON command line; a client that never sends a newline would otherwise grow the
+/// holder's memory without bound.
+#[cfg(unix)]
+const MAX_COMMAND_LINE_BYTES: u64 = 1024 * 1024;
+
+/// Per listener. Each connection costs at least one thread.
+#[cfg(unix)]
+const MAX_CONNECTIONS: usize = 64;
+
+/// Decrements the live-connection count when its handler thread ends, panic or not.
+#[cfg(unix)]
+struct ConnectionSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(unix)]
+impl ConnectionSlot {
+    fn try_acquire(live: &Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
+        if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            live.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(ConnectionSlot(live.clone()))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Paired with the `Mutex` so `wait_for_text` can block efficiently instead of polling:
@@ -290,6 +336,16 @@ impl Tap {
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        // The emulator allocates cols x rows cells, so an unbounded remote resize can OOM the
+        // whole session.
+        if cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "terminal size {cols}x{rows} exceeds the {MAX_TERMINAL_DIMENSION}x{MAX_TERMINAL_DIMENSION} limit"
+                ),
+            ));
+        }
         self.master
             .lock()
             .unwrap()
@@ -336,20 +392,33 @@ impl Tap {
         self.shared.state.lock().unwrap().bytes_seen
     }
 
-    /// Writes a redraw of the current screen to `sink` and registers it to receive every chunk
-    /// from now on, both under the one lock that also serializes `forward_output`'s own
-    /// "apply this chunk, then broadcast it" step (`TapState::tty_sinks`'s doc comment) - so
-    /// there is no window where a live chunk could be broadcast before, or interleaved with,
-    /// the redraw that's supposed to precede it. This atomicity, not just the redraw itself, is
-    /// what makes attaching mid-session show the current screen correctly rather than a
-    /// scrambled one.
-    fn attach_tty_sink(&self, id: u64, mut sink: Box<dyn Write + Send>) -> io::Result<()> {
-        let mut state = self.shared.state.lock().unwrap();
-        let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
-        sink.write_all(&snapshot::redraw_sequence(&snap))?;
-        sink.flush()?;
-        state.tty_sinks.push((id, sink));
-        Ok(())
+    /// Queues a redraw of the current screen and registers the sink to receive every chunk from
+    /// now on, both under the one lock that also serializes `forward_output`'s own "apply this
+    /// chunk, then broadcast it" step (`TapState::tty_sinks`'s doc comment) - so there is no
+    /// window where a live chunk could be enqueued before, or interleaved with, the redraw
+    /// that's supposed to precede it. The redraw is the first item placed in a fresh, empty
+    /// channel, so it's always first out regardless of when the dedicated writer thread below
+    /// gets scheduled.
+    ///
+    /// The actual blocking `write_all` happens on a dedicated thread, not under `self.shared`'s
+    /// lock - see `TapState::tty_sinks`'s doc comment for why that split exists.
+    fn attach_tty_sink(&self, id: u64, sink: Box<dyn Write + Send>) {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(TTY_SINK_QUEUE_CAPACITY);
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
+            // The channel was just created with spare capacity, so this can't actually be full.
+            let _ = tx.try_send(snapshot::redraw_sequence(&snap));
+            state.tty_sinks.push((id, tx));
+        }
+        thread::spawn(move || {
+            let mut sink = sink;
+            for chunk in rx {
+                if sink.write_all(&chunk).is_err() || sink.flush().is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     fn detach_tty_sink(&self, id: u64) {
@@ -499,11 +568,16 @@ impl Tap {
 
         let _ = std::fs::remove_file(path);
         let listener = std::os::unix::net::UnixListener::bind(path)?;
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                let Some(slot) = ConnectionSlot::try_acquire(&live) else { continue };
                 let tap = tap.clone();
-                thread::spawn(move || serve_connection(&tap, stream, opts));
+                thread::spawn(move || {
+                    let _slot = slot;
+                    serve_connection(&tap, stream, opts)
+                });
             }
         });
         Ok(())
@@ -527,11 +601,16 @@ impl Tap {
     pub fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::Result<()> {
         let _ = std::fs::remove_file(path);
         let listener = std::os::unix::net::UnixListener::bind(path)?;
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                let Some(slot) = ConnectionSlot::try_acquire(&live) else { continue };
                 let tap = tap.clone();
-                thread::spawn(move || serve_tty_connection(&tap, stream, policy));
+                thread::spawn(move || {
+                    let _slot = slot;
+                    serve_tty_connection(&tap, stream, policy)
+                });
             }
         });
         Ok(())
@@ -617,8 +696,26 @@ pub struct SessionPaths {
     pub pidfile: PathBuf,
 }
 
+/// Confirmed, not assumed, by an adversarial review: without this check, `--name
+/// '../../../tmp/evil'` (or an absolute path, or bare `.`/`..`) escaped `default_session_dir()`
+/// entirely - `PathBuf::join` doesn't confine a value containing `/` to the directory it's
+/// joined onto. A name must decompose into exactly one plain path component: no separators, no
+/// `.`/`..`, nothing absolute. This is the actual security boundary for every caller
+/// (`session_paths` is the one place a name becomes a filesystem path), not just the CLI's own
+/// `--name` flag - fixing it here covers `attach`/`ls`/`kill` too, not only spawning.
+fn valid_session_name(name: &str) -> bool {
+    use std::path::Component;
+    !name.is_empty() && matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [Component::Normal(_)])
+}
+
 #[cfg(unix)]
 pub fn session_paths(name: &str) -> io::Result<SessionPaths> {
+    if !valid_session_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} isn't a valid session name - no \"/\", no \".\"/\"..\", not empty"),
+        ));
+    }
     let dir = default_session_dir()?;
     Ok(SessionPaths {
         sock: dir.join(format!("{name}.sock")),
@@ -711,10 +808,21 @@ fn serve_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, opts: Ser
     let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
     ::log::debug!("connection {id}: accepted");
     let Ok(reader_stream) = stream.try_clone() else { return };
-    let reader = io::BufReader::new(reader_stream);
+    let mut reader = io::BufReader::new(reader_stream);
     let mut writer = stream;
-    for line in io::BufRead::lines(reader) {
-        let Ok(line) = line else { break };
+    let mut raw_line = Vec::new();
+    loop {
+        raw_line.clear();
+        let read = io::BufRead::read_until(&mut (&mut reader).take(MAX_COMMAND_LINE_BYTES + 1), b'\n', &mut raw_line);
+        match read {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if raw_line.len() as u64 > MAX_COMMAND_LINE_BYTES && !raw_line.ends_with(b"\n") {
+            ::log::debug!("connection {id}: command line over {MAX_COMMAND_LINE_BYTES} bytes, closing");
+            break;
+        }
+        let line = String::from_utf8_lossy(&raw_line);
         if line.trim().is_empty() {
             continue;
         }
@@ -777,10 +885,9 @@ fn serve_tty_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, polic
     ::log::debug!("tty connection {id}: accepted");
     let Ok(reader_stream) = stream.try_clone() else { return };
     // `stream` itself becomes the registered sink - see `attach_tty_sink`'s doc comment for
-    // why the redraw and every later broadcast go through this *same* handle, under one lock.
-    if tap.attach_tty_sink(id, Box::new(stream)).is_err() {
-        return;
-    }
+    // why the redraw and every later broadcast go through this *same* handle, via its own
+    // dedicated writer thread.
+    tap.attach_tty_sink(id, Box::new(stream));
 
     let mut reader = reader_stream;
     let mut buf = [0u8; 4096];
@@ -840,13 +947,19 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
             state.bytes_seen += n as u64;
             // Broadcast to every attached TTY client (`Tap::serve_tty`), under the same lock
             // that just applied this chunk to `term` - see `TapState::tty_sinks`'s doc comment
-            // for why that atomicity matters. A sink that errors (the client disconnected) is
-            // dropped here rather than left to accumulate; `serve_tty_connection` also removes
-            // its own entry on the way out, so this is a belt-and-suspenders cleanup for a
-            // write that fails before that connection's own thread notices.
-            state.tty_sinks.retain_mut(|(_, sink)| sink.write_all(chunk).is_ok() && sink.flush().is_ok());
+            // for why that atomicity matters. `try_send` only enqueues for that sink's own
+            // writer thread - never blocks here - so a sink whose queue is full (its reader has
+            // stalled) is dropped instead of wedging this lock, and with it every other sink,
+            // `snapshot()`, and the pty itself. A sink whose writer thread already exited
+            // (the client disconnected) reports the channel as disconnected and is dropped the
+            // same way; `serve_tty_connection` also removes its own entry on the way out, so
+            // this is a belt-and-suspenders cleanup for the same case.
+            state.tty_sinks.retain(|(_, tx)| tx.try_send(chunk.to_vec()).is_ok());
             shared.changed.notify_all();
         }
+        // std's Mutex isn't fair: under a flooding child this loop re-takes the lock before a
+        // waiting `snapshot()` caller ever gets scheduled, starving it.
+        thread::yield_now();
     }
 }
 

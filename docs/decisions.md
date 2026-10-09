@@ -505,3 +505,43 @@ built and checked against what it would cost, not just how it looked on paper.
 - **Input merging**: substantially decided and built 2026-10-07 (exclusive handoff, both `HumanPriority`
   settings - `roadmap.md`/`architecture.md`). Still open: free-for-all and mutually-exclusive-with-a-human as
   unbuilt modes of the same enum, and which mode/`HumanPriority` is the default when none is requested.
+
+## 2026-10-08: adversarial review of the attach work - three real bugs found and fixed
+
+Three parallel adversarial reviews of the named-session/attach code, each finding verified by running it, not by
+reading:
+
+- **`--name` path injection (critical).** `session_paths` joined the name straight onto the session directory, so
+  `--name ../../../tmp/evil` escaped the hardened directory. Fixed inside `session_paths` (one plain path component
+  required), so `attach`/`ls`/`kill` are covered too.
+- **`kill` trusted the pidfile (high).** A stale pidfile pointing at a reused PID would `SIGTERM` an unrelated
+  process. `kill` now signals only after `session_is_live` confirms the socket answers.
+- **A stalled TTY client wedged the session (high).** `forward_output` did a blocking `write_all` to every sink under
+  the lock that also guards `snapshot()`; one client that stopped reading froze all other clients and snapshots.
+  Each sink now has a bounded queue and its own writer thread; the broadcast only `try_send`s and drops a sink that
+  falls behind. The regression test hangs without the fix (checked by reverting it). A second symptom showed up
+  only under load: a flooding child re-took the unfair std mutex before `snapshot()` could, so `forward_output` now
+  yields after each chunk.
+- Smaller: the usage line showed `[COMMAND]... [COMMAND]` (the program argument is now `PROGRAM`), and a malformed
+  config file was silently ignored (now warns on stderr).
+
+Not an issue per the reviews: subcommand/flag collisions, `--script` conflicts, redraw/broadcast atomicity, attach
+client cleanup, concurrent disconnects.
+
+## 2026-10-08: Fable hardening pass - four reproduced bugs fixed
+
+Each was reproduced in Docker before fixing:
+
+- **Unbounded `resize` killed the session.** A 43-byte `resize 65535x65535` over the (default-on) socket made the
+  emulator allocate ~hundreds of GB. `Tap::resize` now rejects anything over 1000 per side.
+- **Unbounded NDJSON line buffering.** A client that never sent `\n` grew the holder's memory without limit
+  (6.7 MB to 211 MB in the repro). Lines are now capped at 1 MiB; the connection is dropped on overflow.
+- **Named ANSI colours were dropped.** SGR 30-37/40-47/90-97 came out as `Default` in every snapshot and redraw. They
+  now map to palette indices 0-15 (the `Dim*` variants to 0-7).
+- **Wide characters corrupted text and redraw.** The spacer half of a wide char was read as `' '`, so `你好X`
+  became `你 好 X` and every later column shifted. Spacer cells are now empty (grid dimensions unchanged).
+- Also: a cap of 64 concurrent connections per listener (each costs a thread), and `kill` ignores pidfile values of
+  0, 1 or negative so `kill(0)`/`kill(-1)` can never hit a process group.
+
+Checked and fine per the review: session-dir TOCTOU, `valid_session_name`, client-to-client escape injection (only
+child output is broadcast), the unaligned termios read.

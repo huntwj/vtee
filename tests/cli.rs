@@ -119,6 +119,7 @@ fn script_conflicts_with_every_interactive_only_flag() {
 #[cfg(unix)]
 mod unix_behavior {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
 
     /// `--env` reaches the child via `portable_pty::CommandBuilder::env`, on top of the
     /// inherited environment rather than in place of it - `printenv` exits on its own once it's
@@ -427,6 +428,182 @@ mod unix_behavior {
         std::thread::sleep(Duration::from_millis(300));
 
         assert!(!dir.exists(), "{} should not exist with --no-listen, even with --name", dir.display());
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Regression test for a real, adversarially-found bug: `--name` reached `session_paths`
+    /// (`src/lib.rs`) with no validation at all, so a value containing `/` or `..` escaped the
+    /// hardened per-uid directory entirely (`PathBuf::join` doesn't confine it) - defeating the
+    /// whole point of that directory's own permission checks. Covers path traversal, an
+    /// absolute path, and bare `.`/`..`/empty, all of which must be rejected before anything is
+    /// created on disk.
+    #[test]
+    fn invalid_session_names_are_rejected_before_touching_disk() {
+        let tmpdir = isolated_tmpdir();
+        for bad_name in ["../../../tmp/evil", "/tmp/absolute-evil", "..", ".", ""] {
+            vtee_in(&tmpdir)
+                .args(["--name", bad_name, "--no-stdin", "--", "cat"])
+                .timeout(Duration::from_secs(5))
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("valid session name"));
+        }
+        // Confirms the rejection happens *before* any file is created anywhere reachable -
+        // not just that vtee prints an error while still leaving something behind.
+        assert!(!std::path::Path::new("/tmp/evil.sock").exists());
+        assert!(!std::path::Path::new("/tmp/absolute-evil.sock").exists());
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Regression test for a real, adversarially-found bug: `kill` used to trust a pidfile's
+    /// raw contents unconditionally and send `SIGTERM` with no liveness check at all - a stale
+    /// pidfile (left behind by a `SIGKILL`'d holder, a documented gap) pointing at a since-
+    /// reused PID would signal whatever unrelated process now holds it. Verifies `kill` checks
+    /// liveness first (via the same `session_is_live` `ls` already uses) rather than blindly
+    /// trusting the file: a stale pidfile just gets cleaned up, signaling nothing.
+    #[test]
+    fn kill_does_not_blindly_trust_a_stale_pidfile() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        // Must actually be 0700, not just present - `default_session_dir` rejects anything
+        // looser as "unsafe permissions" before `kill` even gets to the pidfile.
+        std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir).unwrap();
+        // `1` is guaranteed to exist (every running system has it) and guaranteed *not* to be
+        // an vtee holder we spawned - the exact shape of "a stale pidfile pointing at a
+        // since-reused PID" this test exists to catch, without needing a real PID-reuse race.
+        std::fs::write(dir.join("faketest.pid"), "1").unwrap();
+
+        vtee_in(&tmpdir).args(["kill", "faketest"]).timeout(Duration::from_secs(5)).assert().success();
+
+        // The stale pidfile is cleaned up either way; the only thing this test actually proves
+        // is that `kill` didn't crash or hang trying to signal PID 1 - a real signal to PID 1
+        // would be either a permission error (as this test's own non-root process) or, if run
+        // as root, exactly the kind of damage this fix exists to prevent. Checking the file is
+        // gone confirms the normal cleanup path still ran.
+        assert!(!dir.join("faketest.pid").exists());
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Regression test for two review findings on the NDJSON socket, which is on by default: an
+    /// unbounded `resize` used to allocate a 65535x65535 grid and kill the session, and a line
+    /// with no newline used to be buffered without limit.
+    #[test]
+    fn hostile_ndjson_input_is_rejected_and_the_session_survives() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "hostile", &["--writable"]);
+        std::thread::sleep(Duration::from_millis(500));
+        let sock = dir.join("hostile.sock");
+
+        let mut s = UnixStream::connect(&sock).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(b"{\"cmd\":\"resize\",\"cols\":65535,\"rows\":65535}\n").unwrap();
+        let mut buf = [0u8; 512];
+        let n = s.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("exceeds"), "expected a size error");
+
+        let mut s = UnixStream::connect(&sock).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let junk = vec![b'x'; 64 * 1024];
+        for _ in 0..40 {
+            if s.write_all(&junk).is_err() {
+                break;
+            }
+        }
+        let mut sink = Vec::new();
+        let _ = s.read_to_end(&mut sink);
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":80"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Regression test for a real, adversarially-found bug: broadcasting to raw-TTY sinks used
+    /// to do a blocking `write_all` to *every* sink under the one lock that also gates `term`,
+    /// `bytes_seen`, and `snapshot()` - so one attach client that simply stops reading (a
+    /// backgrounded terminal, a slow reader, a hostile one) could wedge every other sink and
+    /// every snapshot indefinitely, demonstrated by the review with a client that never read and
+    /// a concurrent `snapshot()` call that then never returned. Reproduces that shape directly:
+    /// client A attaches and never reads, client B attaches and keeps reading, and a `snapshot`
+    /// query over the unrelated NDJSON socket must still return promptly - all three go through
+    /// `TapState`'s one lock, so if the fix regressed back to blocking under it, this hangs past
+    /// its `.timeout()` instead of passing.
+    #[test]
+    fn a_stalled_tty_client_does_not_block_other_clients_or_snapshots() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        // `yes` floods output fast and indefinitely - exactly the kind of volume needed to fill
+        // a stalled sink's bounded queue quickly rather than waiting on a slow producer.
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
+            .env("TMPDIR", &tmpdir)
+            .arg("--headless")
+            .args(["--name", "holblock"])
+            .args(["--", "yes"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let tty_sock = dir.join("holblock.tty.sock");
+        let ndjson_sock = dir.join("holblock.sock");
+        assert!(tty_sock.exists(), "expected {} to exist", tty_sock.display());
+
+        // Client A: attaches, then never reads again - the stalled sink.
+        let _client_a = UnixStream::connect(&tty_sock).unwrap();
+
+        // Client B: attaches and keeps reading/discarding, tracking how many bytes arrive.
+        let client_b = UnixStream::connect(&tty_sock).unwrap();
+        let bytes_received = Arc::new(AtomicU64::new(0));
+        {
+            let bytes_received = bytes_received.clone();
+            let mut client_b = client_b;
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match client_b.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+
+        // Give `yes`'s output time to fill client A's queue past capacity and get it dropped,
+        // while client B keeps draining its own.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(bytes_received.load(Ordering::Relaxed) > 0, "client B received nothing while client A was stalled");
+
+        // The actual regression check: a `snapshot` query on the completely separate NDJSON
+        // socket must still return within the timeout. Before the fix, this call shared the
+        // same lock `forward_output`'s blocking broadcast held hostage, and never returned.
+        vtee()
+            .arg("--connect")
+            .arg(&ndjson_sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\""));
 
         let _ = child.kill();
         let _ = child.wait();

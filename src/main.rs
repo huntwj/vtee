@@ -186,7 +186,7 @@ struct Cli {
     // referencing a `#[command(subcommand)]` field that way ("does not exist" as a plain
     // argument/group id). Enforced manually in `main()` instead, for exactly the one case left
     // once a subcommand or `--connect` has already returned early.
-    #[arg(trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true, value_name = "PROGRAM")]
     command: Vec<String>,
 }
 
@@ -293,7 +293,13 @@ fn main() -> ExitCode {
         } else if cli.no_attach_if_exists {
             false
         } else {
-            confy::load::<VteeConfig>("vtee", None).map(|c| c.attach_if_exists).unwrap_or(false)
+            match confy::load::<VteeConfig>("vtee", None) {
+                Ok(c) => c.attach_if_exists,
+                Err(e) => {
+                    eprintln!("vtee: ignoring unreadable config file: {e}");
+                    false
+                }
+            }
         };
 
         match vtee::session_is_live(&name) {
@@ -904,15 +910,36 @@ fn run_kill(name: &str) -> ExitCode {
             return exit_code(exitcode::OSERR);
         }
     };
-    let pid: i32 = match std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse().ok()) {
-        Some(pid) => pid,
-        None => {
-            print_error(&format!("no session named {name:?} (no pidfile)"));
+    // Confirmed, not assumed, by an adversarial review: this used to trust the pidfile's raw
+    // contents unconditionally, with no liveness check at all - a stale pidfile (left behind
+    // by a `SIGKILL`'d holder, `docs/decisions.md`'s documented gap) pointing at a since-reused
+    // PID would have `SIGTERM`'d some unrelated process, immediately, every time, not just in
+    // some narrow race window. Verifying the socket actually answers first - the same check
+    // `ls` already uses - closes that: a stale name just gets its leftover files cleaned up,
+    // with nothing signaled, since there is nothing real to signal.
+    let pidfile_existed = paths.pidfile.exists();
+    match vtee::session_is_live(name) {
+        Ok(true) => {
+            if let Some(pid) = std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok())
+                && pid > 1
+            {
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+            }
+        }
+        // A stale leftover (a pidfile existed but nothing answers) just gets cleaned up below,
+        // nothing to signal - but a name with *no* pidfile at all never had a session, which
+        // stays a real error rather than a silent no-op success.
+        Ok(false) if pidfile_existed => {}
+        Ok(false) => {
+            print_error(&format!("no session named {name:?}"));
             return exit_code(exitcode::NOHOST);
         }
-    };
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
+        Err(e) => {
+            print_error(&format!("couldn't check session {name:?}: {e}"));
+            return exit_code(exitcode::OSERR);
+        }
     }
     let _ = std::fs::remove_file(&paths.sock);
     let _ = std::fs::remove_file(&paths.tty_sock);
