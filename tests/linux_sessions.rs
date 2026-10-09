@@ -1,0 +1,707 @@
+//! End-to-end session tests: DSR answering with and without an attach client, several clients
+//! of both protocols at once, real full-screen programs, holder lifecycle, and stress/fuzz.
+//! Each test runs its own holder in a private `TMPDIR`; everything polls with a deadline.
+
+#![cfg(unix)]
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+const BIN: &str = env!("CARGO_BIN_EXE_vtee");
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn unique(prefix: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
+}
+
+fn connect_retry(path: &Path) -> UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match UnixStream::connect(path) {
+            Ok(s) => return s,
+            Err(e) => {
+                assert!(Instant::now() < deadline, "couldn't connect to {}: {e}", path.display());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+fn spawn_holder(tmp: &Path, name: &str, flags: &[&str], program: &[&str]) -> Child {
+    Command::new(BIN)
+        .env("TMPDIR", tmp)
+        .arg("--headless")
+        .args(["--name", name])
+        .args(flags)
+        .arg("--")
+        .args(program)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+fn vtee_in(tmp: &Path) -> Command {
+    let mut cmd = Command::new(BIN);
+    cmd.env("TMPDIR", tmp);
+    cmd
+}
+
+fn terminate(child: &mut Child) {
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A running holder in its own `TMPDIR`; torn down on drop.
+struct Session {
+    tmp: PathBuf,
+    name: String,
+    child: Child,
+    owns_tmp: bool,
+}
+
+impl Session {
+    fn start(name: &str, flags: &[&str], program: &[&str]) -> Session {
+        let tmp = unique("vtee-linux");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let child = spawn_holder(&tmp, name, flags, program);
+        let s = Session { tmp, name: name.to_string(), child, owns_tmp: true };
+        s.wait_ready();
+        s
+    }
+
+    /// A second holder in an existing `TMPDIR` (the first one's directory is not removed by it).
+    fn start_in(tmp: &Path, name: &str, flags: &[&str], program: &[&str]) -> Session {
+        let child = spawn_holder(tmp, name, flags, program);
+        let s = Session { tmp: tmp.to_path_buf(), name: name.to_string(), child, owns_tmp: false };
+        s.wait_ready();
+        s
+    }
+
+    fn dir(&self) -> PathBuf {
+        let uid = unsafe { libc::getuid() };
+        self.tmp.join(format!("vtee-{uid}"))
+    }
+
+    fn sock(&self) -> PathBuf {
+        self.dir().join(format!("{}.sock", self.name))
+    }
+
+    fn tty_sock(&self) -> PathBuf {
+        self.dir().join(format!("{}.tty.sock", self.name))
+    }
+
+    /// Ready once the NDJSON socket answers and the TTY socket file exists. The TTY socket is
+    /// deliberately not connected to: that would register (then drop) a sink.
+    fn wait_ready(&self) {
+        let sock = self.sock();
+        let tty = self.tty_sock();
+        wait_until("session sockets", || tty.exists() && sock.exists() && UnixStream::connect(&sock).is_ok());
+    }
+
+    fn nd(&self) -> Nd {
+        Nd::connect(&self.sock())
+    }
+
+    fn tty(&self) -> Tty {
+        Tty::connect(&self.tty_sock())
+    }
+
+    fn files_exist(&self) -> bool {
+        ["sock", "tty.sock", "pid"].iter().any(|ext| self.dir().join(format!("{}.{ext}", self.name)).exists())
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        terminate(&mut self.child);
+        if self.owns_tmp {
+            let _ = std::fs::remove_dir_all(&self.tmp);
+        }
+    }
+}
+
+/// An NDJSON client.
+struct Nd {
+    w: UnixStream,
+    r: BufReader<UnixStream>,
+}
+
+impl Nd {
+    fn connect(path: &Path) -> Nd {
+        let s = connect_retry(path);
+        s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        Nd { r: BufReader::new(s.try_clone().unwrap()), w: s }
+    }
+
+    fn send(&mut self, v: &Value) {
+        writeln!(self.w, "{v}").unwrap();
+    }
+
+    fn recv(&mut self) -> Value {
+        let mut line = String::new();
+        self.r.read_line(&mut line).expect("no reply from the session");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("bad reply {line:?}: {e}"))
+    }
+
+    fn request(&mut self, v: Value) -> Value {
+        self.send(&v);
+        self.recv()
+    }
+
+    fn snapshot(&mut self) -> Value {
+        self.request(json!({"cmd": "snapshot"}))["snapshot"].clone()
+    }
+
+    fn wait_for(&mut self, text: &str, timeout_ms: u64) -> bool {
+        self.request(json!({"cmd": "wait_for", "text": text, "timeout_ms": timeout_ms}))["matched"]
+            .as_bool()
+            .expect("wait_for reply")
+    }
+
+    /// `send`/`resize` get no reply on success; a snapshot request is the barrier.
+    fn send_text(&mut self, text: &str) {
+        self.send(&json!({"cmd": "send", "text": text}));
+        self.snapshot();
+    }
+}
+
+fn screen(snapshot: &Value) -> String {
+    snapshot["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect::<Vec<_>>().join("\n")
+}
+
+/// A raw-TTY client collecting everything the session sends it.
+struct Tty {
+    w: UnixStream,
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Tty {
+    fn connect(path: &Path) -> Tty {
+        let s = connect_retry(path);
+        let mut reader = s.try_clone().unwrap();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = buf.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+        let tty = Tty { w: s, buf };
+        // The redraw is queued at registration, so seeing it means this client is a live sink.
+        tty.wait_raw(b"\x1b[2J");
+        tty
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.w.write_all(bytes).unwrap();
+    }
+
+    fn raw(&self) -> Vec<u8> {
+        self.buf.lock().unwrap().clone()
+    }
+
+    fn text(&self) -> String {
+        strip_ansi(&self.raw())
+    }
+
+    fn wait_raw(&self, needle: &[u8]) {
+        wait_until(&format!("{:?} in the raw TTY stream", String::from_utf8_lossy(needle)), || {
+            self.raw().windows(needle.len()).any(|w| w == needle)
+        });
+    }
+
+    fn wait_text(&self, needle: &str) {
+        wait_until(&format!("{needle:?} on a TTY client"), || self.text().contains(needle));
+    }
+}
+
+fn strip_ansi(raw: &[u8]) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] != 0x1b {
+            out.push(raw[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        match raw.get(i) {
+            Some(b'[') => {
+                i += 1;
+                while i < raw.len() && !(0x40..=0x7e).contains(&raw[i]) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            Some(b']') => {
+                i += 1;
+                while i < raw.len() && raw[i] != 0x07 && raw[i] != 0x1b {
+                    i += 1;
+                }
+                i += if raw.get(i) == Some(&0x1b) { 2 } else { 1 };
+            }
+            Some(b'(') | Some(b')') => i += 2,
+            Some(_) => i += 1,
+            None => {}
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn procs_running(argv0: &str, arg: &str) -> Vec<u32> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else { return found };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else { continue };
+        let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+        let first = args.first().map(|a| String::from_utf8_lossy(a).into_owned()).unwrap_or_default();
+        if first.rsplit('/').next() == Some(argv0) && args.contains(&arg.as_bytes()) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+fn on_path(binary: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(binary).exists()))
+}
+
+/// Tiny deterministic PRNG so fuzz failures reproduce from the seed.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    fn bytes(&mut self, n: usize) -> Vec<u8> {
+        (0..n).map(|_| self.next() as u8).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 1. Who answers the child's cursor-position query
+
+const DSR_REPORT: &str =
+    "printf 'got=%d esc=%d body=<%s>\\n' \"${#x}\" \"$(printf %s \"$x\" | tr -cd '\\033' | wc -c)\" \"${x:1}\"";
+
+fn dsr_child(wait_for_go: bool) -> String {
+    let go = if wait_for_go { "IFS= read -rsn1 go; " } else { "" };
+    format!("stty -echo -icanon; {go}printf '\\033[6n'; sleep 1; IFS= read -rs -t 1 -n 100 x; {DSR_REPORT}; sleep 120")
+}
+
+fn parse_dsr(screen: &str) -> (usize, usize, String) {
+    let start = screen.rfind("got=").unwrap_or_else(|| panic!("no got= line in {screen:?}"));
+    let line = screen[start..].lines().next().unwrap().trim_end();
+    let got = line["got=".len()..line.find(" esc=").unwrap()].parse().unwrap();
+    let esc = line[line.find(" esc=").unwrap() + 5..line.find(" body=<").unwrap()].parse().unwrap();
+    let body = line[line.find("body=<").unwrap() + 6..line.rfind('>').unwrap()].to_string();
+    (got, esc, body)
+}
+
+#[test]
+fn without_an_attach_client_the_tap_answers_the_query_exactly_once() {
+    let session = Session::start("dsr-solo", &[], &["bash", "-c", &dsr_child(false)]);
+    let mut nd = session.nd();
+    assert!(nd.wait_for("body=<", 15_000), "child never reported what it read");
+    let (got, esc, body) = parse_dsr(&screen(&nd.snapshot()));
+    assert_eq!(esc, 1, "expected exactly one reply (one ESC), got {esc}");
+    assert_eq!(got, body.len() + 1);
+    assert!(body.starts_with('[') && body.ends_with('R'), "not a cursor position report: {body:?}");
+}
+
+#[test]
+fn with_an_attach_client_only_the_clients_reply_reaches_the_child() {
+    let session = Session::start("dsr-attached", &[], &["bash", "-c", &dsr_child(true)]);
+    let mut tty = session.tty();
+    tty.write(b"g");
+    tty.wait_raw(b"\x1b[6n");
+    tty.write(b"\x1b[7;9R");
+    tty.wait_text("body=<");
+    let (got, esc, body) = parse_dsr(&tty.text());
+    assert_eq!(esc, 1, "the tap must not add its own reply while a client is attached");
+    assert_eq!(body, "[7;9R", "child should see only the client's reply");
+    assert_eq!(got, 6);
+}
+
+// ---------------------------------------------------------------------------------------------
+// 2. Several clients at once
+
+const ECHO_CHILD: &str = "stty -echo; echo ready; while IFS= read -r l; do echo \"out:$l\"; done";
+
+#[test]
+fn many_clients_of_both_kinds_see_the_same_output_and_survive_each_others_disconnects() {
+    let session = Session::start("multi", &["--writable"], &["bash", "-c", ECHO_CHILD]);
+    let mut ttys: Vec<Tty> = (0..3).map(|_| session.tty()).collect();
+    let mut nds: Vec<Nd> = (0..2).map(|_| session.nd()).collect();
+    assert!(nds[0].wait_for("ready", 15_000));
+
+    nds[0].send_text("hello\r");
+    for tty in &ttys {
+        tty.wait_text("out:hello");
+    }
+    for nd in &mut nds {
+        assert!(nd.wait_for("out:hello", 15_000));
+    }
+
+    // Attaching mid-session: the redraw shows what's already on screen, then live output follows.
+    let late = session.tty();
+    late.wait_text("out:hello");
+    nds[1].send_text("world\r");
+    late.wait_text("out:world");
+    for tty in &ttys {
+        tty.wait_text("out:world");
+    }
+
+    // One TTY client and one NDJSON client vanish abruptly (the latter mid-wait).
+    drop(ttys.remove(1));
+    nds[1].send(&json!({"cmd": "wait_for", "text": "never-appears", "timeout_ms": 60_000}));
+    drop(nds.remove(1));
+
+    // Typing through a TTY client works and everyone else still gets the output.
+    ttys[0].write(b"again\r");
+    for tty in ttys.iter().chain(std::iter::once(&late)) {
+        tty.wait_text("out:again");
+    }
+    assert!(nds[0].wait_for("out:again", 15_000));
+}
+
+#[test]
+fn exclusive_write_hands_off_between_clients_and_releases_on_disconnect() {
+    let session = Session::start("excl", &["--writable=exclusive"], &["bash", "-c", ECHO_CHILD]);
+    let mut a = session.nd();
+    let mut b = session.nd();
+    assert!(a.wait_for("ready", 15_000));
+
+    let denied = a.request(json!({"cmd": "send", "text": "x"}));
+    assert_eq!(denied["cmd"], "error");
+    assert!(denied["message"].as_str().unwrap().contains("not held"), "{denied}");
+
+    assert_eq!(a.request(json!({"cmd": "acquire_write"}))["acquired"], true);
+    assert_eq!(b.request(json!({"cmd": "acquire_write"}))["acquired"], false);
+    assert_eq!(b.request(json!({"cmd": "send", "text": "x"}))["cmd"], "error");
+
+    a.send_text("one\r");
+    assert!(a.wait_for("out:one", 15_000));
+
+    assert_eq!(a.request(json!({"cmd": "release_write"}))["acquired"], false);
+    assert_eq!(b.request(json!({"cmd": "acquire_write"}))["acquired"], true);
+    b.send_text("two\r");
+    assert!(b.wait_for("out:two", 15_000));
+
+    // B disconnecting releases the lock without an explicit release.
+    drop(b);
+    wait_until("the lock to be released on disconnect", || {
+        a.request(json!({"cmd": "acquire_write"}))["acquired"] == true
+    });
+    a.send_text("three\r");
+    assert!(a.wait_for("out:three", 15_000));
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3. Real full-screen programs
+
+fn scratch_file(contents: &str) -> PathBuf {
+    let path = unique("vtee-fixture");
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+fn numbered_lines() -> String {
+    (1..=200).map(|i| format!("line{i}\n")).collect()
+}
+
+fn fullscreen_roundtrip(binary: &str, command: &str, quit_keys: &str) {
+    if !on_path(binary) {
+        eprintln!("skipping: {binary} is not installed");
+        return;
+    }
+    let file = scratch_file(&numbered_lines());
+    let script = format!("{command} {}; echo finished-marker; sleep 120", file.display());
+    let session = Session::start(
+        &format!("prog-{binary}"),
+        &["--writable", "--env", "TERM=xterm-256color", "--cols", "80", "--rows", "24"],
+        &["bash", "-c", &script],
+    );
+    let mut nd = session.nd();
+    assert!(nd.wait_for("line1", 15_000), "{binary} never drew the file");
+    let snap = nd.snapshot();
+    assert_eq!(snap["alt_screen"], true, "{binary} should be on the alternate screen");
+    assert!(!screen(&snap).contains("line40"), "24 rows can't show line40:\n{}", screen(&snap));
+
+    nd.send(&json!({"cmd": "resize", "cols": 100, "rows": 30}));
+    wait_until("the program to repaint at the new size", || {
+        let snap = nd.snapshot();
+        snap["cols"] == 100 && snap["rows"] == 30 && screen(&snap).contains("line29")
+    });
+
+    nd.send_text(quit_keys);
+    assert!(nd.wait_for("finished-marker", 15_000), "{binary} didn't exit");
+    assert_eq!(nd.snapshot()["alt_screen"], false, "alt screen should end with {binary}");
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn less_uses_the_alt_screen_repaints_on_resize_and_leaves_cleanly() {
+    fullscreen_roundtrip("less", "less", "q");
+}
+
+#[test]
+fn vim_uses_the_alt_screen_repaints_on_resize_and_leaves_cleanly() {
+    let binary = if on_path("vim.tiny") { "vim.tiny" } else { "vim" };
+    fullscreen_roundtrip(binary, &format!("{binary} -u NONE -N"), ":q\r");
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4. Lifecycle
+
+#[test]
+fn kill_removes_the_files_and_ends_both_holder_and_child() {
+    let mut session = Session::start("lifecycle", &[], &["sleep", "31337"]);
+    assert_eq!(procs_running("sleep", "31337").len(), 1);
+
+    let status = vtee_in(&session.tmp).args(["kill", "lifecycle"]).status().unwrap();
+    assert!(status.success());
+
+    wait_until("holder to exit", || matches!(session.child.try_wait(), Ok(Some(_))));
+    wait_until("child to end (no orphan)", || procs_running("sleep", "31337").is_empty());
+    assert!(!session.files_exist(), "session files should be gone");
+}
+
+#[test]
+fn a_sigkilled_holder_leaves_a_stale_entry_that_ls_flags_and_kill_cleans() {
+    let mut session = Session::start("stale", &[], &["cat"]);
+    session.child.kill().unwrap();
+    session.child.wait().unwrap();
+    assert!(session.files_exist(), "SIGKILL can't clean up, files should remain");
+
+    let ls = vtee_in(&session.tmp).arg("ls").output().unwrap();
+    let out = String::from_utf8_lossy(&ls.stdout);
+    assert!(out.contains("stale") && out.contains("stale\t"), "ls output: {out:?}");
+
+    assert!(vtee_in(&session.tmp).args(["kill", "stale"]).status().unwrap().success());
+    assert!(!session.files_exist());
+    let ls = vtee_in(&session.tmp).arg("ls").output().unwrap();
+    assert!(String::from_utf8_lossy(&ls.stdout).contains("no sessions"));
+}
+
+#[test]
+fn sigterm_to_the_holder_ends_the_child_and_the_name_can_be_reused() {
+    let mut first = Session::start("reuse", &[], &["sleep", "31338"]);
+    assert_eq!(procs_running("sleep", "31338").len(), 1);
+
+    unsafe {
+        libc::kill(first.child.id() as i32, libc::SIGTERM);
+    }
+    wait_until("holder to exit", || matches!(first.child.try_wait(), Ok(Some(_))));
+    wait_until("child to end", || procs_running("sleep", "31338").is_empty());
+
+    // Whatever files SIGTERM left behind, they must not block a fresh session with the same name.
+    let second = Session::start_in(&first.tmp, "reuse", &[], &["cat"]);
+    let mut nd = second.nd();
+    nd.snapshot();
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5. Stress and fuzz
+
+#[test]
+fn attach_detach_churn_during_a_flood_keeps_the_session_responsive() {
+    let mut session = Session::start("flood", &[], &["yes"]);
+    let mut nd = session.nd();
+    let mut last_offset = 0;
+    for i in 0..50 {
+        let tty = session.tty();
+        if i % 2 == 0 {
+            // Read a little, then vanish with data still in flight.
+            wait_until("flood bytes", || tty.raw().len() > 2000);
+        }
+        drop(tty);
+        let offset = nd.snapshot()["byte_offset"].as_u64().unwrap();
+        assert!(offset >= last_offset);
+        last_offset = offset;
+    }
+    assert!(session.child.try_wait().unwrap().is_none(), "holder died during churn");
+    assert!(nd.snapshot()["byte_offset"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn garbage_and_malformed_json_never_take_the_session_down() {
+    let session = Session::start("fuzz-json", &["--writable"], &["cat"]);
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let nasty: Vec<Vec<u8>> = vec![
+        b"{".to_vec(),
+        b"{\"cmd\":".to_vec(),
+        b"{\"cmd\":\"nonsense\"}".to_vec(),
+        b"null".to_vec(),
+        b"[]".to_vec(),
+        b"\"\\u0000\"".to_vec(),
+        b"{\"cmd\":\"send\"}".to_vec(),
+        b"{\"cmd\":\"resize\",\"cols\":-1,\"rows\":0}".to_vec(),
+        b"{\"cmd\":\"resize\",\"cols\":0,\"rows\":0}".to_vec(),
+        b"{\"cmd\":\"resize\",\"cols\":1,\"rows\":1}".to_vec(),
+        b"{\"cmd\":\"resize\",\"cols\":2,\"rows\":2}".to_vec(),
+        b"{\"cmd\":\"resize\",\"cols\":300,\"rows\":100}".to_vec(),
+        b"{\"cmd\":\"send_key\",\"key\":\"Ctrl-\"}".to_vec(),
+        b"{\"cmd\":\"send_key\",\"key\":\"\\u00e9\\u00e9\"}".to_vec(),
+        b"{\"cmd\":\"send\",\"text\":\"\\ud800\"}".to_vec(),
+        b"{\"cmd\":\"wait_for\",\"text\":\"\",\"timeout_ms\":1}".to_vec(),
+        b"[".repeat(10_000),
+        b"{\"a\":".repeat(5_000),
+        vec![0xff, 0xfe, 0xfd, b'\n'],
+    ];
+    for round in 0..30 {
+        let mut stream = connect_retry(&session.sock());
+        stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let mut payload = Vec::new();
+        for _ in 0..8 {
+            if rng.below(2) == 0 {
+                let n = rng.below(2048) as usize;
+                payload.extend(rng.bytes(n));
+            } else {
+                payload.extend(&nasty[rng.below(nasty.len() as u64) as usize]);
+            }
+            payload.push(b'\n');
+        }
+        let _ = stream.write_all(&payload);
+        let _ = stream.write_all(b"{\"cmd\":\"snapshot\"}\n");
+        // Same connection must still work: skip error lines until the snapshot reply arrives.
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got_snapshot = false;
+        while Instant::now() < deadline && !got_snapshot {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => got_snapshot = line.contains("\"cmd\":\"snapshot\""),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => break,
+            }
+        }
+        // A connection closed by an oversized line is acceptable; a dead session is not.
+        let mut fresh = session.nd();
+        let snap = fresh.snapshot();
+        assert!(snap["cols"].as_u64().unwrap() >= 1, "round {round}: bad snapshot {snap}");
+        let _ = got_snapshot;
+    }
+    let mut nd = session.nd();
+    nd.send(&json!({"cmd": "resize", "cols": 80, "rows": 24}));
+    assert_eq!(nd.snapshot()["cols"], 80);
+}
+
+fn escape_soup(seed: u64, len: usize) -> Vec<u8> {
+    let mut rng = Rng(seed);
+    let fixed: [&[u8]; 16] = [
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[r",
+        b"\x1b[1;1r",
+        b"\x1b[999999999;999999999H",
+        b"\x1b[2147483647C",
+        b"\x1b[999999999@",
+        b"\x1b[999999999L",
+        b"\x1b#8",
+        b"\x1b[8;99999;99999t",
+        "\u{4f60}\u{597d}\u{1f600}e\u{301}".as_bytes(),
+        b"\x1b[6n\x1b[c\x1b[>c\x1b[?2026$p",
+        b"\x1b]0;title\x07",
+        b"\x1b]8;;http://example.com\x1b\\link\x1b]8;;\x1b\\",
+        b"\x1bP1$r\x1b\\",
+        b"\x1b[38;2;999;999;999m\x1b[48;5;999m\x1b[999m",
+    ];
+    let mut out = Vec::with_capacity(len + 64);
+    while out.len() < len {
+        match rng.below(6) {
+            0 => out.extend(fixed[rng.below(fixed.len() as u64) as usize]),
+            1 => {
+                out.extend(b"\x1b[");
+                for _ in 0..rng.below(5) {
+                    out.extend(rng.below(100_000).to_string().as_bytes());
+                    out.push(if rng.below(2) == 0 { b';' } else { b':' });
+                }
+                out.push(0x40 + rng.below(0x3f) as u8);
+            }
+            2 => {
+                out.extend(b"\x1b]");
+                let n = rng.below(40) as usize;
+                out.extend(rng.bytes(n));
+                if rng.below(2) == 0 {
+                    out.push(0x07);
+                }
+            }
+            3 => {
+                out.push(0x1b);
+                out.push(rng.next() as u8);
+            }
+            4 => {
+                let n = rng.below(64) as usize;
+                out.extend(rng.bytes(n));
+            }
+            _ => out.extend(b"plain text "),
+        }
+    }
+    out
+}
+
+#[test]
+fn random_escape_sequence_soup_never_takes_the_session_down() {
+    for seed in [1u64, 0xDEAD_BEEF, 0x1234_5678_9ABC_DEF0] {
+        let soup = escape_soup(seed, 30_000);
+        let file = unique("vtee-soup");
+        std::fs::write(&file, &soup).unwrap();
+        let script = format!("cat {}; printf '\\033c\\033[?1049lsoup-done\\n'; sleep 120", file.display());
+        let mut session = Session::start(&format!("soup-{seed:x}"), &["--writable"], &["bash", "-c", &script]);
+        let mut nd = session.nd();
+        assert!(nd.wait_for("soup-done", 20_000), "seed {seed:#x}: session never got past the soup");
+        let snap = nd.snapshot();
+        assert!(snap["byte_offset"].as_u64().unwrap() >= soup.len() as u64, "seed {seed:#x}");
+        assert!(session.child.try_wait().unwrap().is_none(), "seed {seed:#x}: holder died");
+
+        // Still fully functional afterwards.
+        nd.send(&json!({"cmd": "resize", "cols": 90, "rows": 30}));
+        let snap = nd.snapshot();
+        assert_eq!((snap["cols"].as_u64(), snap["rows"].as_u64()), (Some(90), Some(30)), "seed {seed:#x}");
+        let tty = session.tty();
+        drop(tty);
+        let _ = std::fs::remove_file(file);
+    }
+}
