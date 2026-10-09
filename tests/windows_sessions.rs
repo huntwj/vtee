@@ -100,7 +100,7 @@ impl Env {
 
     fn cmd(&self) -> Command {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("vtee"));
-        cmd.env("LOCALAPPDATA", &self.local);
+        cmd.env("LOCALAPPDATA", &self.local).env("APPDATA", self.local.join("roaming"));
         cmd
     }
 

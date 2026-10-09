@@ -8,8 +8,20 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// Where `confy` would look for a config file, redirected so a developer's or runner's real
+/// `attach_if_exists = true` can never change what a test asserts.
+fn config_env(root: &std::path::Path) -> [(&'static str, std::path::PathBuf); 3] {
+    [("XDG_CONFIG_HOME", root.join("config")), ("HOME", root.join("home")), ("APPDATA", root.join("appdata"))]
+}
+
 fn vtee() -> Command {
-    Command::cargo_bin("vtee").unwrap()
+    static EMPTY_CONFIG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let root = EMPTY_CONFIG.get_or_init(|| std::env::temp_dir().join(format!("vtee-cli-cfg-{}", std::process::id())));
+    let mut cmd = Command::cargo_bin("vtee").unwrap();
+    for (key, value) in config_env(root) {
+        cmd.env(key, value);
+    }
+    cmd
 }
 
 #[test]
@@ -218,6 +230,42 @@ mod unix_behavior {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
+    /// A child process that is killed and reaped when dropped, so a failed assertion can't leave
+    /// it running.
+    struct Proc(Option<std::process::Child>);
+
+    impl std::ops::Deref for Proc {
+        type Target = std::process::Child;
+        fn deref(&self) -> &Self::Target {
+            self.0.as_ref().expect("child already taken")
+        }
+    }
+
+    impl std::ops::DerefMut for Proc {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.0.as_mut().expect("child already taken")
+        }
+    }
+
+    impl Drop for Proc {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// `vtee` as a plain child process with `TMPDIR` and the config dirs inside `tmpdir`.
+    fn vtee_process(tmpdir: &std::path::Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"));
+        cmd.env("TMPDIR", tmpdir);
+        for (key, value) in config_env(tmpdir) {
+            cmd.env(key, value);
+        }
+        cmd
+    }
+
     /// A private `TMPDIR` per test, not the real default temp dir - `cargo test` runs these in
     /// parallel by default, and the production default-session-dir logic is keyed only by uid,
     /// so sharing the real temp dir across tests racing each other (create/remove/read at the
@@ -256,15 +304,8 @@ mod unix_behavior {
     /// Runs `vtee` headless (no tty needed) with `TMPDIR` pointed at an isolated directory -
     /// these tests assert on *side effects* (files created) while the process is still running,
     /// so it has to be killed rather than waited on to completion.
-    fn spawn_headless(tmpdir: &std::path::Path, extra_args: &[&str]) -> std::process::Child {
-        let bin = assert_cmd::cargo::cargo_bin("vtee");
-        std::process::Command::new(bin)
-            .env("TMPDIR", tmpdir)
-            .arg("--headless")
-            .args(extra_args)
-            .args(["--", "cat"])
-            .spawn()
-            .unwrap()
+    fn spawn_headless(tmpdir: &std::path::Path, extra_args: &[&str]) -> Proc {
+        Proc(Some(vtee_process(tmpdir).arg("--headless").args(extra_args).args(["--", "cat"]).spawn().unwrap()))
     }
 
     #[test]
@@ -334,21 +375,24 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
-    fn spawn_named(tmpdir: &std::path::Path, name: &str, extra_args: &[&str]) -> std::process::Child {
-        let bin = assert_cmd::cargo::cargo_bin("vtee");
-        std::process::Command::new(bin)
-            .env("TMPDIR", tmpdir)
-            .arg("--headless")
-            .args(["--name", name])
-            .args(extra_args)
-            .args(["--", "cat"])
-            .spawn()
-            .unwrap()
+    fn spawn_named(tmpdir: &std::path::Path, name: &str, extra_args: &[&str]) -> Proc {
+        Proc(Some(
+            vtee_process(tmpdir)
+                .arg("--headless")
+                .args(["--name", name])
+                .args(extra_args)
+                .args(["--", "cat"])
+                .spawn()
+                .unwrap(),
+        ))
     }
 
     fn vtee_in(tmpdir: &std::path::Path) -> Command {
         let mut cmd = vtee();
         cmd.env("TMPDIR", tmpdir);
+        for (key, value) in config_env(tmpdir) {
+            cmd.env(key, value);
+        }
         cmd
     }
 
@@ -385,26 +429,40 @@ mod unix_behavior {
         let mut first = spawn_named(&tmpdir, "attach-if-exists-test", &[]);
         wait_for_session(&tmpdir, "attach-if-exists-test");
 
-        let mut second = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
-            .env("TMPDIR", &tmpdir)
-            .args(["--name", "attach-if-exists-test", "--attach-if-exists", "--", "cat"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        // The attacher's connection isn't observable from outside, so allow time for it.
-        std::thread::sleep(Duration::from_millis(800));
+        let mut second = Proc(Some(
+            vtee_process(&tmpdir)
+                .args(["--name", "attach-if-exists-test", "--attach-if-exists", "--", "cat"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
 
-        use std::io::Write as _;
+        // Collect the attacher's stdout on a thread and poll it: the attach itself isn't visible
+        // from outside, but input written before it connects waits in the pipe and is relayed
+        // afterwards, so one write is enough.
+        use std::io::{Read as _, Write as _};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        {
+            let seen = seen.clone();
+            let mut stdout = second.stdout.take().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stdout.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            });
+        }
         let mut stdin = second.stdin.take().unwrap();
         stdin.write_all(b"from-attacher\r").unwrap();
         stdin.flush().unwrap();
-        std::thread::sleep(Duration::from_millis(800));
+        wait_until("the attached session's live echo", || {
+            String::from_utf8_lossy(&seen.lock().unwrap()).contains("from-attacher")
+        });
         drop(stdin);
-        let _ = second.kill();
-        let output = second.wait_with_output().unwrap();
-        let out = String::from_utf8_lossy(&output.stdout);
-        assert!(out.contains("from-attacher"), "expected the attached session's live echo in: {out:?}");
 
         let _ = first.kill();
         let _ = first.wait();
@@ -460,11 +518,12 @@ mod unix_behavior {
         // plain-interactive-mode test that doesn't attach a pty.
         let tmpdir = isolated_tmpdir();
         let dir = session_dir(&tmpdir);
-        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
-            .env("TMPDIR", &tmpdir)
-            .args(["--name", "should-not-appear", "--no-listen", "--no-stdin", "--", "cat"])
-            .spawn()
-            .unwrap();
+        let mut child = Proc(Some(
+            vtee_process(&tmpdir)
+                .args(["--name", "should-not-appear", "--no-listen", "--no-stdin", "--", "cat"])
+                .spawn()
+                .unwrap(),
+        ));
         // Absence can't be polled for; give startup time to (wrongly) create the directory.
         std::thread::sleep(Duration::from_millis(300));
 
@@ -512,19 +571,17 @@ mod unix_behavior {
         // Must actually be 0700, not just present - `default_session_dir` rejects anything
         // looser as "unsafe permissions" before `kill` even gets to the pidfile.
         std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir).unwrap();
-        // `1` is guaranteed to exist (every running system has it) and guaranteed *not* to be
-        // an vtee holder we spawned - the exact shape of "a stale pidfile pointing at a
-        // since-reused PID" this test exists to catch, without needing a real PID-reuse race.
-        std::fs::write(dir.join("faketest.pid"), "1").unwrap();
+        // A live, unrelated process stands in for "a since-reused PID": the pidfile names it, no
+        // session answers on the socket, and `kill` must leave it running.
+        let sentinel = Proc(Some(std::process::Command::new("sleep").arg("60").spawn().unwrap()));
+        std::fs::write(dir.join("faketest.pid"), sentinel.id().to_string()).unwrap();
 
         vtee_in(&tmpdir).args(["kill", "faketest"]).timeout(Duration::from_secs(5)).assert().success();
 
-        // The stale pidfile is cleaned up either way; the only thing this test actually proves
-        // is that `kill` didn't crash or hang trying to signal PID 1 - a real signal to PID 1
-        // would be either a permission error (as this test's own non-root process) or, if run
-        // as root, exactly the kind of damage this fix exists to prevent. Checking the file is
-        // gone confirms the normal cleanup path still ran.
-        assert!(!dir.join("faketest.pid").exists());
+        assert!(!dir.join("faketest.pid").exists(), "the stale pidfile should be cleaned up");
+        let mut sentinel = sentinel;
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(sentinel.try_wait().unwrap().is_none(), "kill signalled a process it had no session for");
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
@@ -594,13 +651,9 @@ mod unix_behavior {
         let dir = session_dir(&tmpdir);
         // `yes` floods output fast and indefinitely - exactly the kind of volume needed to fill
         // a stalled sink's bounded queue quickly rather than waiting on a slow producer.
-        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
-            .env("TMPDIR", &tmpdir)
-            .arg("--headless")
-            .args(["--name", "holblock"])
-            .args(["--", "yes"])
-            .spawn()
-            .unwrap();
+        let mut child = Proc(Some(
+            vtee_process(&tmpdir).arg("--headless").args(["--name", "holblock", "--", "yes"]).spawn().unwrap(),
+        ));
         wait_for_session(&tmpdir, "holblock");
 
         let tty_sock = dir.join("holblock.tty.sock");

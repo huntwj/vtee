@@ -407,6 +407,15 @@ fn find_exe(exe: &str) -> Option<PathBuf> {
     (out.status.success() && !first.is_empty()).then(|| PathBuf::from(first))
 }
 
+/// `VTEE_REQUIRE_TOOLS=1` (or a comma-separated list such as `less,vim`) turns a missing program
+/// from a printed skip into a failure, so CI can't go green by running nothing.
+fn tool_required(tool: &str) -> bool {
+    match std::env::var("VTEE_REQUIRE_TOOLS") {
+        Ok(v) => v == "1" || v.split(',').any(|t| t.trim() == tool),
+        Err(_) => false,
+    }
+}
+
 fn sample_text_file() -> PathBuf {
     let path = unique_path("sample", "txt");
     let body: String = (1..=60).map(|i| format!("sample-line-{i:02}\r\n")).collect();
@@ -434,6 +443,7 @@ fn more_pages_a_file_into_the_snapshot() {
 #[test]
 fn ms_edit_draws_its_menu_bar_on_the_alternate_screen() {
     let Some(edit) = find_exe("edit.exe") else {
+        assert!(!tool_required("edit"), "edit.exe is required (VTEE_REQUIRE_TOOLS) but not installed");
         eprintln!("skipped: edit.exe not installed");
         return;
     };
@@ -448,6 +458,10 @@ fn ms_edit_draws_its_menu_bar_on_the_alternate_screen() {
 #[test]
 fn git_for_windows_vim_and_less_render_and_use_the_alternate_screen() {
     let (Some(vim), Some(less)) = (find_exe("vim.exe"), find_exe("less.exe")) else {
+        assert!(
+            !tool_required("vim") && !tool_required("less"),
+            "vim.exe and less.exe are required (VTEE_REQUIRE_TOOLS) but not found on PATH"
+        );
         eprintln!("skipped: Git for Windows vim/less not found");
         return;
     };
