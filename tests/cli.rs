@@ -704,4 +704,299 @@ mod unix_behavior {
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
+
+    // ---- script mode: size, environment, raw log and replay ------------------------------------
+
+    fn script_file(dir: &std::path::Path, lines: &[&str]) -> PathBuf {
+        let path = dir.join("script.ndjson");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    fn result_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
+        String::from_utf8_lossy(stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    /// `--cols/--rows/--env` reach the child, `--log` writes an asciicast v2 file, and replaying
+    /// that file rebuilds the screen the script saw.
+    #[test]
+    fn script_mode_honours_size_and_env_and_writes_a_replayable_log() {
+        let dir = isolated_tmpdir();
+        let log = dir.join("session.cast");
+        let script =
+            script_file(&dir, &[r#"{"cmd":"wait_for","text":"done:xyz","timeout_ms":8000}"#, r#"{"cmd":"snapshot"}"#]);
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--cols", "91", "--rows", "33", "--env", "VTEE_T=xyz", "--log"])
+            .arg(&log)
+            .args(["--", "sh", "-c", "echo \"size:$(stty size)\"; echo done:$VTEE_T; sleep 30"])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        let results = result_lines(&out.stdout);
+        assert_eq!(results[0]["matched"], true, "{results:?}");
+        let live = &results[1]["snapshot"];
+        assert_eq!((live["cols"].as_u64(), live["rows"].as_u64()), (Some(91), Some(33)));
+        let text: Vec<String> =
+            live["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
+        assert!(text.iter().any(|l| l.contains("size:33 91")), "stty saw a different size: {text:?}");
+        assert!(text.iter().any(|l| l.contains("done:xyz")), "--env didn't reach the child: {text:?}");
+
+        let raw = std::fs::read_to_string(&log).unwrap();
+        let mut log_lines = raw.lines();
+        let header: serde_json::Value = serde_json::from_str(log_lines.next().unwrap()).unwrap();
+        assert_eq!(
+            (header["version"].as_u64(), header["width"].as_u64(), header["height"].as_u64()),
+            (Some(2), Some(91), Some(33))
+        );
+        let events: Vec<serde_json::Value> = log_lines.map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|e| e[1] == "o" && e[2].is_string() && e[0].is_number()), "{events:?}");
+
+        let replayed = vtee::replay(&log, 91, 33).unwrap();
+        assert_eq!(serde_json::to_value(&replayed.lines).unwrap(), live["lines"], "replay rebuilt a different screen");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_childs_exit_code_becomes_vtees_own() {
+        for code in [0, 1, 7, 200] {
+            vtee()
+                .args(["--no-listen", "--", "sh", "-c", &format!("exit {code}")])
+                .timeout(Duration::from_secs(10))
+                .assert()
+                .code(code);
+        }
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_spawned_exits_with_oserr() {
+        vtee()
+            .args(["--no-listen", "--", "/definitely/not/a/program"])
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .failure()
+            .code(exitcode::OSERR)
+            .stderr(predicate::str::contains("failed to spawn"));
+    }
+
+    #[test]
+    fn a_wait_for_that_times_out_reports_no_match_and_the_script_still_succeeds() {
+        let dir = isolated_tmpdir();
+        let script = script_file(&dir, &[r#"{"cmd":"wait_for","text":"never-appears","timeout_ms":300}"#]);
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--", "sleep", "5"])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(result_lines(&out.stdout)[0]["matched"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn send_key_and_wait_ms_drive_the_child_in_script_mode() {
+        let dir = isolated_tmpdir();
+        let script = script_file(
+            &dir,
+            &[
+                r#"{"cmd":"wait_for","text":"ready","timeout_ms":8000}"#,
+                r#"{"cmd":"send_key","key":"Up"}"#,
+                r#"{"cmd":"wait_ms","ms":50}"#,
+                r#"{"cmd":"wait_for","text":"1b 5b 41","timeout_ms":8000}"#,
+            ],
+        );
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--", "sh", "-c", "stty raw -echo; echo ready; dd bs=1 count=3 2>/dev/null | od -An -tx1; sleep 30"])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let results = result_lines(&out.stdout);
+        assert_eq!(results.len(), 2, "only the two wait_for commands print a result: {results:?}");
+        assert_eq!(results[1]["matched"], true, "the Up arrow never reached the child: {results:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn send_types_text_into_the_child_in_script_mode() {
+        let dir = isolated_tmpdir();
+        let script = script_file(
+            &dir,
+            &[
+                r#"{"cmd":"wait_for","text":"ready","timeout_ms":8000}"#,
+                r#"{"cmd":"send","text":"hello\n"}"#,
+                r#"{"cmd":"wait_for","text":"got:hello","timeout_ms":8000}"#,
+            ],
+        );
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--", "sh", "-c", "stty -echo; echo ready; IFS= read -r l; echo \"got:$l\"; sleep 30"])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(result_lines(&out.stdout)[1]["matched"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_key_name_in_a_script_is_a_data_error() {
+        let dir = isolated_tmpdir();
+        let script = script_file(&dir, &[r#"{"cmd":"send_key","key":"Banana"}"#]);
+        vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--", "sleep", "5"])
+            .timeout(Duration::from_secs(20))
+            .assert()
+            .failure()
+            .code(exitcode::DATAERR);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the config file -----------------------------------------------------------------------
+
+    /// confy writes the file on first load, so provoke a load (a duplicate name reaches it),
+    /// find where it went, and overwrite it. Returns the live first session.
+    fn session_with_config(tmpdir: &std::path::Path, name: &str, config: &str) -> Proc {
+        let first = spawn_named(tmpdir, name, &[]);
+        wait_for_session(tmpdir, name);
+        let _ = vtee_in(tmpdir).args(["--name", name, "--", "cat"]).timeout(Duration::from_secs(10)).output();
+        let mut found = Vec::new();
+        let mut stack = vec![tmpdir.join("config")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "toml") {
+                    found.push(path);
+                }
+            }
+        }
+        assert_eq!(found.len(), 1, "expected confy to have created one config file under {tmpdir:?}: {found:?}");
+        std::fs::write(&found[0], config).unwrap();
+        first
+    }
+
+    #[test]
+    fn the_config_file_can_make_attach_if_exists_the_default() {
+        use std::io::{Read as _, Write as _};
+        let tmpdir = isolated_tmpdir();
+        let _first = session_with_config(&tmpdir, "cfg-attach", "attach_if_exists = true\n");
+
+        let mut second = Proc(Some(
+            vtee_process(&tmpdir)
+                .args(["--name", "cfg-attach", "--", "cat"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        {
+            let seen = seen.clone();
+            let mut stdout = second.stdout.take().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stdout.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            });
+        }
+        let mut stdin = second.stdin.take().unwrap();
+        stdin.write_all(b"via-config\r").unwrap();
+        stdin.flush().unwrap();
+        wait_until("the config-driven attach to echo", || {
+            String::from_utf8_lossy(&seen.lock().unwrap()).contains("via-config")
+        });
+        drop(stdin);
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    #[test]
+    fn no_attach_if_exists_overrides_the_config_file() {
+        let tmpdir = isolated_tmpdir();
+        let _first = session_with_config(&tmpdir, "cfg-override", "attach_if_exists = true\n");
+        vtee_in(&tmpdir)
+            .args(["--name", "cfg-override", "--no-attach-if-exists", "--", "cat"])
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains("duplicate session: cfg-override"));
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    #[test]
+    fn a_malformed_config_file_warns_and_falls_back_to_rejecting_duplicates() {
+        let tmpdir = isolated_tmpdir();
+        let _first = session_with_config(&tmpdir, "cfg-bad", "attach_if_exists = \"not-a-bool [[[\n");
+        vtee_in(&tmpdir)
+            .args(["--name", "cfg-bad", "--", "cat"])
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains("unreadable config").and(predicate::str::contains("duplicate session")));
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    // ---- the terminal is restored when vtee is signalled -------------------------------------
+
+    fn python3_available() -> bool {
+        std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    fn tool_required(tool: &str) -> bool {
+        match std::env::var("VTEE_REQUIRE_TOOLS") {
+            Ok(v) => v == "1" || v.split(',').any(|t| t.trim() == tool),
+            Err(_) => false,
+        }
+    }
+
+    fn assert_terminal_restored_after(signal: &str) {
+        if !python3_available() {
+            assert!(!tool_required("python3"), "python3 is required (VTEE_REQUIRE_TOOLS) but not installed");
+            eprintln!("skipping: python3 is not installed");
+            return;
+        }
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/raw_mode_restore.py");
+        let out = std::process::Command::new("python3")
+            .arg("-I")
+            .arg(script)
+            .arg(assert_cmd::cargo::cargo_bin("vtee"))
+            .arg(signal)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("OK"),
+            "terminal not restored after SIG{signal}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Requirement 7: a user's shell is not left in raw mode when `vtee` is terminated.
+    #[test]
+    fn sigterm_restores_the_terminal() {
+        assert_terminal_restored_after("TERM");
+    }
+
+    /// `SIGKILL` runs no destructors, so only the watchdog process can restore the terminal.
+    #[test]
+    fn sigkill_restores_the_terminal_through_the_watchdog() {
+        assert_terminal_restored_after("KILL");
+    }
 }
