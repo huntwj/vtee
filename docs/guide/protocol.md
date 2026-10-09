@@ -176,8 +176,9 @@ A real reply from a 12 by 3 screen, with the cell lists shortened:
 (SGR mouse encoding), `?2004` (bracketed paste), `?1` (application cursor keys), `DECKPAM` (application keypad).
 Mouse and paste modes are reported, but there is no command to send mouse or paste input.
 
-On Windows, the mouse mode did not appear in `modes` in a test where a program turned it on, presumably because
-ConPTY handles it itself. Treat `modes` as less reliable there.
+On Windows, `?1000`, `?1006` and `?1` never appear in `modes`: ConPTY consumes those sequences and does not
+forward them, so the emulator never sees them. `?2004` does appear. See
+[Windows](windows.md#terminal-modes-that-conpty-hides) for the evidence.
 
 ## Errors
 

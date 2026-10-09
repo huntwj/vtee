@@ -553,6 +553,25 @@ fn script_mode_is_deterministic_across_twenty_runs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Under ConPTY the emulator only sees what ConPTY forwards. Alternate screen and cursor hiding get
+/// through. Mouse reporting (`?1000`, `?1006`) and application cursor keys (`?1`) do not: ConPTY
+/// consumes them (`docs/guide/windows.md`), so they are deliberately not asserted here either way.
+#[test]
+fn modes_that_conpty_forwards_reach_the_emulator() {
+    let _guard = serial();
+    let command = "[Console]::Out.Write([string][char]27 + '[?1049h' + [string][char]27 + '[?25l' + 'MODE-MARK'); \
+                   Start-Sleep -Seconds 3";
+    let run = run_script(
+        &[&wait_for_line("MODE-MARK", 20000), SNAPSHOT],
+        &[],
+        &["powershell", "-NoProfile", "-Command", command],
+    );
+    assert!(run.success && run.matched(0), "{} {:?}", run.stderr, run.results);
+    let snap = run.results.iter().rev().find_map(|r| r.get("snapshot")).expect("no snapshot");
+    assert_eq!(snap["alt_screen"], true, "alternate screen should reach the emulator: {snap}");
+    assert_eq!(snap["cursor"]["hidden"], true, "a hidden cursor should reach the emulator");
+}
+
 // ---- (5) paste and flood -------------------------------------------------------------------------
 
 /// Two lines pasted in one write arrive intact and in order.

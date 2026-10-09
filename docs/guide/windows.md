@@ -81,19 +81,36 @@ interactive session lets your real terminal answer (`vtee` puts your console in 
 program so the reply is not lost). With no terminal, in `--script` or `--headless` mode, `vtee` answers from its
 emulator. Without this, the program appeared to hang about half the time.
 
+## Terminal modes that ConPTY hides
+
+`vtee` can only report what ConPTY passes on. A program that turns on mouse reporting (`ESC[?1000h`, `?1006h`)
+or application cursor keys (`ESC[?1h`) does not show them in the snapshot's `modes` on Windows, because ConPTY
+consumes those sequences and never forwards them. The cause is ConPTY, not the emulator: the same bytes from a
+Linux program produce `["?1000","?1006","?2004","?1"]`, while under ConPTY on Windows 11 (build 26300) only
+`?2004` appeared. What does get through includes the alternate screen (`?1049`), cursor visibility (`?25`) and
+bracketed paste (`?2004`). Other private modes were not tested.
+
+The raw output log (`--log`) shows exactly what arrives, which is how this was confirmed: a program that wrote
+`?1000h`, `?1006h`, `?2004h`, `?1h` and `?25l` was recorded as `?2004h` and `?25l` only. Creating the
+pseudoconsole with `PSEUDOCONSOLE_PASSTHROUGH_MODE` made no difference on this machine. Sideloading a newer
+`conpty.dll`/`OpenConsole.exe` was not tried. The practical effect: do not use `modes` to detect mouse or
+application-cursor state on Windows. `send_key` picks the arrow-key form from the emulator's application-cursor
+state, which therefore always reads as off here; whether a program that insists on the application form still
+accepts it was not tested.
+
 ## Known gaps
 
 - **No terminal-restore watchdog.** On Linux a helper process restores the terminal mode if the holder is
   killed. On Windows nothing does; a shell normally resets the console at its next prompt.
 - **`attach` does not set the console's virtual-terminal flags.** Escape sequences and special keys may not
   behave correctly through `vtee attach` in every console host. This is untested.
-- **`kill` and process id reuse.** `kill` checks that the session answers before it terminates the holder, but
-  between that check and the termination the holder could exit and its id be reused. The window is small; no
-  further guard exists yet.
-- **Mouse modes.** A program that turned on mouse reporting did not show `?1000` in `modes` in a test; ConPTY
-  seems to handle it itself.
+- **`kill` and process id reuse.** `kill` checks that the session answers before it terminates the holder, and
+  refuses to terminate a process that was created after the session record was last written, since that process
+  cannot be the holder. A reused process id is therefore left alone; the check relies on file and process times.
+- **Mouse modes are not visible in snapshots.** See the section above.
 - **Windows must be 1803 or later**, for AF_UNIX sockets.
 - **Antivirus** products might interfere with socket files. No problem has been seen.
 - **The tests rely on tools that are not guaranteed to be installed**, such as Git for Windows' `vim` and `less`.
   See [testing](../development/testing.md).
-- **Windows is not exercised in continuous integration yet.** The workflow has not run on real runners.
+- **Continuous integration runs on `windows-latest`,** including the pty tests, and passed on its first run. It
+  covers the headless pty harness, not a human at a real console window.

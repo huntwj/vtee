@@ -688,3 +688,14 @@ seen the screen has already been counted); a failure to touch is ignored. The re
 mtime. This does not weaken the Windows PID-reuse guard in `kill`: the guard refuses a process created *after* the
 record's mtime, and a process that reuses the pid can only exist after the holder died, which is after its last
 touch.
+
+**Mouse reporting never shows in `modes` on Windows: ConPTY, not us.** The docs fork saw `?1000` missing from
+`modes` under ConPTY and it was unclear whether `vtee` dropped it. Measured: a PowerShell child under
+`--script --log` wrote `ESC[?1000h ESC[?1006h ESC[?2004h ESC[?1h ESC[?25l`; the raw log, which is exactly what
+reaches the emulator, held only `?2004h` and `?25l` (plus ConPTY's own `?9001` and `?1004`), so the other three
+never arrived. The same bytes printed by a Linux child give `["?1000","?1006","?2004","?1"]` in the snapshot, so
+the emulator and snapshot code are fine. Adding `PSEUDOCONSOLE_PASSTHROUGH_MODE` to the pseudoconsole flags did
+not change the log on this machine (Windows 11, build 26300), and was reverted. Not tried: a sideloaded
+`conpty.dll`/`OpenConsole.exe`, which is the likelier route if this ever matters. Accepted as a platform
+limitation and documented in `docs/guide/windows.md`; `tests/windows_behavior.rs` pins only what does get through
+(alternate screen, cursor visibility) so a Windows update that starts forwarding more cannot fail CI.
