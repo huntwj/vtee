@@ -672,3 +672,19 @@ means the sockets exist; `tests` use that as their readiness signal.
 record's pid has been reused and a different session has since bound the same custom path, `kill` would signal the
 reused pid (Windows is protected by its creation-time check). Checking the socket peer's credentials on Linux would
 close it; not done, since it needs a deliberately reused PID *and* a reused socket path.
+
+## 2026-10-09: pre-release polish of `attach` and `ls`
+
+**`attach` refuses to run without a terminal.** It replays the screen as escape codes, so into a pipe or file it
+only produced noise. It now exits 64 (`USAGE`) before looking for the session when stdin or stdout is not a
+terminal, and the message points scripts at `--connect`. The same check covers `--attach-if-exists`, which goes
+through the same function. The existing attach tests, which relied on pipes, moved onto a real pty
+(`tests/common`'s `PtyProc`).
+
+**Bare `attach` follows attach activity, not start time.** The decision above approximated "most recently active"
+with the record's mtime, but nothing ever changed it after startup, so it meant "started last". The holder now
+bumps its record's mtime whenever a raw-TTY client connects (before the redraw is queued, so a client that has
+seen the screen has already been counted); a failure to touch is ignored. The resolver still takes the newest
+mtime. This does not weaken the Windows PID-reuse guard in `kill`: the guard refuses a process created *after* the
+record's mtime, and a process that reuses the pid can only exist after the holder died, which is after its last
+touch.

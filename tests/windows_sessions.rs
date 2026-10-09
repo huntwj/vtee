@@ -618,3 +618,29 @@ fn kill_leaves_a_process_younger_than_the_pidfile_alone() {
     let _ = sentinel.kill();
     let _ = sentinel.wait();
 }
+
+/// Bare `attach` follows the session attached to last: each attach bumps its record's mtime, and
+/// the resolver picks the newest. Judged by which record gets touched, since both holders run the
+/// same child.
+#[test]
+fn bare_attach_picks_the_session_attached_to_most_recently() {
+    let _guard = serial();
+    let env = Env::new();
+    let _older = Holder::start(&env, "older");
+    let _newer = Holder::start(&env, "newer");
+    let mtime = |name: &str| std::fs::metadata(env.pidfile(name)).and_then(|m| m.modified()).unwrap();
+
+    let by_name = common::PtyProc::spawn(env.cmd().args(["attach", "older"]));
+    assert!(by_name.wait_for_plain("ready?", Duration::from_secs(20)), "{:?}", by_name.plain_text());
+    drop(by_name);
+    assert!(wait_until(Duration::from_secs(10), || mtime("older") > mtime("newer")), "attach didn't touch the record");
+
+    let (older_before, newer_before) = (mtime("older"), mtime("newer"));
+    let bare = common::PtyProc::spawn(env.cmd().arg("attach"));
+    assert!(bare.wait_for_plain("ready?", Duration::from_secs(20)), "{:?}", bare.plain_text());
+    assert!(
+        wait_until(Duration::from_secs(10), || mtime("older") > older_before),
+        "bare attach should have gone to the session attached to last"
+    );
+    assert_eq!(mtime("newer"), newer_before, "bare attach must not touch the other session");
+}

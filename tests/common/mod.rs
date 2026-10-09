@@ -82,6 +82,41 @@ impl PtyProc {
         String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned()
     }
 
+    /// The output with escape sequences removed. A redrawn screen puts a reset before every cell,
+    /// so words only appear contiguous once those are stripped.
+    pub fn plain_text(&self) -> String {
+        let seen = self.seen.lock().unwrap();
+        let mut out = Vec::with_capacity(seen.len());
+        let mut i = 0;
+        while i < seen.len() {
+            if seen[i] != 0x1b {
+                out.push(seen[i]);
+                i += 1;
+            } else if seen.get(i + 1) == Some(&b'[') {
+                i += 2;
+                while i < seen.len() && !(0x40..=0x7e).contains(&seen[i]) {
+                    i += 1;
+                }
+                i += 1;
+            } else {
+                i += 2;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Polls until the output, with escape sequences removed, contains `needle`.
+    pub fn wait_for_plain(&self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.plain_text().contains(needle) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        self.plain_text().contains(needle)
+    }
+
     pub fn send(&self, bytes: &[u8]) {
         let mut writer = self.writer.lock().unwrap();
         writer.write_all(bytes).unwrap();

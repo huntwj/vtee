@@ -883,3 +883,29 @@ fn random_escape_sequence_soup_never_takes_the_session_down() {
         let _ = std::fs::remove_file(file);
     }
 }
+
+fn mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).and_then(|m| m.modified()).unwrap()
+}
+
+/// Bare `attach` follows the session attached to last, not the one started last.
+#[test]
+fn bare_attach_picks_the_session_attached_to_most_recently() {
+    let older = Session::start("older", &[], &["sh", "-c", "echo MARK-OLDER; exec cat"]);
+    let newer = Session::start_in(&older.tmp, "newer", &[], &["sh", "-c", "echo MARK-NEWER; exec cat"]);
+    let bare = |expect: &str, other: &str| {
+        let attach = common::PtyProc::spawn(vtee_in(&older.tmp).arg("attach"));
+        assert!(attach.wait_for_plain(expect, Duration::from_secs(10)), "wanted {expect}: {:?}", attach.plain_text());
+        assert!(!attach.plain_text().contains(other), "got {other} too: {:?}", attach.plain_text());
+    };
+
+    // Nothing has been attached to yet, so the one started last wins.
+    bare("MARK-NEWER", "MARK-OLDER");
+
+    // Attaching to the older session by name makes it the most recent.
+    let by_name = common::PtyProc::spawn(vtee_in(&older.tmp).args(["attach", "older"]));
+    assert!(by_name.wait_for_plain("MARK-OLDER", Duration::from_secs(10)), "{:?}", by_name.plain_text());
+    drop(by_name);
+    wait_until("the older session's record to be touched", || mtime(&older.pidfile()) > mtime(&newer.pidfile()));
+    bare("MARK-OLDER", "MARK-NEWER");
+}

@@ -2,7 +2,7 @@
 //! a copy feeds an `alacritty_terminal` emulator that stays a passive observer.
 
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -170,6 +170,9 @@ pub struct Tap {
     // constructor argument.
     pub(crate) human_revokes_lock: Arc<AtomicBool>,
     pub(crate) next_connection_id: Arc<AtomicU64>,
+    // The session record, whose mtime is bumped on every attach so bare `attach` can tell which
+    // session was used last.
+    activity_file: Mutex<Option<PathBuf>>,
 }
 
 impl Tap {
@@ -248,6 +251,7 @@ impl Tap {
             exclusive_lock,
             human_revokes_lock,
             next_connection_id: Arc::new(AtomicU64::new(1)),
+            activity_file: Mutex::new(None),
         })
     }
 
@@ -279,6 +283,20 @@ impl Tap {
         let status = self.child.lock_unpoisoned().wait().map_err(to_io_error)?;
         let _ = self.output_done.lock_unpoisoned().recv_timeout(Duration::from_millis(500));
         Ok(status)
+    }
+
+    /// Names the file whose modification time marks this session's last attach: every raw-TTY
+    /// client that connects bumps it, so bare `vtee attach` can pick the session used last.
+    pub fn set_activity_file(&self, path: &Path) {
+        *self.activity_file.lock_unpoisoned() = Some(path.to_path_buf());
+    }
+
+    /// Best effort: a session whose record can't be touched is still a working session.
+    pub(crate) fn touch_activity(&self) {
+        let Some(path) = self.activity_file.lock_unpoisoned().clone() else { return };
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
     }
 
     /// Terminate the child. Safe on an already-exited child.

@@ -87,8 +87,9 @@ fn attach(name: &str, tty_sock: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Bare `attach`, like tmux's `attach-session`: the only live session, else the most recently
-/// active. Activity is approximated by the pidfile's mtime.
+/// Bare `attach`, like tmux's `attach-session`: the only live session, else the one attached to
+/// most recently. A holder bumps its record's mtime on every attach (and wrote it when it started),
+/// so the newest mtime wins; equal times fall back to the name.
 fn resolve_default_session() -> Result<String, String> {
     let names = vtee::session_names().map_err(|e| format!("couldn't list sessions: {e}"))?;
     let mut live = Vec::new();
@@ -102,7 +103,7 @@ fn resolve_default_session() -> Result<String, String> {
             live.push((name, mtime));
         }
     }
-    live.sort_by_key(|(_, mtime)| *mtime);
+    live.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
     live.pop().map(|(name, _)| name).ok_or_else(|| "no live sessions to attach to".to_string())
 }
 

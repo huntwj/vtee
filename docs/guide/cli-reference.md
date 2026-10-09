@@ -62,7 +62,8 @@ The raw-terminal socket that `attach` uses always allows typing. `--writable` go
 ### `vtee attach [NAME]`
 
 Attach your terminal to a live session. You see the current screen first, then live output; your keystrokes go to
-the program. With no `NAME` it uses the only live session, or the most recently started one if there are several.
+the program. With no `NAME` it uses the only live session, or the one attached to most recently if there are several (the
+one started last, if none has been attached to yet).
 There is no detach key: closing the window, or stopping the `vtee attach` process, ends the attach client and
 leaves the session running. Ctrl-C is forwarded to the program.
 
