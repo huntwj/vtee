@@ -511,7 +511,7 @@ Sessions, `attach`/`ls`/`kill` and both sockets work on native Windows. The piec
 
 - **Transport:** AF_UNIX sockets (Windows 10 1803+) through `uds_windows`, re-exported by `src/net.rs` so the
   servers and clients are written once. Named pipes were rejected (`decisions.md`).
-- **Session directory:** `%LOCALAPPDATA%i-mux` (temp dir if unset), private to the user by the profile's ACL; a
+- **Session directory:** `%LOCALAPPDATA%\vtee` (temp dir if unset), private to the user by the profile's ACL; a
   reparse point or non-directory there is refused. Session names are capped so `<name>.tty.sock` stays under the
   107-byte AF_UNIX path limit.
 - **`kill`:** after the same liveness check as Unix, `OpenProcess` + `TerminateProcess` on the holder; ConPTY reaps
