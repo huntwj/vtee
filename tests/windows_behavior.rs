@@ -313,7 +313,7 @@ fn resizing_the_outer_terminal_reaches_the_child() {
 /// things used to prevent it: the child inherited an "ignore CTRL+C" attribute from whatever
 /// launched `vtee` (this test runner's own ancestry has it), and the vendored `portable-pty`
 /// patch created it with `CREATE_NEW_PROCESS_GROUP`, which Windows documents as disabling CTRL+C
-/// for the group. `Tap::spawn` now restores the default, and that flag is opt-in
+/// for the group. The CLI now restores the default at startup, and that flag is opt-in
 /// (`VTEE_NEW_PROCESS_GROUP=1`, `docs/decisions.md`, 2026-10-09).
 #[test]
 fn ctrl_c_ends_a_long_running_child_and_leaves_no_orphan() {

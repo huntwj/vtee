@@ -186,12 +186,6 @@ impl Tap {
         // ConPTY itself: created with `PSEUDOCONSOLE_INHERIT_CURSOR` (as `portable-pty` does)
         // it issues `ESC[6n` at startup and blocks everything, including the real child's
         // output, until a `ESC[row;colR` arrives (`docs/decisions.md`, 2026-10-08).
-        // A parent started with CREATE_NEW_PROCESS_GROUP (a CI runner, an agent harness, `start
-        // /b`) hands every descendant an "ignore CTRL+C" attribute, and the child inherits it
-        // from us; a terminal's child would not. Restore the default before spawning.
-        #[cfg(windows)]
-        restore_default_ctrl_c();
-
         let terminal_answers =
             opts.forward_input && opts.forward_output && io::stdin().is_terminal() && io::stdout().is_terminal();
         let answer_queries = !terminal_answers;
@@ -350,7 +344,12 @@ impl Tap {
     /// Propagate the real terminal's resizes to the pty and emulator: `SIGWINCH` on Unix, a
     /// console-size poll on Windows (which has no such signal). A script drives resizes
     /// explicitly instead.
-    pub fn watch_resize(&self) {
+    ///
+    /// `observed` is the terminal size the caller had already accounted for when it chose the
+    /// spawn size (not the spawn size itself, which `--cols/--rows` may override). A terminal that
+    /// has changed since then is applied immediately, so a resize between the two reads is not
+    /// lost; later changes are followed as they happen.
+    pub fn watch_resize(&self, observed: (u16, u16)) {
         let master = self.master.clone();
         let shared = self.shared.clone();
         // A 0x0 report is a transient non-size (seen under `docker run -t`), not a resize to
@@ -369,6 +368,12 @@ impl Tap {
             use signal_hook::iterator::Signals;
 
             let Ok(mut signals) = Signals::new([SIGWINCH]) else { return };
+            // Registered first, so a resize after this check can't slip past both.
+            if let Ok(now) = crossterm::terminal::size()
+                && now != observed
+            {
+                apply(now.0, now.1);
+            }
             thread::spawn(move || {
                 for _ in signals.forever() {
                     if let Ok((cols, rows)) = crossterm::terminal::size() {
@@ -379,12 +384,11 @@ impl Tap {
         }
         #[cfg(windows)]
         {
-            // Only a *change* from what the terminal reported at start counts, so a
-            // `--cols/--rows` override isn't undone while the terminal stays put.
-            let Ok(mut last) = crossterm::terminal::size() else { return };
+            // Only a *change* from what the caller had accounted for counts, so a `--cols/--rows`
+            // override isn't undone while the terminal stays put.
+            let mut last = observed;
             thread::spawn(move || {
                 loop {
-                    thread::sleep(Duration::from_millis(200));
                     match crossterm::terminal::size() {
                         Ok(size) if size != last => {
                             last = size;
@@ -392,11 +396,12 @@ impl Tap {
                         }
                         _ => {}
                     }
+                    thread::sleep(Duration::from_millis(200));
                 }
             });
         }
         #[cfg(not(any(unix, windows)))]
-        drop(apply);
+        drop((apply, observed));
     }
 
     /// Catch `SIGTERM`: restore the terminal mode, kill the child, exit. Uses `clone_killer`
@@ -502,6 +507,9 @@ fn forward_output(
             let pending = listener.take_replies();
             // An attached terminal sees this chunk too and answers it itself; a second reply
             // from us would land in the child's input as stray keystrokes.
+            // Known limitation: this assumes the attached client really is a terminal. A
+            // pipe-driven client, or a dead sink whose writer thread hasn't exited yet, answers
+            // nothing, so a child waiting on a reply then waits until a real terminal attaches.
             if !pending.is_empty() && !attach_client_answers {
                 let mut w = writer.lock_unpoisoned();
                 for reply in pending {
@@ -547,8 +555,12 @@ unsafe extern "system" {
     fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
 }
 
+/// Windows only. A parent started with `CREATE_NEW_PROCESS_GROUP` (a CI runner, an agent
+/// harness, `start /b`) hands every descendant an "ignore CTRL+C" attribute, so a child spawned by
+/// [`Tap::spawn`] never sees Ctrl-C. Call this before spawning to get a terminal's behaviour. The
+/// CLI does; the library leaves a host process's console settings alone.
 #[cfg(windows)]
-fn restore_default_ctrl_c() {
+pub fn restore_default_ctrl_c() {
     // (NULL, FALSE) restores normal CTRL+C processing for this process and its future children.
     // Failing (no console at all) is harmless: there is no Ctrl-C to handle either.
     unsafe {

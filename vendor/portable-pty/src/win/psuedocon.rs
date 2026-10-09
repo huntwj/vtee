@@ -142,7 +142,7 @@ impl PsuedoCon {
         // Windows documents it as disabling CTRL+C for the whole new group, so by default the
         // child must not get it or Ctrl-C can never interrupt it.
         let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
-        if std::env::var_os("VTEE_NEW_PROCESS_GROUP").is_some_and(|v| v != "0") {
+        if std::env::var_os("VTEE_NEW_PROCESS_GROUP").is_some_and(|v| !v.is_empty() && v != "0") {
             creation_flags |= CREATE_NEW_PROCESS_GROUP;
         }
         let res = unsafe {

@@ -21,6 +21,8 @@ pub use rawmode::run_tty_guard;
 pub use serve::ServeOptions;
 pub use session::{SessionPaths, default_log_path, session_is_live, session_names, session_paths};
 pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot, redraw_sequence};
+#[cfg(windows)]
+pub use tap::restore_default_ctrl_c;
 pub use tap::{SpawnOptions, Tap};
 
 pub(crate) use tap::{ObserverListener, Size};
