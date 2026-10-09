@@ -65,8 +65,8 @@ set VTEE_NEW_PROCESS_GROUP=1
 vtee.exe -- <program>
 ```
 
-With it set, Ctrl-C no longer reaches the program in that session. Any value except `0` turns the workaround on
-(an empty value counts); leaving the variable unset, or setting it to `0`, leaves it off.
+With it set, Ctrl-C no longer reaches the program in that session. Any value except `0` and the empty
+string turns the workaround on; leaving the variable unset, empty, or setting it to `0`, leaves it off.
 
 ## Resize
 

@@ -25,9 +25,12 @@ struct VteeConfig {
 #[derive(Subcommand)]
 enum Commands {
     /// Attach to a live session - bare resolves like tmux's own `attach-session`: the only one
-    /// if there's exactly one, else the most-recently-active.
+    /// if there's exactly one, else the one attached to most recently.
+    ///
+    /// There is no detach key, and Ctrl-C goes to the program, not to attach. To leave, close the
+    /// terminal or stop the attach process; the session keeps running.
     Attach { name: Option<String> },
-    /// List live sessions (name, pid, age) - and stale leftovers, clearly marked as such.
+    /// List sessions: name, holder pid and live or stale, plus sock=<path> for a --listen socket.
     Ls,
     /// End a session: signal its holder process, clean up both its sockets and its pidfile.
     Kill { name: String },
@@ -475,6 +478,9 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
     {
         raw_guard.take();
         return fail(exitcode::OSERR, format!("couldn't write pidfile {}: {e}", pidfile.display()));
+    }
+    if let Some(pidfile) = cli.pidfile {
+        tap.set_activity_file(pidfile);
     }
 
     let status = tap.wait();

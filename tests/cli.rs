@@ -8,6 +8,8 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+mod common;
+
 /// Where `confy` would look for a config file, redirected so a developer's or runner's real
 /// `attach_if_exists = true` can never change what a test asserts.
 fn config_env(root: &std::path::Path) -> [(&'static str, std::path::PathBuf); 3] {
@@ -22,6 +24,39 @@ fn vtee() -> Command {
         cmd.env(key, value);
     }
     cmd
+}
+
+/// `attach` replays the screen as escape codes; into a pipe that is noise, so it refuses before it
+/// even looks for the session. assert_cmd pipes stdout, so stdout is never a terminal here.
+#[test]
+fn attach_refuses_without_a_terminal() {
+    vtee()
+        .args(["attach", "no-such-session"])
+        .assert()
+        .failure()
+        .code(exitcode::USAGE)
+        .stderr(predicate::str::contains("attach needs a terminal"));
+}
+
+/// Leaving `attach` is not obvious (no detach key, Ctrl-C goes to the program), so `--help` says so.
+#[test]
+fn attach_help_explains_how_to_leave() {
+    vtee()
+        .args(["attach", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no detach key").and(predicate::str::contains("Ctrl-C goes to the program")));
+}
+
+/// `ls` prints name, pid and live/stale (plus `sock=`); its help once promised an age column.
+#[test]
+fn ls_help_describes_the_columns_it_prints() {
+    vtee()
+        .args(["ls", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("holder pid").and(predicate::str::contains("live or stale")))
+        .stdout(predicate::str::contains(", age").not());
 }
 
 #[test]
@@ -429,40 +464,17 @@ mod unix_behavior {
         let mut first = spawn_named(&tmpdir, "attach-if-exists-test", &[]);
         wait_for_session(&tmpdir, "attach-if-exists-test");
 
-        let mut second = Proc(Some(
-            vtee_process(&tmpdir)
-                .args(["--name", "attach-if-exists-test", "--attach-if-exists", "--", "cat"])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap(),
-        ));
-
-        // Collect the attacher's stdout on a thread and poll it: the attach itself isn't visible
-        // from outside, but input written before it connects waits in the pipe and is relayed
-        // afterwards, so one write is enough.
-        use std::io::{Read as _, Write as _};
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        {
-            let seen = seen.clone();
-            let mut stdout = second.stdout.take().unwrap();
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = stdout.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    seen.lock().unwrap().extend_from_slice(&buf[..n]);
-                }
-            });
-        }
-        let mut stdin = second.stdin.take().unwrap();
-        stdin.write_all(b"from-attacher\r").unwrap();
-        stdin.flush().unwrap();
-        wait_until("the attached session's live echo", || {
-            String::from_utf8_lossy(&seen.lock().unwrap()).contains("from-attacher")
-        });
-        drop(stdin);
+        // Attach needs a terminal, so the second invocation runs on a pty. Input sent before the
+        // attach connects waits in the pty and is relayed afterwards, so one write is enough.
+        let second = common::PtyProc::spawn(vtee_process(&tmpdir).args([
+            "--name",
+            "attach-if-exists-test",
+            "--attach-if-exists",
+            "--",
+            "cat",
+        ]));
+        second.send(b"from-attacher\r");
+        assert!(second.wait_for("from-attacher", Duration::from_secs(10)), "{:?}", second.text());
 
         let _ = first.kill();
         let _ = first.wait();
@@ -890,39 +902,13 @@ mod unix_behavior {
 
     #[test]
     fn the_config_file_can_make_attach_if_exists_the_default() {
-        use std::io::{Read as _, Write as _};
         let tmpdir = isolated_tmpdir();
         let _first = session_with_config(&tmpdir, "cfg-attach", "attach_if_exists = true\n");
 
-        let mut second = Proc(Some(
-            vtee_process(&tmpdir)
-                .args(["--name", "cfg-attach", "--", "cat"])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap(),
-        ));
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        {
-            let seen = seen.clone();
-            let mut stdout = second.stdout.take().unwrap();
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = stdout.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    seen.lock().unwrap().extend_from_slice(&buf[..n]);
-                }
-            });
-        }
-        let mut stdin = second.stdin.take().unwrap();
-        stdin.write_all(b"via-config\r").unwrap();
-        stdin.flush().unwrap();
-        wait_until("the config-driven attach to echo", || {
-            String::from_utf8_lossy(&seen.lock().unwrap()).contains("via-config")
-        });
-        drop(stdin);
+        let second = common::PtyProc::spawn(vtee_process(&tmpdir).args(["--name", "cfg-attach", "--", "cat"]));
+        second.send(b"via-config\r");
+        assert!(second.wait_for("via-config", Duration::from_secs(10)), "{:?}", second.text());
+        drop(second);
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 

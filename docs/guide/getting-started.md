@@ -98,7 +98,7 @@ There are two ways into a running session, and they do different jobs:
 
 - `vtee attach [name]` gives you a real terminal view. You see the current screen immediately, then live output,
   and your typing goes to the program. This is for humans. With no name it picks the only live session, or the
-  most recently active one.
+  one attached to most recently.
 - `vtee --connect <socket>` speaks the JSON command protocol. This is for scripts and agents.
 
 Both work at the same time, and any number of each can be connected. Closing an attached terminal detaches

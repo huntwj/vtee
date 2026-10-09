@@ -31,10 +31,22 @@ including when it receives `SIGTERM` or `SIGKILL` on Linux (a small helper proce
 terminal is left in raw mode anyway, run `reset` (or `stty sane`) on Linux. On Windows no helper exists; the next
 shell prompt usually resets the console, and if not, close the window.
 
-## `vtee attach` printed a flood of escape codes
+## How do I leave an attach session?
 
-`attach` expects a terminal. If stdout is redirected to a file or pipe it still runs and writes the redraw as raw
-bytes: one `ESC[0m` per screen cell, plus cursor movements. Run it in a real terminal.
+There is no detach key, and Ctrl-C does not leave `attach`: it is sent to the program, like every other key. To
+leave, close the terminal window, or stop the `vtee attach` process from another shell (`kill <pid>`, or Task
+Manager on Windows). The session keeps running, and `vtee ls` still shows it as `live`. If the program itself
+exits, the attach client ends by itself. To end the session as well, run `vtee kill <name>`.
+
+## `vtee attach` says it needs a terminal
+
+```
+vtee: attach needs a terminal: stdin and stdout must both be terminals (use --connect for scripts)
+```
+
+`attach` replays the screen as escape codes, so it refuses with exit status 64 when stdin or stdout is a pipe or a
+file. Run it in a real terminal. To read a session from a script, use `vtee --connect <socket>`, which returns
+the screen as JSON or, with `--text`, as plain lines.
 
 ## A session started with `--listen=<path>` looks stale
 

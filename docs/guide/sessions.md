@@ -141,16 +141,19 @@ recorded path that is no longer a socket is left alone.
 ## Attaching and detaching
 
 `vtee attach [name]` shows the current screen and then live output, and sends your typing to the program. With
-no name, it picks the only live session. When there are several it picks the one whose pidfile was written most
-recently, which in practice is the most recently started.
+no name, it picks the only live session. When there are several it picks the one attached to most recently: a
+session's record file is stamped when the session starts and again each time a client attaches, and the newest
+stamp wins. Until anyone has attached, that is the session started last. Attaching by name counts, so
+`vtee attach work` makes `work` the one a later bare `vtee attach` goes to.
 
-There is no detach key. The attach client is just another connection, so you detach by ending it: close the
-terminal window, or stop the `vtee attach` process from another shell. The session keeps running either way.
+**There is no detach key, and Ctrl-C does not leave `attach`.** `attach` puts your terminal in raw mode and
+forwards every byte, so Ctrl-C is delivered to the program (as it would be inside tmux). To leave, end the attach
+client, which is just another connection: close the terminal window, or stop the `vtee attach` process from
+another shell. The session keeps running either way, and the attach client also ends by itself when the session
+ends. See [Troubleshooting](troubleshooting.md#how-do-i-leave-an-attach-session).
+
 This is deliberate. A detach key would have to be intercepted from the program's input and could clash with what
 the program needs. It also means a session never depends on an attached terminal being there.
-
-`attach` puts your terminal in raw mode and forwards every byte, so Ctrl-C is delivered to the program (as it would
-be inside tmux) and does not detach. The attach client also ends by itself when the session ends.
 
 ## Several clients at once
 

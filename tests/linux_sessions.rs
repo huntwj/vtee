@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_vtee");
 
 fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -604,12 +606,11 @@ fn a_listen_session_is_live_in_ls_connectable_and_attachable_by_name() {
 
     Nd::connect(&custom).snapshot();
 
-    // Attach by name and bare: both must find the raw-TTY socket through the record. Stdin is
-    // empty, so attach connects, receives the redraw, and ends.
+    // Attach by name and bare: both must find the raw-TTY socket through the record. Attach needs
+    // a terminal, so each runs on a pty and must receive the redraw.
     for args in [&["attach", "custom"][..], &["attach"][..]] {
-        let attach = vtee_in(&session.tmp).args(args).stdin(Stdio::null()).output().unwrap();
-        assert!(attach.status.success(), "{args:?}: {}", String::from_utf8_lossy(&attach.stderr));
-        assert!(attach.stdout.windows(4).any(|w| w == b"\x1b[2J"), "{args:?}: no redraw received");
+        let attach = common::PtyProc::spawn(vtee_in(&session.tmp).args(args));
+        assert!(attach.wait_for("\x1b[2J", Duration::from_secs(10)), "{args:?}: no redraw: {:?}", attach.text());
     }
     let _ = std::fs::remove_file(&custom);
 }
@@ -881,4 +882,30 @@ fn random_escape_sequence_soup_never_takes_the_session_down() {
         drop(tty);
         let _ = std::fs::remove_file(file);
     }
+}
+
+fn mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).and_then(|m| m.modified()).unwrap()
+}
+
+/// Bare `attach` follows the session attached to last, not the one started last.
+#[test]
+fn bare_attach_picks_the_session_attached_to_most_recently() {
+    let older = Session::start("older", &[], &["sh", "-c", "echo MARK-OLDER; exec cat"]);
+    let newer = Session::start_in(&older.tmp, "newer", &[], &["sh", "-c", "echo MARK-NEWER; exec cat"]);
+    let bare = |expect: &str, other: &str| {
+        let attach = common::PtyProc::spawn(vtee_in(&older.tmp).arg("attach"));
+        assert!(attach.wait_for_plain(expect, Duration::from_secs(10)), "wanted {expect}: {:?}", attach.plain_text());
+        assert!(!attach.plain_text().contains(other), "got {other} too: {:?}", attach.plain_text());
+    };
+
+    // Nothing has been attached to yet, so the one started last wins.
+    bare("MARK-NEWER", "MARK-OLDER");
+
+    // Attaching to the older session by name makes it the most recent.
+    let by_name = common::PtyProc::spawn(vtee_in(&older.tmp).args(["attach", "older"]));
+    assert!(by_name.wait_for_plain("MARK-OLDER", Duration::from_secs(10)), "{:?}", by_name.plain_text());
+    drop(by_name);
+    wait_until("the older session's record to be touched", || mtime(&older.pidfile()) > mtime(&newer.pidfile()));
+    bare("MARK-OLDER", "MARK-NEWER");
 }

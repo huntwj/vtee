@@ -183,6 +183,8 @@ fn serve_tty_connection(tap: &Tap, stream: UnixStream, policy: WritePolicy) {
     let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
     ::log::debug!("tty connection {id}: accepted");
     let Ok(mut reader) = stream.try_clone() else { return };
+    // Before the redraw is queued, so a client that has seen the screen has already been counted.
+    tap.touch_activity();
     tap.attach_tty_sink(id, Box::new(stream));
 
     let mut buf = [0u8; 4096];
