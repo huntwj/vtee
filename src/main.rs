@@ -198,6 +198,9 @@ fn main() -> ExitCode {
 
     human_panic::setup_panic!();
 
+    #[cfg(windows)]
+    vtee::restore_default_ctrl_c();
+
     // `Cli::parse()` would exit(2); route usage errors through sysexits `USAGE` like every other
     // error path. `--help`/`--version` also arrive as errors and must still exit 0.
     let cli = match Cli::try_parse() {
@@ -222,7 +225,8 @@ fn main() -> ExitCode {
         return run_connect(path, cli.text);
     }
 
-    let (cols, rows) = terminal_size(cli.cols, cli.rows);
+    let observed_size = observed_terminal_size();
+    let (cols, rows) = (cli.cols.unwrap_or(observed_size.0), cli.rows.unwrap_or(observed_size.1));
 
     let Some((program, rest)) = cli.command.split_first() else {
         return fail(exitcode::USAGE, "a command is required");
@@ -257,6 +261,7 @@ fn main() -> ExitCode {
             headless: cli.headless,
             cols,
             rows,
+            observed_size,
             env: &cli.env,
         },
     )
@@ -360,17 +365,16 @@ fn parse_env_pair(s: &str) -> Result<(String, String), String> {
 }
 
 /// The real terminal's size, or 80x24 when there is none or it reports 0x0 (seen under
-/// `docker run -t` before a size is negotiated). `--cols`/`--rows` override each dimension.
-fn terminal_size(cols_override: Option<u16>, rows_override: Option<u16>) -> (u16, u16) {
-    let (auto_cols, auto_rows) = if std::io::stdout().is_terminal() {
+/// `docker run -t` before a size is negotiated).
+fn observed_terminal_size() -> (u16, u16) {
+    if std::io::stdout().is_terminal() {
         match crossterm::terminal::size() {
             Ok((cols, rows)) if cols > 0 && rows > 0 => (cols, rows),
             _ => (80, 24),
         }
     } else {
         (80, 24)
-    };
-    (cols_override.unwrap_or(auto_cols), rows_override.unwrap_or(auto_rows))
+    }
 }
 
 struct SpawnArgs<'a> {
@@ -387,6 +391,8 @@ struct SpawnArgs<'a> {
     headless: bool,
     cols: u16,
     rows: u16,
+    /// The real terminal's size when `cols`/`rows` were chosen; `--cols/--rows` may override it.
+    observed_size: (u16, u16),
     env: &'a [(String, String)],
 }
 
@@ -444,7 +450,7 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
     let resize_owned_by_terminal = !cli.headless && std::io::stdin().is_terminal();
 
     if !cli.headless {
-        tap.watch_resize();
+        tap.watch_resize(cli.observed_size);
     }
     tap.watch_sigterm();
 

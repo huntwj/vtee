@@ -252,6 +252,33 @@ fn invalid_and_overlong_names_are_rejected_before_touching_disk() {
     assert!(!env.local.join("evil.sock").exists());
 }
 
+/// `:` would turn the pidfile into an NTFS alternate data stream; device names stay special even
+/// with an extension. Each must be refused up front, with the reason, and leave nothing behind.
+#[test]
+fn names_windows_treats_specially_are_rejected_with_a_reason() {
+    let _guard = serial();
+    let env = Env::new();
+    for bad in ["ab:c", "a*b", "a?b", "a\"b", "a|b", "a<b", ".hidden", "trailing.", "CON", "nul", "aux.x", "COM3"] {
+        let (ok, _, err) = env.run(&["--headless", "--name", bad, "--", "cmd", "/c", "exit"]);
+        assert!(!ok, "{bad:?} was accepted");
+        assert!(err.contains("isn't a valid session name"), "{bad:?}: stderr {err}");
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(env.dir()).map(|d| d.flatten().collect()).unwrap_or_default();
+    assert!(leftovers.is_empty(), "files were created for rejected names: {leftovers:?}");
+}
+
+/// There is no private fallback location: without a usable `%LOCALAPPDATA%` it must refuse
+/// rather than put sockets in a possibly shared temp dir.
+#[test]
+fn a_missing_localappdata_is_an_error_not_a_fallback() {
+    let _guard = serial();
+    let env = Env::new();
+    let out = env.cmd().env_remove("LOCALAPPDATA").arg("ls").stdin(Stdio::null()).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("LOCALAPPDATA"), "stderr: {err}");
+}
+
 #[test]
 fn connect_returns_a_snapshot_of_the_live_session() {
     let _guard = serial();
@@ -466,4 +493,33 @@ fn sockets_are_not_inherited_by_children_spawned_afterwards() {
     assert!(child_alive, "the probe child exited early, so this measured nothing");
     assert!(hung_up, "an accepted socket leaked into a later child: the peer never saw EOF");
     assert!(refused, "the listener leaked into a later child: it still accepts connections");
+}
+
+/// A pidfile naming a process younger than the pidfile itself is a reused PID: `kill` must clean
+/// up the session files but leave that process alone.
+#[test]
+fn kill_leaves_a_process_younger_than_the_pidfile_alone() {
+    let _guard = serial();
+    let env = Env::new();
+    let _holder = Holder::start(&env, "reused");
+    let mut sentinel = Command::new("ping")
+        .args(["-n", "120", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let pidfile = env.pidfile("reused");
+    std::fs::write(&pidfile, sentinel.id().to_string()).unwrap();
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::OpenOptions::new().write(true).open(&pidfile).unwrap().set_modified(long_ago).unwrap();
+
+    let (ok, _, err) = env.run(&["kill", "reused"]);
+    assert!(ok, "kill failed: {err}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(sentinel.try_wait().unwrap().is_none(), "kill terminated an unrelated, younger process");
+    assert!(!pidfile.exists(), "the session files should still be cleaned up");
+
+    let _ = sentinel.kill();
+    let _ = sentinel.wait();
 }

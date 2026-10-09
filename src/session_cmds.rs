@@ -128,7 +128,7 @@ pub fn run_kill(name: &str) -> ExitCode {
             if let Some(pid) = std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok())
                 && pid > 1
             {
-                send_sigterm(pid);
+                stop_holder(pid, &paths.pidfile);
             }
         }
         // A leftover pidfile just gets cleaned up; no pidfile at all means there was never a session.
@@ -143,29 +143,105 @@ pub fn run_kill(name: &str) -> ExitCode {
 }
 
 #[cfg(unix)]
-fn send_sigterm(pid: i32) {
+fn stop_holder(pid: i32, _pidfile: &Path) {
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
 }
 
+/// Seconds between 1601-01-01 (FILETIME epoch) and 1970-01-01.
+#[cfg(any(windows, test))]
+const FILETIME_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
+
+/// The holder writes its pidfile after it starts, so a process created *after* the pidfile was last
+/// written cannot be the holder: its PID was reused. `creation` is a FILETIME (100 ns ticks since
+/// 1601).
+#[cfg(any(windows, test))]
+fn created_after(creation: u64, pidfile_mtime: std::time::SystemTime) -> bool {
+    use std::time::{Duration, UNIX_EPOCH};
+    let since_1601 = Duration::new(creation / 10_000_000, (creation % 10_000_000) as u32 * 100);
+    match since_1601.checked_sub(Duration::from_secs(FILETIME_UNIX_EPOCH_SECS)) {
+        Some(since_unix) => UNIX_EPOCH + since_unix > pidfile_mtime,
+        None => false,
+    }
+}
+
 /// No graceful signal exists for a process without a console of ours, so terminate it outright;
-/// ConPTY then reaps the wrapped program. `kill` removes the session files itself.
+/// ConPTY then reaps the wrapped program. `kill` removes the session files itself. A process
+/// younger than the pidfile is a reused PID, never the holder, and is left alone.
 #[cfg(windows)]
-fn send_sigterm(pid: i32) {
+fn stop_holder(pid: i32, pidfile: &Path) {
+    use std::ffi::c_void;
+
     const PROCESS_TERMINATE: u32 = 0x0001;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
-        fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
-        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn TerminateProcess(process: *mut c_void, exit_code: u32) -> i32;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
     }
     unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
-        if !handle.is_null() {
-            TerminateProcess(handle, 1);
-            CloseHandle(handle);
+        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle.is_null() {
+            return;
         }
+        let (mut creation, mut exit, mut kernel, mut user) =
+            (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
+        let mtime = std::fs::metadata(pidfile).and_then(|m| m.modified());
+        let known_young = match mtime {
+            Ok(mtime) if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 => {
+                created_after((u64::from(creation.high) << 32) | u64::from(creation.low), mtime)
+            }
+            // Without both times the age can't be checked; the socket answered, so go ahead.
+            _ => false,
+        };
+        if !known_young {
+            TerminateProcess(handle, 1);
+        }
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn filetime(unix: Duration) -> u64 {
+        (unix.as_secs() + FILETIME_UNIX_EPOCH_SECS) * 10_000_000 + u64::from(unix.subsec_nanos()) / 100
+    }
+
+    #[test]
+    fn a_process_older_than_the_pidfile_is_the_holder() {
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert!(!created_after(filetime(Duration::from_secs(1_799_999_990)), mtime));
+        assert!(!created_after(filetime(Duration::from_secs(1_800_000_000)), mtime));
+    }
+
+    #[test]
+    fn a_process_younger_than_the_pidfile_has_a_reused_pid() {
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert!(created_after(filetime(Duration::from_secs(1_800_000_001)), mtime));
+    }
+
+    #[test]
+    fn a_creation_time_before_the_unix_epoch_is_not_young() {
+        assert!(!created_after(0, UNIX_EPOCH));
     }
 }
