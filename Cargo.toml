@@ -3,6 +3,11 @@ name = "vtee"
 version = "0.0.0"
 edition = "2024"
 description = "A terminal multiplexer for AI and testing: tee for a TUI, with queryable terminal state."
+repository = "https://github.com/huntwj/vtee"
+readme = "README.md"
+keywords = ["terminal", "pty", "tmux", "testing", "ai"]
+categories = ["command-line-utilities", "development-tools::testing"]
+rust-version = "1.89"
 publish = false
 
 [dependencies]
