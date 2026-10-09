@@ -66,8 +66,16 @@ the program. With no `NAME` it uses the only live session, or the most recently 
 There is no detach key: closing the window, or stopping the `vtee attach` process, ends the attach client and
 leaves the session running. Ctrl-C is forwarded to the program.
 
-`attach` is meant to be run in a terminal. It does not check for one: with stdin or stdout redirected it simply
-relays bytes, so you get the raw redraw sequence (a lot of escape codes, one reset per screen cell) on stdout.
+`attach` needs a terminal on both stdin and stdout, because the screen arrives as escape codes. With either one
+redirected it refuses before looking for the session and exits 64. To read a session from a script, use
+`--connect` instead.
+
+```
+$ vtee attach demo | cat
+vtee: attach needs a terminal: stdin and stdout must both be terminals (use --connect for scripts)
+$ echo $?
+64
+```
 
 ```
 $ vtee attach nosuch
@@ -112,7 +120,7 @@ runs to completion, `vtee` exits with the program's own exit status (low 8 bits)
 | Code | Name | Seen when |
 | --- | --- | --- |
 | 0 | OK | Success, or the program exited 0. |
-| 64 | USAGE | Bad flags, no program given (`a command is required`), duplicate session name, `attach` with no live session. |
+| 64 | USAGE | Bad flags, no program given (`a command is required`), duplicate session name, `attach` with no live session, `attach` without a terminal. |
 | 65 | DATAERR | `--script` line that is not a valid command, or a script `send_key` with an unknown key. |
 | 66 | NOINPUT | `--script` file could not be opened. |
 | 68 | NOHOST | `kill` or `attach` for a session that does not exist, `--connect` to a socket that is not there. |

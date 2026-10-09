@@ -1,5 +1,6 @@
 //! `vtee attach`, `ls` and `kill`: clients of the named sessions other invocations hold.
 
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -9,6 +10,13 @@ use crate::output::fail;
 /// protocol has no way to report the wrapped program's exit code, so this succeeds whenever the
 /// session ends.
 pub fn run_attach(name: Option<&str>) -> ExitCode {
+    // The session's screen is replayed as terminal escape codes; into a pipe or file that is noise.
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return fail(
+            exitcode::USAGE,
+            "attach needs a terminal: stdin and stdout must both be terminals (use --connect for scripts)",
+        );
+    }
     let name = match name {
         Some(n) => n.to_string(),
         None => match resolve_default_session() {

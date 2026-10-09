@@ -5,6 +5,8 @@
 
 #![cfg(windows)]
 
+mod common;
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -368,40 +370,21 @@ fn the_attach_subcommand_relays_both_ways() {
     let _guard = serial();
     let env = Env::new();
     let _holder = Holder::start(&env, "att");
-    let mut attach = env
-        .cmd()
-        .args(["attach", "att"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdout = attach.stdout.take().unwrap();
-    let seen = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-    let reader = {
-        let seen = seen.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = stdout.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                seen.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        })
-    };
-    let text = |seen: &Mutex<Vec<u8>>| strip_ansi(&seen.lock().unwrap());
-    assert!(wait_until(Duration::from_secs(20), || text(&seen).contains("ready?")), "{:?}", text(&seen));
-    let mut stdin = attach.stdin.take().unwrap();
-    stdin.write_all(b"viaattach\r\n").unwrap();
-    stdin.flush().unwrap();
-    assert!(wait_until(Duration::from_secs(20), || text(&seen).contains("got:viaattach:done")), "{:?}", text(&seen));
-    drop(stdin);
+    // Attach needs a terminal, so it runs on a ConPTY.
+    let attach = common::PtyProc::spawn(env.cmd().args(["attach", "att"]));
+    let text = |attach: &common::PtyProc| strip_ansi(attach.text().as_bytes());
+    assert!(wait_until(Duration::from_secs(20), || text(&attach).contains("ready?")), "{:?}", text(&attach));
+    attach.send(b"viaattach\r\n");
     assert!(
-        wait_until(Duration::from_secs(10), || attach.try_wait().unwrap().is_some()),
-        "attach didn't exit on stdin EOF"
+        wait_until(Duration::from_secs(20), || text(&attach).contains("got:viaattach:done")),
+        "{:?}",
+        text(&attach)
     );
-    let _ = reader.join();
+
+    // Leaving an attach session (here: killing the client) must not end the session itself.
+    drop(attach);
+    let (ok, out, _) = env.run(&["ls"]);
+    assert!(ok && out.contains("att") && out.contains("live"), "the session should outlive its client: {out:?}");
 }
 
 #[test]

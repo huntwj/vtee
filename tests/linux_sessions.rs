@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_vtee");
 
 fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -604,12 +606,11 @@ fn a_listen_session_is_live_in_ls_connectable_and_attachable_by_name() {
 
     Nd::connect(&custom).snapshot();
 
-    // Attach by name and bare: both must find the raw-TTY socket through the record. Stdin is
-    // empty, so attach connects, receives the redraw, and ends.
+    // Attach by name and bare: both must find the raw-TTY socket through the record. Attach needs
+    // a terminal, so each runs on a pty and must receive the redraw.
     for args in [&["attach", "custom"][..], &["attach"][..]] {
-        let attach = vtee_in(&session.tmp).args(args).stdin(Stdio::null()).output().unwrap();
-        assert!(attach.status.success(), "{args:?}: {}", String::from_utf8_lossy(&attach.stderr));
-        assert!(attach.stdout.windows(4).any(|w| w == b"\x1b[2J"), "{args:?}: no redraw received");
+        let attach = common::PtyProc::spawn(vtee_in(&session.tmp).args(args));
+        assert!(attach.wait_for("\x1b[2J", Duration::from_secs(10)), "{args:?}: no redraw: {:?}", attach.text());
     }
     let _ = std::fs::remove_file(&custom);
 }
