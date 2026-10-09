@@ -31,8 +31,6 @@ pub(crate) struct ExclusiveLock {
     holder: Mutex<Option<u64>>,
 }
 
-// Only the Unix socket servers acquire or check the lock.
-#[cfg_attr(not(unix), allow(dead_code))]
 impl ExclusiveLock {
     pub(crate) fn try_acquire(&self, id: u64) -> bool {
         let mut holder = self.holder.lock_unpoisoned();
@@ -78,28 +76,12 @@ impl Tap {
     /// bad path fails here; removes a stale socket file left by a `SIGKILL`'d run. Takes
     /// `Arc<Tap>` because the accept loop outlives this call.
     pub fn serve(tap: Arc<Tap>, path: &Path, opts: ServeOptions) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            crate::sockets::serve(tap, path, opts)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (tap, path, opts);
-            Err(crate::unsupported("observation (--listen)"))
-        }
+        crate::sockets::serve(tap, path, opts)
     }
 
     /// Serve the raw-TTY protocol: a client sees a redraw of the current screen, then live output,
     /// and its keystrokes are gated by `policy` exactly like a JSON client's `Send`.
     pub fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            crate::sockets::serve_tty(tap, path, policy)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (tap, path, policy);
-            Err(crate::unsupported("attach (raw TTY)"))
-        }
+        crate::sockets::serve_tty(tap, path, policy)
     }
 }

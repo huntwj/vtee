@@ -1,12 +1,12 @@
-//! Unix-socket servers for a `Tap`: the NDJSON command protocol and the raw-TTY protocol.
+//! Unix-domain-socket servers for a `Tap`: the NDJSON command protocol and the raw-TTY protocol.
 
 use std::io::{self, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+use crate::net::{UnixListener, UnixStream};
 use crate::tap::LockExt;
 use crate::{Command, CommandResult, HumanPriority, ServeOptions, Tap, WritePolicy, snapshot};
 

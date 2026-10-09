@@ -22,11 +22,10 @@ pub fn run_attach(name: Option<&str>) -> ExitCode {
     }
 }
 
-#[cfg(unix)]
 fn attach(name: &str, tty_sock: &Path) -> ExitCode {
     use std::io::{Read, Write};
 
-    let stream = match std::os::unix::net::UnixStream::connect(tty_sock) {
+    let stream = match vtee::net::UnixStream::connect(tty_sock) {
         Ok(s) => s,
         Err(e) => return fail(exitcode::NOHOST, format!("failed to attach to {name:?}: {e}")),
     };
@@ -72,11 +71,6 @@ fn attach(name: &str, tty_sock: &Path) -> ExitCode {
     let _ = writer.shutdown(std::net::Shutdown::Write);
     let _ = reader_thread.join();
     ExitCode::SUCCESS
-}
-
-#[cfg(not(unix))]
-fn attach(_name: &str, _tty_sock: &Path) -> ExitCode {
-    fail(exitcode::OSERR, "attach needs Unix (requirement 8 defers Windows)")
 }
 
 /// Bare `attach`, like tmux's `attach-session`: the only live session, else the most recently

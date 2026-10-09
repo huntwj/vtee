@@ -165,14 +165,10 @@ pub struct Tap {
     pub(crate) title: ObserverListener,
     // Receiver is `Send` but not `Sync`.
     output_done: Mutex<Receiver<()>>,
-    // The three below are only read by the Unix socket servers.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) exclusive_lock: Arc<ExclusiveLock>,
     // Set by `Tap::serve` after the stdin-forwarding thread is already running, hence not a
     // constructor argument.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) human_revokes_lock: Arc<AtomicBool>,
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) next_connection_id: Arc<AtomicU64>,
 }
 
