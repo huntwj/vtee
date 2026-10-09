@@ -104,9 +104,26 @@ impl Session {
         s
     }
 
+    /// A holder whose NDJSON socket is at `custom` (`--listen=<path>`) instead of in the session
+    /// directory. Ready once the record is written (it is written last, after both sockets are
+    /// bound) and the custom socket answers.
+    fn start_listening(name: &str, custom: &Path, program: &[&str]) -> Session {
+        let tmp = unique("vtee-linux");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let child = spawn_holder(&tmp, name, &[&format!("--listen={}", custom.display())], program);
+        let s = Session { tmp, name: name.to_string(), child, owns_tmp: true };
+        let pidfile = s.pidfile();
+        wait_until("the session record and custom socket", || pidfile.exists() && UnixStream::connect(custom).is_ok());
+        s
+    }
+
     fn dir(&self) -> PathBuf {
         let uid = unsafe { libc::getuid() };
         self.tmp.join(format!("vtee-{uid}"))
+    }
+
+    fn pidfile(&self) -> PathBuf {
+        self.dir().join(format!("{}.pid", self.name))
     }
 
     fn sock(&self) -> PathBuf {
@@ -549,6 +566,155 @@ fn sigterm_to_the_holder_ends_the_child_and_the_name_can_be_reused() {
     let second = Session::start_in(&first.tmp, "reuse", &[], &["cat"]);
     let mut nd = second.nd();
     nd.snapshot();
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4b. Sessions started with an explicit `--listen=<path>`
+
+/// A long-lived process standing in for "whatever a stale pidfile's PID belongs to now".
+struct Sentinel(Child);
+
+impl Sentinel {
+    fn start(seconds: &str) -> Sentinel {
+        Sentinel(Command::new("sleep").arg(seconds).stdin(Stdio::null()).spawn().unwrap())
+    }
+
+    fn alive(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(None))
+    }
+}
+
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_listen_session_is_live_in_ls_connectable_and_attachable_by_name() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    let session = Session::start_listening("custom", &custom, &["cat"]);
+    assert!(!session.sock().exists(), "the conventional socket shouldn't exist: --listen replaced it");
+
+    let ls = vtee_in(&session.tmp).arg("ls").output().unwrap();
+    let out = String::from_utf8_lossy(&ls.stdout);
+    assert!(out.contains("custom") && out.contains("live") && !out.contains("stale"), "ls output: {out:?}");
+    assert!(out.contains(&format!("sock={}", custom.display())), "ls should show the real socket: {out:?}");
+
+    Nd::connect(&custom).snapshot();
+
+    // Attach by name and bare: both must find the raw-TTY socket through the record. Stdin is
+    // empty, so attach connects, receives the redraw, and ends.
+    for args in [&["attach", "custom"][..], &["attach"][..]] {
+        let attach = vtee_in(&session.tmp).args(args).stdin(Stdio::null()).output().unwrap();
+        assert!(attach.status.success(), "{args:?}: {}", String::from_utf8_lossy(&attach.stderr));
+        assert!(attach.stdout.windows(4).any(|w| w == b"\x1b[2J"), "{args:?}: no redraw received");
+    }
+    let _ = std::fs::remove_file(&custom);
+}
+
+#[test]
+fn a_second_holder_with_the_same_name_is_rejected_even_when_the_first_used_listen() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    let session = Session::start_listening("dupe", &custom, &["cat"]);
+    let out = vtee_in(&session.tmp)
+        .args(["--headless", "--name", "dupe", "--", "cat"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("duplicate session"), "{:?}", out.stderr);
+    let _ = std::fs::remove_file(&custom);
+}
+
+#[test]
+fn kill_stops_a_listen_session_and_removes_its_custom_socket() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    let mut session = Session::start_listening("custom-kill", &custom, &["sleep", "31339"]);
+    assert_eq!(procs_running("sleep", "31339").len(), 1);
+
+    let status = vtee_in(&session.tmp).args(["kill", "custom-kill"]).status().unwrap();
+    assert!(status.success());
+
+    wait_until("holder to exit", || matches!(session.child.try_wait(), Ok(Some(_))));
+    wait_until("child to end (no orphan)", || procs_running("sleep", "31339").is_empty());
+    assert!(!custom.exists(), "the custom socket should be removed");
+    assert!(!session.files_exist(), "the session files should be gone");
+}
+
+#[test]
+fn a_killed_listen_session_is_stale_and_kill_cleans_it_without_signalling_anything() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    let mut session = Session::start_listening("custom-stale", &custom, &["cat"]);
+    session.child.kill().unwrap();
+    session.child.wait().unwrap();
+    assert!(custom.exists(), "SIGKILL can't clean up, the custom socket should remain");
+
+    let ls = vtee_in(&session.tmp).arg("ls").output().unwrap();
+    let out = String::from_utf8_lossy(&ls.stdout);
+    assert!(out.contains("stale") && !out.contains("live"), "ls output: {out:?}");
+    assert!(out.contains(&format!("sock={}", custom.display())), "ls output: {out:?}");
+
+    // The record now names a live, unrelated process, as a reused PID would. The recorded socket is
+    // dead, so `kill` must not signal it.
+    let mut sentinel = Sentinel::start("31340");
+    let tty = session.tty_sock();
+    std::fs::write(session.pidfile(), format!("{}\n{}\n{}\n", sentinel.0.id(), custom.display(), tty.display()))
+        .unwrap();
+
+    assert!(vtee_in(&session.tmp).args(["kill", "custom-stale"]).status().unwrap().success());
+    assert!(sentinel.alive(), "kill signalled a process because of a stale record");
+    assert!(!custom.exists(), "the stale custom socket should be cleaned up");
+    assert!(!session.pidfile().exists());
+}
+
+#[test]
+fn kill_leaves_a_recorded_path_alone_when_it_is_no_longer_a_socket() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    let mut session = Session::start_listening("custom-reused", &custom, &["cat"]);
+    session.child.kill().unwrap();
+    session.child.wait().unwrap();
+
+    // Someone has since put an ordinary file where the dead session's socket used to be.
+    std::fs::remove_file(&custom).unwrap();
+    std::fs::write(&custom, "not a socket").unwrap();
+
+    assert!(vtee_in(&session.tmp).args(["kill", "custom-reused"]).status().unwrap().success());
+    assert_eq!(std::fs::read_to_string(&custom).unwrap(), "not a socket");
+    assert!(!session.pidfile().exists());
+    let _ = std::fs::remove_file(&custom);
+}
+
+#[test]
+fn a_legacy_pid_only_pidfile_still_works() {
+    let mut session = Session::start("legacy", &[], &["sleep", "31341"]);
+    std::fs::write(session.pidfile(), session.child.id().to_string()).unwrap();
+
+    let ls = vtee_in(&session.tmp).arg("ls").output().unwrap();
+    let out = String::from_utf8_lossy(&ls.stdout);
+    assert!(out.contains(&format!("legacy\tpid={}\tlive", session.child.id())), "ls output: {out:?}");
+    assert!(!out.contains("sock="), "a default session has nothing to point out: {out:?}");
+
+    assert!(vtee_in(&session.tmp).args(["kill", "legacy"]).status().unwrap().success());
+    wait_until("holder to exit", || matches!(session.child.try_wait(), Ok(Some(_))));
+    wait_until("child to end", || procs_running("sleep", "31341").is_empty());
+    assert!(!session.files_exist());
+}
+
+#[test]
+fn a_default_session_records_its_real_paths_in_the_pidfile() {
+    let session = Session::start("recorded", &[], &["cat"]);
+    let text = std::fs::read_to_string(session.pidfile()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            session.child.id().to_string(),
+            session.sock().display().to_string(),
+            session.tty_sock().display().to_string()
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

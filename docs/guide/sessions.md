@@ -77,7 +77,7 @@ Each session has three files, named after the session:
 | --- | --- |
 | `<name>.sock` | The JSON command socket, used by `--connect`. |
 | `<name>.tty.sock` | The raw terminal socket, used by `attach`. |
-| `<name>.pid` | The holder's process id, used by `ls` and `kill`. |
+| `<name>.pid` | A record of the holder's process id and the sockets it bound, used by `ls`, `kill` and `attach`. |
 
 They live in a private per-user directory:
 
@@ -99,7 +99,20 @@ srwxr-xr-x 1 root root    0 Oct  9 19:31 demo.tty.sock
 ```
 
 `--no-listen` creates none of this, and `--script` never does. `--listen=<path>` moves only the JSON socket to a
-path of your choosing; the other two files stay in the session directory.
+path of your choosing; the other two files stay in the session directory. `ls`, `kill` and `attach` still find
+such a session, because the `.pid` file is a three-line record: the holder's process id, then the path of the
+JSON socket it bound, then the path of the terminal socket. The paths are absolute, so a relative `--listen`
+path works from any directory.
+
+```
+$ cat $TMPDIR/vtee-0/custom.pid
+2215
+/tmp/custom.sock
+/tmp/vtee-0/custom.tty.sock
+```
+
+A `.pid` file that holds only the process id, as written by earlier versions, is read as "the conventional
+paths".
 
 Linux limits socket paths to about 108 bytes, so a very long `TMPDIR` can make session creation fail.
 
@@ -111,11 +124,19 @@ demo	pid=2221	live
 ```
 
 `ls` reports a session `live` only if its socket accepts a connection, not merely because the files exist. After a
-holder is killed with `SIGKILL` the files stay behind and show as `stale`.
+holder is killed with `SIGKILL` the files stay behind and show as `stale`. For a session started with
+`--listen=<path>`, `ls` adds the socket path:
 
-`vtee kill <name>` ends a live session and removes its files; for a stale one it just removes the files. It
-checks that the socket answers before signalling the process, so a stale pidfile whose process id has been reused
-cannot make `kill` signal an unrelated process.
+```
+$ vtee ls
+custom	pid=2215	live	sock=/tmp/custom.sock
+demo	pid=2206	live
+```
+
+`vtee kill <name>` ends a live session and removes its files, including the sockets its record names; for a
+stale one it just removes the files. It checks that the recorded socket answers before signalling the process, so
+a stale pidfile whose process id has been reused cannot make `kill` signal an unrelated process. On Linux a
+recorded path that is no longer a socket is left alone.
 
 ## Attaching and detaching
 

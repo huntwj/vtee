@@ -16,10 +16,16 @@ pub fn run_attach(name: Option<&str>) -> ExitCode {
             Err(message) => return fail(exitcode::USAGE, message),
         },
     };
-    match vtee::session_paths(&name) {
-        Ok(paths) => attach(&name, &paths.tty_sock),
-        Err(e) => fail(exitcode::OSERR, format!("couldn't resolve session {name:?}: {e}")),
-    }
+    let paths = match vtee::session_paths(&name) {
+        Ok(p) => p,
+        Err(e) => return fail(exitcode::OSERR, format!("couldn't resolve session {name:?}: {e}")),
+    };
+    let tty_sock = match vtee::session_record(&name) {
+        Ok(Some(record)) => record.tty_sock,
+        Ok(None) => paths.tty_sock,
+        Err(e) => return fail(exitcode::OSERR, format!("couldn't read session {name:?}: {e}")),
+    };
+    attach(&name, &tty_sock)
 }
 
 fn attach(name: &str, tty_sock: &Path) -> ExitCode {
@@ -92,7 +98,8 @@ fn resolve_default_session() -> Result<String, String> {
     live.pop().map(|(name, _)| name).ok_or_else(|| "no live sessions to attach to".to_string())
 }
 
-/// `ls`: each session with a pidfile, marked `live` (its socket answers) or `stale`.
+/// `ls`: each session with a pidfile, marked `live` (its recorded socket answers) or `stale`. A
+/// socket that isn't the conventional one (`--listen=<path>`) is shown too.
 pub fn run_ls() -> ExitCode {
     let names = match vtee::session_names() {
         Ok(n) => n,
@@ -104,42 +111,71 @@ pub fn run_ls() -> ExitCode {
     }
     for name in names {
         let live = vtee::session_is_live(&name).unwrap_or(false);
-        let pid = vtee::session_paths(&name).ok().and_then(|p| std::fs::read_to_string(&p.pidfile).ok());
+        let record = vtee::session_record(&name).ok().flatten();
+        let conventional_sock = vtee::session_paths(&name).ok().map(|p| p.sock);
         let status = if live { "live" } else { "stale" };
-        match pid {
-            Some(pid) => println!("{name}\tpid={}\t{status}", pid.trim()),
-            None => println!("{name}\t{status}"),
+        let mut line = name;
+        if let Some(pid) = record.as_ref().and_then(|r| r.pid) {
+            line.push_str(&format!("\tpid={pid}"));
         }
+        line.push_str(&format!("\t{status}"));
+        if let Some(record) = &record
+            && Some(&record.sock) != conventional_sock.as_ref()
+        {
+            line.push_str(&format!("\tsock={}", record.sock.display()));
+        }
+        println!("{line}");
     }
     ExitCode::SUCCESS
 }
 
-/// `kill <name>`: signal the holder and remove its files. The files are removed here because the
-/// holder's `SIGTERM` handler exits without running destructors. A holder is signalled only if
-/// its socket answers: a stale pidfile may name a PID that has since been reused.
+/// `kill <name>`: signal the holder and remove its files, including the sockets its record names.
+/// The files are removed here because the holder's `SIGTERM` handler exits without running
+/// destructors. A holder is signalled only if the recorded socket answers: a stale pidfile may name
+/// a PID that has since been reused.
 pub fn run_kill(name: &str) -> ExitCode {
     let paths = match vtee::session_paths(name) {
         Ok(p) => p,
         Err(e) => return fail(exitcode::OSERR, format!("couldn't resolve session {name:?}: {e}")),
     };
-    let pidfile_existed = paths.pidfile.exists();
+    let record = match vtee::session_record(name) {
+        Ok(r) => r,
+        Err(e) => return fail(exitcode::OSERR, format!("couldn't read session {name:?}: {e}")),
+    };
     match vtee::session_is_live(name) {
         Ok(true) => {
-            if let Some(pid) = std::fs::read_to_string(&paths.pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok())
+            if let Some(pid) = record.as_ref().and_then(|r| r.pid)
                 && pid > 1
             {
                 stop_holder(pid, &paths.pidfile);
             }
         }
         // A leftover pidfile just gets cleaned up; no pidfile at all means there was never a session.
-        Ok(false) if pidfile_existed => {}
+        Ok(false) if record.is_some() => {}
         Ok(false) => return fail(exitcode::NOHOST, format!("no session named {name:?}")),
         Err(e) => return fail(exitcode::OSERR, format!("couldn't check session {name:?}: {e}")),
     }
-    let _ = std::fs::remove_file(&paths.sock);
-    let _ = std::fs::remove_file(&paths.tty_sock);
+    let (sock, tty_sock) = match record {
+        Some(r) => (r.sock, r.tty_sock),
+        None => (paths.sock, paths.tty_sock),
+    };
+    remove_socket_file(&sock);
+    remove_socket_file(&tty_sock);
     let _ = std::fs::remove_file(&paths.pidfile);
     ExitCode::SUCCESS
+}
+
+/// A stale record's socket path may since have been reused for something else, so on Unix only an
+/// actual socket is removed.
+fn remove_socket_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(path);
 }
 
 #[cfg(unix)]

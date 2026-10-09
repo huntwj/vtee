@@ -24,9 +24,8 @@ Then find the socket. It is `<name>.sock` in the session directory (`${TMPDIR:-/
 SOCK="${TMPDIR:-/tmp}/vtee-$(id -u)/work.sock"
 ```
 
-`--listen=<path>` lets you pick the socket path yourself, but a session started that way is not seen by `vtee
-ls` and cannot be ended with `vtee kill` (see [Troubleshooting](troubleshooting.md#a-session-started-with---listenpath-looks-stale)).
-Prefer the default path.
+`--listen=<path>` lets you pick the socket path yourself. `vtee ls`, `kill` and `attach` still find the session
+by name, and `ls` shows the path. If you do not need a particular path, the default is simpler.
 
 Each call to `vtee --connect "$SOCK"` is its own connection. Send several commands at once on one connection by
 writing several lines:

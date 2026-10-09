@@ -649,3 +649,26 @@ later ConPTY child lives; forcing the listener inheritable did not change the re
 the next prompt), the `ENABLE_VIRTUAL_TERMINAL_*` flags for `attach`'s raw relay (special keys through the console
 input path are unmeasured), and a PID-reuse guard beyond the liveness check.
 
+
+## 2026-10-09: the pidfile records the sockets a session bound
+
+**Bug (reported by another project using `--listen=<path>`, and found independently by the docs pass):** `vtee ls`
+showed a `--listen=<path>` session as `stale`, and `kill` on it removed the pid and tty files while the holder kept
+running. It was not about Docker or pid 1. `session_is_live`, `kill` and `attach` always looked for the
+conventional `<name>.sock`, and `--listen=<path>` binds the NDJSON socket somewhere else.
+
+**Fix:** `<name>.pid` is now a record of three lines, written last (after both sockets are bound): the pid, the
+NDJSON socket path, the raw-TTY socket path, both made absolute because readers run from other directories. Line 1
+stays a bare pid so older readers still work, and a legacy pid-only file (or an empty line) falls back to the
+conventional paths. Everything that finds a session goes through `session_record`. The safety rule is unchanged:
+`kill` signals only after the recorded socket answers, and the Windows creation-time guard is kept.
+
+**Deliberate details:** `kill` removes the recorded sockets, but on Unix only if the path is still a socket, since
+a stale record's path may since have been reused for something else. `ls` prints `sock=<path>` only when it is not
+the conventional path, so default sessions look as before. The record is written last, so a record's presence now
+means the sockets exist; `tests` use that as their readiness signal.
+
+**Known limit, unchanged:** nothing ties a record's pid to the process that owns the recorded socket. If a stale
+record's pid has been reused and a different session has since bound the same custom path, `kill` would signal the
+reused pid (Windows is protected by its creation-time check). Checking the socket peer's credentials on Linux would
+close it; not done, since it needs a deliberately reused PID *and* a reused socket path.

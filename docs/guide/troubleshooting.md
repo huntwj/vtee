@@ -39,11 +39,13 @@ bytes: one `ESC[0m` per screen cell, plus cursor movements. Run it in a real ter
 ## A session started with `--listen=<path>` looks stale
 
 A session started with an explicit socket path, as in `vtee --headless --name x --listen=/tmp/x.sock -- ...`,
-puts its pidfile and terminal socket in the session directory but the JSON socket at your path. `vtee ls` looks
-for `x.sock` in the session directory, does not find it, and reports the session `stale`. `vtee kill x` then
-treats it as stale: it removes the pidfile and terminal socket and does **not** stop the holder, which keeps
-running and is no longer listed. This is a bug. Until it is fixed, avoid `--listen=<path>` together with
-`ls`/`kill`/`attach`, or stop such a session by killing the `vtee` process yourself.
+is found by `vtee ls`, `kill` and `attach`: its `.pid` file records the socket it bound, and `ls` prints
+`sock=<path>` for it. If `ls` shows such a session as `stale`, the holder really is gone.
+
+The exception is a holder started by an earlier `vtee`, which wrote only its process id. `ls` looks for that
+session's socket at the conventional path, reports it `stale`, and `kill` then removes its files without stopping
+the holder. Stop it by ending the `vtee` process yourself, and use `--connect <path>` with the path you gave it
+in the meantime.
 
 ## Common error messages
 

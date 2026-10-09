@@ -143,10 +143,75 @@ pub fn session_paths(name: &str) -> io::Result<SessionPaths> {
     })
 }
 
-/// Whether a session is live. Connects to its socket rather than trusting the pidfile or the
-/// socket file's existence, since a killed session leaves both behind.
+/// What the holder writes to `<name>.pid` once its sockets are bound: line 1 is its pid, line 2
+/// the NDJSON socket it actually bound (which `--listen=<path>` moves away from the session
+/// directory), line 3 the raw-TTY socket. A legacy file holds just the pid, and an empty line
+/// means "the conventional path"; readers fill both in from `session_paths`.
+pub struct SessionRecord {
+    /// `None` when the first line isn't a number.
+    pub pid: Option<i32>,
+    pub sock: PathBuf,
+    pub tty_sock: PathBuf,
+}
+
+impl SessionRecord {
+    fn parse(text: &str, conventional: &SessionPaths) -> SessionRecord {
+        let mut lines = text.lines();
+        let pid = lines.next().and_then(|l| l.trim().parse::<i32>().ok());
+        let mut path_or = |default: &Path| match lines.next() {
+            Some(line) if !line.is_empty() => PathBuf::from(line),
+            _ => default.to_path_buf(),
+        };
+        let sock = path_or(&conventional.sock);
+        let tty_sock = path_or(&conventional.tty_sock);
+        SessionRecord { pid, sock, tty_sock }
+    }
+
+    fn render(pid: u32, sock: &Path, tty_sock: &Path) -> io::Result<String> {
+        let line = |path: &Path| match path.to_str() {
+            Some(s) if !s.contains(['\n', '\r']) => Ok(s.to_string()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} can't be recorded: it must be UTF-8 without line breaks", path.display()),
+            )),
+        };
+        Ok(format!("{pid}\n{}\n{}\n", line(sock)?, line(tty_sock)?))
+    }
+}
+
+/// Writes this process's session record to `pidfile`. The paths are made absolute first: readers
+/// run in other directories, and a `--listen=sock` given relative to this process's cwd would
+/// otherwise point nowhere for them.
+pub fn write_session_record(pidfile: &Path, sock: &Path, tty_sock: &Path) -> io::Result<()> {
+    let text = SessionRecord::render(std::process::id(), &std::path::absolute(sock)?, &std::path::absolute(tty_sock)?)?;
+    std::fs::write(pidfile, text)
+}
+
+/// The session's record, or `None` if it has no pidfile at all (there was never a session by this
+/// name, or it was cleaned up).
+pub fn session_record(name: &str) -> io::Result<Option<SessionRecord>> {
+    read_record(&session_paths(name)?)
+}
+
+fn read_record(paths: &SessionPaths) -> io::Result<Option<SessionRecord>> {
+    match std::fs::read_to_string(&paths.pidfile) {
+        Ok(text) => Ok(Some(SessionRecord::parse(&text, paths))),
+        // Not text: nothing in it is usable, but the session did exist.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => Ok(Some(SessionRecord::parse("", paths))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a session is live. Connects to the socket it recorded (the conventional one without a
+/// record) rather than trusting the pidfile or the socket file's existence, since a killed session
+/// leaves both behind.
 pub fn session_is_live(name: &str) -> io::Result<bool> {
-    connects(&session_paths(name)?.sock)
+    let paths = session_paths(name)?;
+    match read_record(&paths)? {
+        Some(record) => connects(&record.sock),
+        None => connects(&paths.sock),
+    }
 }
 
 fn connects(sock: &Path) -> io::Result<bool> {
@@ -208,6 +273,49 @@ mod tests {
         for good in ["tf", "my-session_2", "a.b", "COM0", "COM10", "CONSOLE", "lpt", "x.con"] {
             assert_eq!(windows_name_problem(good), None, "{good:?}");
         }
+    }
+
+    fn conventional() -> SessionPaths {
+        SessionPaths {
+            sock: PathBuf::from("/d/n.sock"),
+            tty_sock: PathBuf::from("/d/n.tty.sock"),
+            pidfile: PathBuf::from("/d/n.pid"),
+        }
+    }
+
+    #[test]
+    fn a_legacy_pid_only_file_means_the_conventional_sockets() {
+        let r = SessionRecord::parse("1234", &conventional());
+        assert_eq!((r.pid, r.sock, r.tty_sock), (Some(1234), "/d/n.sock".into(), "/d/n.tty.sock".into()));
+    }
+
+    #[test]
+    fn a_full_record_names_the_sockets_it_bound() {
+        let r = SessionRecord::parse("77\n/run/x.sock\n/run/x.tty.sock\n", &conventional());
+        assert_eq!((r.pid, r.sock, r.tty_sock), (Some(77), "/run/x.sock".into(), "/run/x.tty.sock".into()));
+    }
+
+    #[test]
+    fn an_empty_or_missing_line_falls_back_to_the_conventional_path() {
+        let r = SessionRecord::parse("77\n/run/x.sock\n\n", &conventional());
+        assert_eq!((r.sock, r.tty_sock), ("/run/x.sock".into(), "/d/n.tty.sock".into()));
+        let r = SessionRecord::parse("77\n\n/run/t.sock", &conventional());
+        assert_eq!((r.sock, r.tty_sock), ("/d/n.sock".into(), "/run/t.sock".into()));
+    }
+
+    #[test]
+    fn crlf_line_endings_and_a_garbage_pid_are_tolerated() {
+        let r = SessionRecord::parse("oops\r\n/run/x.sock\r\n/run/t.sock\r\n", &conventional());
+        assert_eq!((r.pid, r.sock, r.tty_sock), (None, "/run/x.sock".into(), "/run/t.sock".into()));
+    }
+
+    #[test]
+    fn render_round_trips_and_refuses_paths_it_cannot_record() {
+        let text = SessionRecord::render(5, Path::new("/a b/s.sock"), Path::new("/a b/t.sock")).unwrap();
+        let r = SessionRecord::parse(&text, &conventional());
+        assert_eq!((r.pid, r.sock, r.tty_sock), (Some(5), "/a b/s.sock".into(), "/a b/t.sock".into()));
+        assert!(SessionRecord::render(5, Path::new("/a\nb"), Path::new("/t")).is_err());
+        assert!(SessionRecord::render(5, Path::new("/s"), Path::new("/t\r")).is_err());
     }
 
     #[test]

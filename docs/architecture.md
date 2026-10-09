@@ -33,8 +33,8 @@ session:
   of the current screen (`redraw_sequence`, `src/snapshot.rs`), then the live byte stream. Its typing goes to the
   program.
 
-Any number of clients of either kind can be connected. A third file, `<name>.pid`, lets `ls` and `kill` find the
-holder.
+Any number of clients of either kind can be connected. A third file, `<name>.pid`, is a small record of the holder's
+pid and the sockets it actually bound; `ls`, `kill` and `attach` read it to find the holder.
 
 **Terminal queries.** Programs sometimes ask the terminal a question (`ESC[6n`, "where is the cursor?"). With a
 real terminal attached it answers. With none, the emulator's own answer is written back so the program does not
@@ -432,6 +432,15 @@ name is the program's own basename (`vtee tf` → session `tf`); `--name <NAME>`
 trusting the pidfile or the socket file's mere existence - a stale file left by a killed session must not look
 "alive," the same reasoning `Tap::serve`'s own pre-bind `remove_file` already relies on.
 
+**The pidfile is a record, so `--listen=<path>` sessions are found too.** `--listen=<path>` binds the NDJSON
+socket somewhere other than `<name>.sock`, and the readers used to look only at the conventional path, so such a
+session showed as `stale` and `kill` left its holder running. The holder now writes `<name>.pid` as three lines
+(`SessionRecord`, `src/session.rs`): its pid, the NDJSON socket path, the raw-TTY socket path, both made absolute
+because readers run from other directories. Line 1 stays a bare pid so older readers still work, and a legacy
+pid-only file, or an empty line, falls back to the conventional paths. The record is written last, after both
+sockets are bound, so a record's presence means the sockets exist. `session_is_live`, `ls`, `kill` and `attach`
+all go through `session_record(name)`.
+
 **Duplicate names are rejected, matching tmux's own real default** (confirmed against tmux's actual source,
 not assumed): `tmux new-session -s NAME` on an existing name errors `duplicate session: NAME` - no
 auto-suffixing, no silent attach. `vtee <program>` does the same. The one exception, also tmux's own
@@ -467,10 +476,13 @@ does this (it only ever consumes ANSI, never re-emits it), so this is new code, 
 Scope, deliberately: visual state only (cells + cursor); restoring input-affecting modes (app-cursor-keys,
 mouse reporting) for a freshly-attached client's own keystrokes is a smaller, known follow-on.
 
-**`vtee ls`/`kill`** read/signal via the pidfile. `kill` cleans up all three files itself rather than relying
-on the holder's own cleanup - `watch_sigterm`'s handler calls `std::process::exit` directly on `SIGTERM`, which
-skips every destructor including the holder's own cleanup guard (`SessionFiles`, `src/main.rs`), so without
-this the files would be left behind despite the process actually stopping.
+**`vtee ls`/`kill`** read/signal via the pidfile record. `kill` signals only after the recorded NDJSON socket
+answers, then cleans up the pidfile and the recorded sockets itself rather than relying on the holder's own
+cleanup - `watch_sigterm`'s handler calls `std::process::exit` directly on `SIGTERM`, which skips every destructor
+including the holder's own cleanup guard (`SessionFiles`, `src/main.rs`), so without this the files would be left
+behind despite the process actually stopping. On Unix a recorded path is removed only if it is still a socket: a
+stale record's path may since have been reused for something else. `ls` prints `sock=<path>` for a session whose
+NDJSON socket is not the conventional one.
 
 **Detach has no keybinding**, unlike tmux (which needs a prefix key, Ctrl-b `d`, because its server requires
 an explicit detach signal). Here, the holder's lifetime depends on the child process, not on any one client
