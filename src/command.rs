@@ -162,3 +162,77 @@ impl Command {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commands() -> Vec<(&'static str, Command)> {
+        vec![
+            ("snapshot", Command::Snapshot),
+            ("wait_for", Command::WaitFor { text: "x".into(), timeout_ms: 1 }),
+            ("wait_ms", Command::WaitMs { ms: 1 }),
+            ("acquire_write", Command::AcquireWrite),
+            ("release_write", Command::ReleaseWrite),
+            ("send", Command::Send { text: "x".into() }),
+            ("send_key", Command::SendKey { key: "Up".into() }),
+            ("resize", Command::Resize { cols: 80, rows: 24 }),
+        ]
+    }
+
+    fn policies() -> [(&'static str, WritePolicy); 4] {
+        [
+            ("read_only", WritePolicy::ReadOnly),
+            ("open", WritePolicy::Open),
+            ("exclusive_always_wins", WritePolicy::Exclusive { human_priority: HumanPriority::AlwaysWins }),
+            ("exclusive_participant", WritePolicy::Exclusive { human_priority: HumanPriority::Participant }),
+        ]
+    }
+
+    /// Every command under every policy, with and without a real terminal owning the size,
+    /// against the documented rules - a change to any cell of this table is a behaviour change.
+    #[test]
+    fn authorize_matches_the_documented_rules_for_every_combination() {
+        for (cmd_name, cmd) in commands() {
+            for (policy_name, policy) in policies() {
+                for terminal_owns_size in [false, true] {
+                    let is_write = matches!(cmd_name, "send" | "send_key" | "resize");
+                    let is_handoff = matches!(cmd_name, "acquire_write" | "release_write");
+                    let exclusive = matches!(policy, WritePolicy::Exclusive { .. });
+                    let expected = if is_handoff {
+                        if exclusive { Ok(()) } else { Err(Denied::NotExclusivePolicy) }
+                    } else if cmd_name == "resize" && terminal_owns_size {
+                        Err(Denied::ResizeOwnedByTerminal)
+                    } else if is_write && policy == WritePolicy::ReadOnly {
+                        Err(Denied::ReadOnly)
+                    } else {
+                        Ok(())
+                    };
+                    assert_eq!(
+                        cmd.authorize(policy, terminal_owns_size),
+                        expected,
+                        "{cmd_name} under {policy_name}, terminal_owns_size={terminal_owns_size}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reads_are_never_denied() {
+        for (name, cmd) in commands() {
+            if matches!(name, "snapshot" | "wait_for" | "wait_ms") {
+                for (_, policy) in policies() {
+                    assert_eq!(cmd.authorize(policy, true), Ok(()), "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn denial_messages_name_the_remedy() {
+        assert!(Denied::ReadOnly.to_string().contains("--writable"));
+        assert!(Denied::NotExclusivePolicy.to_string().contains("exclusive"));
+        assert!(Denied::ResizeOwnedByTerminal.to_string().contains("real terminal"));
+    }
+}
