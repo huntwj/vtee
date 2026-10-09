@@ -4,6 +4,22 @@ How `vtee` is actually built, as of 2026-10-06 (v0). Written because this didn't
 document before now - it was scattered across source comments and `HANDOFF.md`'s design notes. See
 `requirements.md` for what this is trying to satisfy and `roadmap.md` for what's still missing.
 
+## Source layout (2026-10-08)
+
+`src/lib.rs` and `src/main.rs` were split on 2026-10-08; sections below that cite `src/lib.rs` or `src/main.rs`
+were written against the old single files. Where things live now:
+
+| File | Contents |
+| --- | --- |
+| `tap.rs` | `Tap`, `SpawnOptions`, shared state, output/input forwarding threads |
+| `serve.rs` | `ServeOptions`, `ExclusiveLock` (including `permits`), the public `serve`/`serve_tty` entry points |
+| `sockets.rs` | Unix-only: accept loops, connection caps, the NDJSON and raw-TTY connection handlers |
+| `session.rs` | Session directory, name validation, `session_paths`/`session_is_live`/`session_names` |
+| `rawmode.rs` | `RawModeGuard` and the terminal-restore watchdog |
+| `command.rs`, `snapshot.rs`, `keys.rs`, `log.rs` | Protocol types and `authorize`/`Denied`, snapshot + redraw, named keys, asciicast log |
+| `main.rs` | CLI parsing and the spawn path |
+| `session_cmds.rs`, `client.rs`, `output.rs` | `attach`/`ls`/`kill`; `--connect`/`--script`; error and exit-code helpers |
+
 ## Shape
 
 ```

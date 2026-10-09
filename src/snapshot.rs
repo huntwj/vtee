@@ -180,18 +180,13 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     }
 }
 
-/// Reconstructs `snap`'s visible screen as raw ANSI bytes, for a freshly-attached raw-TTY client
-/// (`Tap::serve_tty`, `docs/architecture.md`) - sent before the live byte feed starts, so
-/// attaching mid-session shows the current picture immediately, the way `tmux attach` does,
-/// rather than a blank screen waiting for new output. No existing `alacritty_terminal` API does
-/// this (checked its 0.26.0 source directly, not assumed) - it only ever consumes ANSI, never
-/// re-emits it.
+/// Reconstructs `snap`'s visible screen as raw ANSI bytes for a freshly attached raw-TTY
+/// client, sent before the live feed so it sees the current picture at once. `alacritty_terminal`
+/// has no API that re-emits ANSI.
 ///
-/// Scope, deliberately: visual state only (cells + cursor position/visibility). Emits SGR
-/// unconditionally per cell rather than only on an attribute change - correct, not the most
-/// compact possible output, and not worth optimizing until a real session makes it matter.
-/// Does *not* restore input-affecting modes (app-cursor-keys, mouse reporting) for the new
-/// client's own keystrokes - a known, smaller follow-on, not a correctness gap in what's drawn.
+/// Visual state only (cells, cursor); input-affecting modes such as app-cursor-keys and mouse
+/// reporting are not restored. Emits SGR per cell rather than only on change, which is correct
+/// but not compact.
 pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
     let mut out = Vec::new();
     if snap.alt_screen {

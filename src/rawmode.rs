@@ -1,0 +1,116 @@
+//! Raw mode for our own terminal, plus a watchdog process that restores it even if we are
+//! `SIGKILL`'d.
+
+use std::io;
+
+/// Puts our controlling terminal in raw mode for the guard's lifetime so keystrokes reach the
+/// child unmodified (requirement 7), restoring it on drop and on panic unwind. A no-op when
+/// stdin isn't a terminal.
+///
+/// On Unix it also spawns a watchdog process that restores the terminal after `SIGKILL`. The
+/// watchdog's stdin is one end of a socketpair; we hold the other end, so when we die for any
+/// reason the OS closes it and the watchdog sees EOF. The watchdog can't call
+/// `crossterm::disable_raw_mode`, which relies on process-local state, so we capture the original
+/// termios ourselves and send it over the socket first.
+pub struct RawModeGuard {
+    active: bool,
+    #[cfg(unix)]
+    _watchdog: Option<std::os::unix::net::UnixStream>,
+}
+
+impl RawModeGuard {
+    pub fn new() -> Self {
+        use std::io::IsTerminal;
+        let is_tty = io::stdin().is_terminal();
+        #[cfg(unix)]
+        let original_termios = if is_tty { capture_termios() } else { None };
+        let active = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
+        RawModeGuard {
+            active,
+            #[cfg(unix)]
+            _watchdog: if active { spawn_tty_watchdog(original_termios) } else { None },
+        }
+    }
+}
+
+impl Default for RawModeGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn capture_termios() -> Option<libc::termios> {
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut termios) == 0 { Some(termios) } else { None }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_tty_watchdog(original_termios: Option<libc::termios>) -> Option<std::os::unix::net::UnixStream> {
+    use std::io::Write;
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+
+    let original_termios = original_termios?;
+    let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().ok()?;
+
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            (&original_termios as *const libc::termios).cast::<u8>(),
+            std::mem::size_of::<libc::termios>(),
+        )
+    };
+    ours.write_all(bytes).ok()?;
+
+    let exe = std::env::current_exe().ok()?;
+    std::process::Command::new(exe)
+        .arg("--internal-tty-guard")
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    Some(ours)
+}
+
+/// The watchdog process's entry point (`main.rs` calls it for `--internal-tty-guard`): read the
+/// termios sent by `spawn_tty_watchdog`, block until stdin hits EOF, then restore it.
+///
+/// - `/dev/tty` is opened up front and the fd held: reopening after the session leader dies
+///   fails with `ENXIO`.
+/// - Registering a `SIGHUP` handler keeps the watchdog alive when the kernel hangs up the
+///   process group after the leader exits; the registration only needs to stay alive.
+#[cfg(unix)]
+pub fn run_tty_guard() -> ! {
+    use std::io::Read;
+
+    let _sighup_guard = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP]);
+    let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty");
+
+    let mut stdin = io::stdin();
+    let mut termios_bytes = [0u8; std::mem::size_of::<libc::termios>()];
+    if stdin.read_exact(&mut termios_bytes).is_ok() {
+        let mut buf = [0u8; 1];
+        let _ = stdin.read(&mut buf); // blocks until EOF (clean drop or the main process dying)
+
+        if let Ok(tty) = tty {
+            use std::os::fd::AsRawFd;
+            // `read_unaligned`: a `[u8; N]` is only guaranteed 1-byte aligned, but termios needs more.
+            let termios: libc::termios = unsafe { std::ptr::read_unaligned(termios_bytes.as_ptr().cast()) };
+            unsafe {
+                libc::tcsetattr(tty.as_raw_fd(), libc::TCSANOW, &termios);
+            }
+        }
+    }
+    std::process::exit(0);
+}

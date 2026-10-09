@@ -213,6 +213,22 @@ mod unix_behavior {
         tmpdir.join(format!("vtee-{uid}"))
     }
 
+    /// Polls instead of sleeping a fixed time, so tests neither flake on a loaded machine nor
+    /// wait longer than they need to.
+    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A session is ready once its raw-TTY socket exists, which is the last file it binds.
+    fn wait_for_session(tmpdir: &std::path::Path, name: &str) {
+        let sock = session_dir(tmpdir).join(format!("{name}.tty.sock"));
+        wait_until(&format!("session {name:?} to start"), || sock.exists());
+    }
+
     /// Runs `vtee` headless (no tty needed) with `TMPDIR` pointed at an isolated directory -
     /// these tests assert on *side effects* (files created) while the process is still running,
     /// so it has to be killed rather than waited on to completion.
@@ -232,7 +248,7 @@ mod unix_behavior {
         let tmpdir = isolated_tmpdir();
         let dir = session_dir(&tmpdir);
         let mut child = spawn_headless(&tmpdir, &[]);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for_session(&tmpdir, "cat");
 
         let meta = std::fs::symlink_metadata(&dir).expect("default session dir should exist");
         assert!(meta.is_dir());
@@ -260,6 +276,7 @@ mod unix_behavior {
         let tmpdir = isolated_tmpdir();
         let dir = session_dir(&tmpdir);
         let mut child = spawn_headless(&tmpdir, &["--no-listen"]);
+        // Absence can't be polled for; give startup time to (wrongly) create the directory.
         std::thread::sleep(Duration::from_millis(300));
 
         assert!(!dir.exists(), "{} should not have been created with --no-listen", dir.display());
@@ -276,7 +293,7 @@ mod unix_behavior {
         let tmpdir = isolated_tmpdir();
         let dir = session_dir(&tmpdir);
         let mut child = spawn_headless(&tmpdir, &["--cols", "97", "--rows", "31"]);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for_session(&tmpdir, "cat");
 
         // Specifically the NDJSON socket (`cat.sock`), not the raw-TTY one (`cat.tty.sock`) -
         // both end in `.sock`, so matching on the extension alone would pick either.
@@ -318,7 +335,7 @@ mod unix_behavior {
     fn duplicate_session_name_is_rejected() {
         let tmpdir = isolated_tmpdir();
         let mut first = spawn_named(&tmpdir, "dup-test", &[]);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for_session(&tmpdir, "dup-test");
 
         vtee_in(&tmpdir)
             .args(["--name", "dup-test", "--", "cat"])
@@ -342,7 +359,7 @@ mod unix_behavior {
     fn attach_if_exists_attaches_instead_of_erroring() {
         let tmpdir = isolated_tmpdir();
         let mut first = spawn_named(&tmpdir, "attach-if-exists-test", &[]);
-        std::thread::sleep(Duration::from_millis(800));
+        wait_for_session(&tmpdir, "attach-if-exists-test");
 
         let mut second = std::process::Command::new(assert_cmd::cargo::cargo_bin("vtee"))
             .env("TMPDIR", &tmpdir)
@@ -351,6 +368,7 @@ mod unix_behavior {
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
+        // The attacher's connection isn't observable from outside, so allow time for it.
         std::thread::sleep(Duration::from_millis(800));
 
         use std::io::Write as _;
@@ -376,7 +394,7 @@ mod unix_behavior {
         let tmpdir = isolated_tmpdir();
         let dir = session_dir(&tmpdir);
         let mut child = spawn_named(&tmpdir, "ls-kill-test", &[]);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for_session(&tmpdir, "ls-kill-test");
 
         vtee_in(&tmpdir)
             .arg("ls")
@@ -387,10 +405,8 @@ mod unix_behavior {
 
         vtee_in(&tmpdir).args(["kill", "ls-kill-test"]).timeout(Duration::from_secs(5)).assert().success();
 
-        // `kill` cleans up the files directly (`run_kill`'s own doc comment: `watch_sigterm`'s
-        // handler calls `std::process::exit`, which would otherwise skip the holder's own
-        // `SessionFiles` guard) - give the signalled process a moment to actually exit too.
-        std::thread::sleep(Duration::from_millis(300));
+        // `kill` removes the files itself: the holder's SIGTERM handler exits without running
+        // its `SessionFiles` guard.
         assert!(!dir.join("ls-kill-test.sock").exists());
         assert!(!dir.join("ls-kill-test.tty.sock").exists());
         assert!(!dir.join("ls-kill-test.pid").exists());
@@ -425,6 +441,7 @@ mod unix_behavior {
             .args(["--name", "should-not-appear", "--no-listen", "--no-stdin", "--", "cat"])
             .spawn()
             .unwrap();
+        // Absence can't be polled for; give startup time to (wrongly) create the directory.
         std::thread::sleep(Duration::from_millis(300));
 
         assert!(!dir.exists(), "{} should not exist with --no-listen, even with --name", dir.display());
@@ -498,7 +515,7 @@ mod unix_behavior {
         let tmpdir = isolated_tmpdir();
         let dir = session_dir(&tmpdir);
         let mut child = spawn_named(&tmpdir, "hostile", &["--writable"]);
-        std::thread::sleep(Duration::from_millis(500));
+        wait_for_session(&tmpdir, "hostile");
         let sock = dir.join("hostile.sock");
 
         let mut s = UnixStream::connect(&sock).unwrap();
@@ -560,7 +577,7 @@ mod unix_behavior {
             .args(["--", "yes"])
             .spawn()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for_session(&tmpdir, "holblock");
 
         let tty_sock = dir.join("holblock.tty.sock");
         let ndjson_sock = dir.join("holblock.sock");
@@ -588,10 +605,11 @@ mod unix_behavior {
             });
         }
 
-        // Give `yes`'s output time to fill client A's queue past capacity and get it dropped,
-        // while client B keeps draining its own.
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(bytes_received.load(Ordering::Relaxed) > 0, "client B received nothing while client A was stalled");
+        // 4 MiB is well past client A's queue capacity (~2 MiB), so A is stalled and dropped by
+        // the time B has seen this much.
+        wait_until("client B to receive 4 MiB while client A is stalled", || {
+            bytes_received.load(Ordering::Relaxed) >= 4 * 1024 * 1024
+        });
 
         // The actual regression check: a `snapshot` query on the completely separate NDJSON
         // socket must still return within the timeout. Before the fix, this call shared the
