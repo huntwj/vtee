@@ -149,8 +149,8 @@ fn handle_line(tap: &Tap, id: u64, opts: ServeOptions, line: &str) -> Option<Com
         Ok(cmd) => cmd,
         Err(e) => return error(format!("bad command: {e}")),
     };
-    if let Err(message) = cmd.authorize(opts.write_policy, opts.resize_owned_by_terminal) {
-        return error(message);
+    if let Err(denied) = cmd.authorize(opts.write_policy, opts.resize_owned_by_terminal) {
+        return error(denied.to_string());
     }
     match cmd {
         Command::AcquireWrite => {
@@ -166,7 +166,7 @@ fn handle_line(tap: &Tap, id: u64, opts: ServeOptions, line: &str) -> Option<Com
         // `authorize` can't know which connection is asking, so whether this one holds the
         // lock is checked here.
         Command::Send { .. } | Command::SendKey { .. } | Command::Resize { .. }
-            if matches!(opts.write_policy, WritePolicy::Exclusive { .. }) && !tap.exclusive_lock.is_held_by(id) =>
+            if !tap.exclusive_lock.permits(opts.write_policy, id) =>
         {
             error("write access not held - send acquire_write first".to_string())
         }
@@ -191,12 +191,7 @@ fn serve_tty_connection(tap: &Tap, stream: UnixStream, policy: WritePolicy) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        let allowed = match policy {
-            WritePolicy::ReadOnly => false,
-            WritePolicy::Open => true,
-            WritePolicy::Exclusive { .. } => tap.exclusive_lock.is_held_by(id),
-        };
-        if allowed && tap.send_bytes(&buf[..n]).is_err() {
+        if tap.exclusive_lock.permits(policy, id) && tap.send_bytes(&buf[..n]).is_err() {
             break;
         }
     }

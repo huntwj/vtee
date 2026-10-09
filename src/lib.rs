@@ -13,7 +13,7 @@ pub mod snapshot;
 mod sockets;
 mod tap;
 
-pub use command::{Command, CommandResult, HumanPriority, WritePolicy};
+pub use command::{Command, CommandResult, Denied, HumanPriority, WritePolicy};
 pub use log::{RawLog, replay};
 pub use rawmode::RawModeGuard;
 #[cfg(unix)]

@@ -92,29 +92,43 @@ pub enum WritePolicy {
     Exclusive { human_priority: HumanPriority },
 }
 
+/// Why `Command::authorize` refused a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    NotExclusivePolicy,
+    ResizeOwnedByTerminal,
+    ReadOnly,
+}
+
+impl std::fmt::Display for Denied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Denied::NotExclusivePolicy => {
+                "acquire_write/release_write only mean something under the exclusive write policy"
+            }
+            Denied::ResizeOwnedByTerminal => {
+                "resize is controlled by the real terminal on this session - a remote resize would fight with it"
+            }
+            Denied::ReadOnly => "write commands aren't allowed on this connection - start the server with --writable",
+        })
+    }
+}
+
 impl Command {
     /// Whether `self` is allowed under `policy`. Under `Exclusive` it does not check that the
     /// caller holds the lock; this function doesn't know which connection is asking, so the
     /// connection handler does. `Resize` is rejected whenever a real terminal owns the pty's
     /// size, whatever the policy, since a remote resize would fight with it.
-    pub fn authorize(&self, policy: WritePolicy, resize_owned_by_terminal: bool) -> Result<(), String> {
+    pub fn authorize(&self, policy: WritePolicy, resize_owned_by_terminal: bool) -> Result<(), Denied> {
         match self {
             Command::Snapshot | Command::WaitFor { .. } | Command::WaitMs { .. } => Ok(()),
             Command::AcquireWrite | Command::ReleaseWrite => match policy {
                 WritePolicy::Exclusive { .. } => Ok(()),
-                WritePolicy::ReadOnly | WritePolicy::Open => {
-                    Err("acquire_write/release_write only mean something under the exclusive write policy".to_string())
-                }
+                WritePolicy::ReadOnly | WritePolicy::Open => Err(Denied::NotExclusivePolicy),
             },
-            Command::Resize { .. } if resize_owned_by_terminal => {
-                Err("resize is controlled by the real terminal on this session - a remote resize would fight with it"
-                    .to_string())
-            }
+            Command::Resize { .. } if resize_owned_by_terminal => Err(Denied::ResizeOwnedByTerminal),
             Command::Send { .. } | Command::SendKey { .. } | Command::Resize { .. } => match policy {
-                WritePolicy::ReadOnly => {
-                    Err("write commands aren't allowed on this connection - start the server with --writable"
-                        .to_string())
-                }
+                WritePolicy::ReadOnly => Err(Denied::ReadOnly),
                 WritePolicy::Open | WritePolicy::Exclusive { .. } => Ok(()),
             },
         }

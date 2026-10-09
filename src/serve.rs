@@ -56,6 +56,15 @@ impl ExclusiveLock {
         *self.holder.lock_unpoisoned() == Some(id)
     }
 
+    /// Whether connection `id` may write under `policy`; the one place both protocols decide it.
+    pub(crate) fn permits(&self, policy: WritePolicy, id: u64) -> bool {
+        match policy {
+            WritePolicy::ReadOnly => false,
+            WritePolicy::Open => true,
+            WritePolicy::Exclusive { .. } => self.is_held_by(id),
+        }
+    }
+
     /// `HumanPriority::Participant`: a keystroke revokes whoever holds the lock. Returns whether
     /// anyone did, so the caller can skip logging the common "nobody" case.
     pub(crate) fn revoke(&self) -> bool {
