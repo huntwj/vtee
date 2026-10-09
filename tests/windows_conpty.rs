@@ -1,35 +1,22 @@
-//! Automates the verification a human did manually from a real terminal (`docs/decisions.md`,
-//! 2026-10-08): does `vtee` actually work when run under a *real* ConPTY-backed terminal, not
-//! just when its own stdin/stdout are redirected pipes (which have no way to answer ConPTY's own
-//! cursor-position query, `ESC[6n`, and so hang forever - a real terminal answers that
-//! automatically, which is what this test stands in for). Acts as a minimal terminal: opens a
-//! real pty via our own (patched) `portable_pty`, spawns `vtee` attached to it, and answers
-//! any `ESC[6n` it sees so the session can actually complete, the same way a real terminal would.
+//! Native Windows (ConPTY) regression tests (`docs/decisions.md`, 2026-10-08 entries).
 //!
-//! Windows-only: this is specifically a regression test for the `CREATE_NEW_PROCESS_GROUP` patch
-//! (`vendor/portable-pty/README-vtee-patch.md`) - Linux never had the bug it guards against.
+//! ConPTY, created with `PSEUDOCONSOLE_INHERIT_CURSOR` the way `portable-pty` creates it, opens
+//! every session by sending a cursor-position query (`ESC[6n`) to whatever is on the other end
+//! of the pty and blocks everything - including the real child's output - until a
+//! `ESC[row;colR` reply arrives on its input. Two different things have to answer that:
 //!
-//! `#[ignore]`d by default (`docs/decisions.md`): measured to be genuinely flaky, not just slow,
-//! and the flakiness rate itself bounces around across batches of identical runs (2/3, then 1/5,
-//! then 5/6 failed) with no code change between them - the signature of a lower-level race, not
-//! an application-level bug. Two concrete, plausible causes were investigated and ruled out with
-//! actual evidence, not assumed away:
-//! - Whether the query could arrive split across two `read()`s, so checking only one chunk in
-//!   isolation could miss it - fixed anyway (checking the accumulated buffer is strictly more
-//!   correct), but diagnostics showed the query is always seen intact as the very first 4 bytes,
-//!   pass or fail.
-//! - Whether this test's own nested ConPTY sessions (the outer one hosting `vtee.exe`, the
-//!   inner one `vtee.exe` creates internally for `whoami.exe`) each emit their own independent
-//!   query, with a single-shot reply swallowing the second - fixed anyway (replies to every
-//!   occurrence found, not just the first), but diagnostics showed only one query ever appears
-//!   at all, in every run, pass or fail.
-//!
-//! Both fixes are kept as real robustness improvements (correct behavior regardless), but neither
-//! explains the actual hang - whatever's underneath is lower-level than this test can observe.
-//! A 1-in-3-to-1-in-2-ish failure rate makes this unfit as a normal gate (it would fail builds for
-//! reasons unrelated to any real regression). Run manually with
-//! `cargo test --test windows_conpty -- --ignored` when actually investigating this area, not as
-//! part of routine verification.
+//! - **Interactive** (`vtee_runs_to_completion_under_a_real_conpty_terminal`): the human's
+//!   terminal does. This test stands in for one: it opens a real pty via our own (patched)
+//!   `portable_pty`, spawns `vtee` attached to it, and answers every `ESC[6n` it sees. Also
+//!   the regression test for the `CREATE_NEW_PROCESS_GROUP` patch
+//!   (`vendor/portable-pty/README-vtee-patch.md`). Used to hang on roughly every other run:
+//!   the reply reached `vtee`'s stdin, but `forward_input`'s first read had started while the
+//!   console was still in cooked mode, and a cooked read swallowed it. `run_spawn` now enables
+//!   raw mode *before* `Tap::spawn`; measured 0 hangs in 30+ consecutive runs after the fix.
+//! - **Non-interactive** (`script_mode_answers_conptys_cursor_query_itself`): nothing is on
+//!   stdin to answer, so `Tap` answers from its own emulator (`ObserverListener` queues the
+//!   `Event::PtyWrite` replies `alacritty_terminal` produces, `forward_output` writes them back).
+//!   Hung on every run before that.
 
 #![cfg(windows)]
 
@@ -39,25 +26,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// DSR (Device Status Report), cursor-position variant: ConPTY issues this toward whatever's on
-/// the other end of its pty at session startup, expecting `CURSOR_POSITION_REPLY` back via
-/// stdin - a real terminal answers it automatically, which is what this test stands in for.
+/// DSR (Device Status Report), cursor-position variant, as ConPTY sends it at startup.
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
-/// A canned reply to `CURSOR_POSITION_QUERY` - row 1, column 1. The actual position doesn't
-/// matter for this test; only that *some* well-formed reply unblocks whatever's waiting on one.
+/// A canned reply - row 1, column 1. Only that *some* well-formed reply arrives matters here.
 const CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
 
 #[test]
-#[ignore]
 fn vtee_runs_to_completion_under_a_real_conpty_terminal() {
-    // Measured, not a precaution added on spec (docs/decisions.md): this test's own `openpty()`
-    // call below hung when *this test process* had no console of its own (reproduced via a
-    // PowerShell `Start-Process`-wrapped `cargo test` - passed every time run directly or via a
-    // Bash-tool-invoked `cargo test`). `AllocConsole` is a no-op failure (ignored) if one
-    // already exists. `Tap::spawn` carries the same call for the same reason in production.
-    unsafe {
-        winapi::um::consoleapi::AllocConsole();
-    }
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
@@ -80,41 +55,23 @@ fn vtee_runs_to_completion_under_a_real_conpty_terminal() {
         let output = output.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
-            // How far the query-scan has gotten, and how many replies have been sent - *not* a
-            // single-shot flag. Measured, not assumed, that this test nests two separate ConPTY
-            // sessions (the outer one hosting `vtee.exe` itself, created by this test's own
-            // `openpty()`; the inner one `vtee.exe` creates internally via `Tap::spawn` to
-            // host `whoami.exe`) - if each session's own startup handshake emits its own
-            // cursor-position query independently, and `vtee`'s `forward_output` relays the
-            // inner one through transparently (which it does - it has no logic to answer
-            // escape sequences itself, same as it wouldn't for a real human's terminal), a
-            // single-shot "answered" flag would silently swallow the second one, leaving it
-            // unanswered forever - diagnostics showed the first query always gets a successful
-            // reply, pass or fail, which pointed here rather than at the reply itself.
+            // Scans the accumulated output (a query could straddle two reads) and answers every
+            // occurrence, the way a real terminal would. Only the outer session's query is ever
+            // seen here: the inner one (`vtee`'s own pty) is forwarded to this pty's conhost,
+            // which answers it itself into `vtee`'s stdin - measured, not assumed.
             let mut scanned_up_to = 0usize;
-            let mut replies_sent = 0u32;
             while !stop.load(Ordering::Relaxed) {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let mut out = output.lock().unwrap();
                         out.extend_from_slice(&buf[..n]);
-                        // Rescan from a little before where the last scan ended, in case a
-                        // previous read ended mid-pattern - the minimal terminal emulation this
-                        // test exists to provide: a real terminal answers every cursor-position
-                        // query automatically, so stand in for one rather than leaving any of
-                        // ConPTY's own handshakes unanswered.
                         let overlap = CURSOR_POSITION_QUERY.len().saturating_sub(1);
                         let mut i = scanned_up_to.saturating_sub(overlap);
                         while i + CURSOR_POSITION_QUERY.len() <= out.len() {
                             if out[i..i + CURSOR_POSITION_QUERY.len()] == *CURSOR_POSITION_QUERY {
-                                replies_sent += 1;
-                                eprintln!("[test] cursor-position query #{replies_sent} at offset {i}, replying");
-                                let write_result = writer.write_all(CURSOR_POSITION_REPLY);
-                                let flush_result = writer.flush();
-                                eprintln!(
-                                    "[test] reply #{replies_sent} write: {write_result:?}, flush: {flush_result:?}"
-                                );
+                                let _ = writer.write_all(CURSOR_POSITION_REPLY);
+                                let _ = writer.flush();
                                 i += CURSOR_POSITION_QUERY.len();
                             } else {
                                 i += 1;
@@ -144,7 +101,7 @@ fn vtee_runs_to_completion_under_a_real_conpty_terminal() {
     // master's handle, which killing the child does not reliably unblock on Windows (measured -
     // joining here hung well past the 15s wait above with the child already gone). A short
     // sleep lets any output already in flight land in `output` before this test's only use of
-    // the thread ends; the thread itself is abandoned, harmless for a file with one test.
+    // the thread ends; the thread itself is abandoned, harmless for a file with one pty test.
     std::thread::sleep(Duration::from_millis(200));
 
     let out = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
@@ -156,4 +113,25 @@ fn vtee_runs_to_completion_under_a_real_conpty_terminal() {
         !out.trim().is_empty(),
         "expected whoami.exe's real output to come through the pty; got nothing but control sequences: {out:?}"
     );
+}
+
+/// `--script` has no terminal at all - stdin and stdout are pipes - so the only thing that can
+/// answer ConPTY's startup `ESC[6n` is `vtee` itself. `whoami.exe` prints `DOMAIN\user`;
+/// matching on the backslash avoids depending on the account name.
+#[test]
+fn script_mode_answers_conptys_cursor_query_itself() {
+    let script = std::env::temp_dir().join(format!("vtee-conpty-script-{}.ndjson", std::process::id()));
+    std::fs::write(&script, "{\"cmd\":\"wait_for\",\"text\":\"\\\\\",\"timeout_ms\":10000}\n").unwrap();
+
+    let result = assert_cmd::Command::cargo_bin("vtee")
+        .unwrap()
+        .args(["--script", script.to_str().unwrap(), "--", "whoami.exe"])
+        .timeout(Duration::from_secs(30))
+        .output();
+    let _ = std::fs::remove_file(&script);
+
+    let output = result.expect("vtee --script did not complete");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "vtee --script failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("\"matched\":true"), "whoami.exe's output never reached the emulator: {stdout}");
 }

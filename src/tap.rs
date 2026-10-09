@@ -1,7 +1,7 @@
 //! `Tap`: a child spawned in a pty, its output forwarded raw to our stdout (requirement 7) while
 //! a copy feeds an `alacritty_terminal` emulator that stays a passive observer.
 
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -36,19 +36,38 @@ impl<T> LockExt<T> for Mutex<T> {
 }
 
 /// Captures title changes via `alacritty_terminal`'s event callback, the only way to read a
-/// title back out of `Term`.
+/// title back out of `Term`, and (for a tap that is the child's only terminal) the replies the
+/// emulator wants sent back to the child for its queries - `ESC[6n` cursor-position reports,
+/// device attributes, mode reports - which `Term` emits as `Event::PtyWrite`.
 #[derive(Clone)]
 pub(crate) struct ObserverListener {
     title: Arc<Mutex<Option<String>>>,
+    /// `None` when something else (a human's real terminal) answers the child's queries, so the
+    /// emulator's own answers are dropped instead of queued forever.
+    replies: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl ObserverListener {
+    /// A listener that only tracks the title; query replies are discarded.
     pub(crate) fn new() -> Self {
-        ObserverListener { title: Arc::new(Mutex::new(None)) }
+        ObserverListener { title: Arc::new(Mutex::new(None)), replies: None }
+    }
+
+    /// A listener that also queues the emulator's query replies for [`Self::take_replies`].
+    pub(crate) fn answering_queries() -> Self {
+        ObserverListener { title: Arc::new(Mutex::new(None)), replies: Some(Arc::new(Mutex::new(Vec::new()))) }
     }
 
     pub(crate) fn current_title(&self) -> Option<String> {
         self.title.lock_unpoisoned().clone()
+    }
+
+    /// Replies queued since the last call, in the order the queries were parsed.
+    pub(crate) fn take_replies(&self) -> Vec<String> {
+        match &self.replies {
+            Some(replies) => std::mem::take(&mut *replies.lock_unpoisoned()),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -57,6 +76,11 @@ impl EventListener for ObserverListener {
         match event {
             Event::Title(t) => *self.title.lock_unpoisoned() = Some(t),
             Event::ResetTitle => *self.title.lock_unpoisoned() = None,
+            Event::PtyWrite(text) => {
+                if let Some(replies) = &self.replies {
+                    replies.lock_unpoisoned().push(text);
+                }
+            }
             _ => {}
         }
     }
@@ -112,7 +136,11 @@ pub struct SpawnOptions<'a> {
     pub cols: u16,
     pub rows: u16,
     pub log_path: Option<&'a Path>,
-    /// Forward our own stdin to the child (a human's keystrokes, requirement 7).
+    /// Forward our own stdin to the child (a human's keystrokes, requirement 7). A caller that
+    /// wants a real terminal's keystrokes must put it in raw mode *before* spawning: the stdin
+    /// thread's first read starts immediately, and on Windows a read begun in cooked (line
+    /// input) mode stays cooked, swallowing the terminal's reply to ConPTY's own startup
+    /// cursor query (`docs/decisions.md`, 2026-10-08).
     pub forward_input: bool,
     /// Forward the child's raw output to our own stdout (a human's view, requirement 7).
     pub forward_output: bool,
@@ -155,14 +183,16 @@ impl Tap {
         let cols = opts.cols.max(1);
         let rows = opts.rows.max(1);
 
-        // ConPTY's `openpty()` was observed to hang when the process has no console. Gated on
-        // `forward_output` because a new console window is wrong for --headless/--script.
-        #[cfg(windows)]
-        if opts.forward_output {
-            unsafe {
-                winapi::um::consoleapi::AllocConsole();
-            }
-        }
+        // Who answers the child's terminal queries (`ESC[6n` and friends)? A human's terminal
+        // does, when it sees the child's output *and* its answers come back through our stdin.
+        // Otherwise - --script, --headless, --no-stdin, or either side redirected to a pipe -
+        // nobody would, and a child that waits for the reply hangs. On Windows that child is
+        // ConPTY itself: created with `PSEUDOCONSOLE_INHERIT_CURSOR` (as `portable-pty` does)
+        // it issues `ESC[6n` at startup and blocks everything, including the real child's
+        // output, until a `ESC[row;colR` arrives (`docs/decisions.md`, 2026-10-08).
+        let terminal_answers =
+            opts.forward_input && opts.forward_output && io::stdin().is_terminal() && io::stdout().is_terminal();
+        let answer_queries = !terminal_answers;
 
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(to_io_error)?;
@@ -179,7 +209,7 @@ impl Tap {
         // With our slave handle closed, the master sees EOF once the child's copy closes too.
         drop(pair.slave);
 
-        let title = ObserverListener::new();
+        let title = if answer_queries { ObserverListener::answering_queries() } else { ObserverListener::new() };
         let term = Term::new(Config::default(), &Size { cols: cols as usize, rows: rows as usize }, title.clone());
         let shared: SharedState = Arc::new(Shared {
             state: Mutex::new(TapState { term, bytes_seen: 0, tty_sinks: Vec::new() }),
@@ -188,13 +218,16 @@ impl Tap {
 
         let log = opts.log_path.map(|p| RawLog::create(p, cols, rows)).transpose()?;
 
+        let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer().map_err(to_io_error)?));
+
         let mut reader = pair.master.try_clone_reader().map_err(to_io_error)?;
         let (done_tx, output_done) = mpsc::channel();
         {
             let shared = shared.clone();
             let write_raw = opts.forward_output;
+            let replies = answer_queries.then(|| (title.clone(), writer.clone()));
             thread::spawn(move || {
-                forward_output(&mut reader, shared, log, write_raw);
+                forward_output(&mut reader, shared, log, write_raw, replies);
                 let _ = done_tx.send(());
             });
         }
@@ -202,7 +235,6 @@ impl Tap {
         let exclusive_lock = Arc::new(ExclusiveLock::default());
         let human_revokes_lock = Arc::new(AtomicBool::new(false));
 
-        let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer().map_err(to_io_error)?));
         if opts.forward_input {
             let writer = writer.clone();
             let exclusive_lock = exclusive_lock.clone();
@@ -370,7 +402,15 @@ impl Drop for Tap {
     }
 }
 
-fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut log: Option<RawLog>, write_raw: bool) {
+/// `replies`: when this tap is the child's only terminal, the listener whose queued query
+/// replies get written back to the child through the pty writer after each chunk is parsed.
+fn forward_output(
+    reader: &mut Box<dyn Read + Send>,
+    shared: SharedState,
+    mut log: Option<RawLog>,
+    write_raw: bool,
+    replies: Option<(ObserverListener, SharedWriter)>,
+) {
     let mut stdout = io::stdout();
     let mut parser = Processor::<vte::ansi::StdSyncHandler>::new();
     let mut buf = [0u8; 8192];
@@ -389,7 +429,7 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
         if let Some(log) = log.as_mut() {
             let _ = log.write_event(chunk);
         }
-        {
+        let attach_client_answers = {
             let mut state = shared.state.lock_unpoisoned();
             parser.advance(&mut state.term, chunk);
             state.bytes_seen += n as u64;
@@ -400,6 +440,23 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
                 state.tty_sinks.retain(|(_, tx)| tx.try_send(shared_chunk.clone()).is_ok());
             }
             shared.changed.notify_all();
+            !state.tty_sinks.is_empty()
+        };
+        // Outside the state lock: `send_bytes` callers take only the writer lock, and a stalled
+        // pty writer must never hold up `snapshot()`.
+        if let Some((listener, writer)) = &replies {
+            let pending = listener.take_replies();
+            // An attached terminal sees this chunk too and answers it itself; a second reply
+            // from us would land in the child's input as stray keystrokes.
+            if !pending.is_empty() && !attach_client_answers {
+                let mut w = writer.lock_unpoisoned();
+                for reply in pending {
+                    if w.write_all(reply.as_bytes()).is_err() {
+                        break;
+                    }
+                }
+                let _ = w.flush();
+            }
         }
         // std's Mutex isn't fair: under a flooding child this loop re-takes the lock before a
         // waiting `snapshot()` caller ever gets scheduled, starving it.
