@@ -149,5 +149,23 @@ fn send_sigterm(pid: i32) {
     }
 }
 
-#[cfg(not(unix))]
-fn send_sigterm(_pid: i32) {}
+/// No graceful signal exists for a process without a console of ours, so terminate it outright;
+/// ConPTY then reaps the wrapped program. `kill` removes the session files itself.
+#[cfg(windows)]
+fn send_sigterm(pid: i32) {
+    const PROCESS_TERMINATE: u32 = 0x0001;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
