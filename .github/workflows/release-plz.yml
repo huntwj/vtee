@@ -1,0 +1,76 @@
+name: Release
+
+# Unverified until it has run on GitHub: the settings listed in docs/releasing.md must be enabled first.
+#
+# Every push to main:
+#   release-pr - opens or updates the release PR (version bump + CHANGELOG.md), computed from Conventional Commits.
+#   release    - when that PR has been merged, creates the git tag and GitHub Release (never publishes to crates.io).
+#   binaries   - builds vtee for Linux and Windows and attaches the archives to the new release.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # A PAT or GitHub App token (secret RELEASE_PLZ_TOKEN) lets CI run on the release PR;
+          # PRs opened with the default GITHUB_TOKEN do not trigger workflows.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+  release:
+    name: Tag and GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - id: release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+      - id: tag
+        env:
+          RELEASES: ${{ steps.release.outputs.releases }}
+        run: echo "tag=$(echo "${RELEASES:-[]}" | jq -r '.[0].tag // empty')" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Release binaries
+    needs: release
+    if: needs.release.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
