@@ -42,15 +42,15 @@ impl ObserverListener {
     }
 
     pub(crate) fn current_title(&self) -> Option<String> {
-        self.title.lock().unwrap().clone()
+        self.title.lock_unpoisoned().clone()
     }
 }
 
 impl EventListener for ObserverListener {
     fn send_event(&self, event: Event) {
         match event {
-            Event::Title(t) => *self.title.lock().unwrap() = Some(t),
-            Event::ResetTitle => *self.title.lock().unwrap() = None,
+            Event::Title(t) => *self.title.lock_unpoisoned() = Some(t),
+            Event::ResetTitle => *self.title.lock_unpoisoned() = None,
             _ => {}
         }
     }
@@ -98,7 +98,7 @@ impl Dimensions for Size {
 struct TapState {
     term: Term<ObserverListener>,
     bytes_seen: u64,
-    tty_sinks: Vec<(u64, SyncSender<Vec<u8>>)>,
+    tty_sinks: Vec<(u64, SyncSender<Arc<[u8]>>)>,
 }
 
 /// Bytes, not chunk count: at the 8KiB read-buffer size `forward_output` uses, this bounds a
@@ -149,6 +149,19 @@ struct Shared {
 type SharedState = Arc<Shared>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
+/// A panic on one thread (say, the emulator choking on odd input) poisons every lock it held;
+/// with plain `unwrap()` each later `snapshot()` would then panic too. The guarded data here is
+/// always left consistent between statements, so recovering the guard is safe.
+trait LockExt<T> {
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Backs `WritePolicy::Exclusive` (`docs/roadmap.md`, "Full duplex" stage 3b): at most one
 /// connection ID may hold write access at a time. A field, not a per-connection value, because
 /// it has to be shared across the accept loop's per-connection threads *and* (when
@@ -161,7 +174,7 @@ struct ExclusiveLock {
 
 impl ExclusiveLock {
     fn try_acquire(&self, id: u64) -> bool {
-        let mut holder = self.holder.lock().unwrap();
+        let mut holder = self.holder.lock_unpoisoned();
         match *holder {
             Some(_) => false,
             None => {
@@ -172,14 +185,14 @@ impl ExclusiveLock {
     }
 
     fn release_if_held_by(&self, id: u64) {
-        let mut holder = self.holder.lock().unwrap();
+        let mut holder = self.holder.lock_unpoisoned();
         if *holder == Some(id) {
             *holder = None;
         }
     }
 
     fn is_held_by(&self, id: u64) -> bool {
-        *self.holder.lock().unwrap() == Some(id)
+        *self.holder.lock_unpoisoned() == Some(id)
     }
 
     /// `HumanPriority::Participant`: a keystroke always revokes whoever currently holds it,
@@ -188,7 +201,7 @@ impl ExclusiveLock {
     /// anyone was actually holding it, so a caller logging this can skip the common "nobody
     /// held it anyway" case instead of logging every single keystroke.
     fn revoke(&self) -> bool {
-        self.holder.lock().unwrap().take().is_some()
+        self.holder.lock_unpoisoned().take().is_some()
     }
 }
 
@@ -351,7 +364,7 @@ impl Tap {
             .unwrap()
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(to_io_error)?;
-        self.shared.state.lock().unwrap().term.resize(Size { cols: cols as usize, rows: rows as usize });
+        self.shared.state.lock_unpoisoned().term.resize(Size { cols: cols as usize, rows: rows as usize });
         Ok(())
     }
 
@@ -367,8 +380,8 @@ impl Tap {
     /// reason to keep reaching for `clone_killer()` rather than this method for anything that
     /// might run concurrently with a blocked `wait()` in the future.
     pub fn wait(&self) -> io::Result<ExitStatus> {
-        let status = self.child.lock().unwrap().wait().map_err(to_io_error)?;
-        let _ = self.output_done.lock().unwrap().recv_timeout(Duration::from_millis(500));
+        let status = self.child.lock_unpoisoned().wait().map_err(to_io_error)?;
+        let _ = self.output_done.lock_unpoisoned().recv_timeout(Duration::from_millis(500));
         Ok(status)
     }
 
@@ -378,18 +391,18 @@ impl Tap {
     /// swallowed, not propagated, since "already gone" isn't a failure from a caller's
     /// perspective).
     pub fn kill(&self) {
-        let _ = self.child.lock().unwrap().kill();
+        let _ = self.child.lock_unpoisoned().kill();
     }
 
     /// The full current state (cells, attributes, cursor, modes, offset - requirement 3 and
     /// 4), atomically with respect to the output-forwarding thread.
     pub fn snapshot(&self) -> Snapshot {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock_unpoisoned();
         snapshot::build(&state.term, state.bytes_seen, self.title.current_title())
     }
 
     pub fn bytes_seen(&self) -> u64 {
-        self.shared.state.lock().unwrap().bytes_seen
+        self.shared.state.lock_unpoisoned().bytes_seen
     }
 
     /// Queues a redraw of the current screen and registers the sink to receive every chunk from
@@ -403,12 +416,12 @@ impl Tap {
     /// The actual blocking `write_all` happens on a dedicated thread, not under `self.shared`'s
     /// lock - see `TapState::tty_sinks`'s doc comment for why that split exists.
     fn attach_tty_sink(&self, id: u64, sink: Box<dyn Write + Send>) {
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(TTY_SINK_QUEUE_CAPACITY);
+        let (tx, rx) = mpsc::sync_channel::<Arc<[u8]>>(TTY_SINK_QUEUE_CAPACITY);
         {
-            let mut state = self.shared.state.lock().unwrap();
+            let mut state = self.shared.state.lock_unpoisoned();
             let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
             // The channel was just created with spare capacity, so this can't actually be full.
-            let _ = tx.try_send(snapshot::redraw_sequence(&snap));
+            let _ = tx.try_send(snapshot::redraw_sequence(&snap).into());
             state.tty_sinks.push((id, tx));
         }
         thread::spawn(move || {
@@ -422,13 +435,13 @@ impl Tap {
     }
 
     fn detach_tty_sink(&self, id: u64) {
-        self.shared.state.lock().unwrap().tty_sinks.retain(|(sink_id, _)| *sink_id != id);
+        self.shared.state.lock_unpoisoned().tty_sinks.retain(|(sink_id, _)| *sink_id != id);
     }
 
     /// Whether application-cursor-key mode (DECCKM, `?1`) is active, so `send_key` can pick
     /// the right escape form for arrows/Home/End (`src/keys.rs`).
     pub fn app_cursor_mode(&self) -> bool {
-        self.shared.state.lock().unwrap().term.mode().contains(TermMode::APP_CURSOR)
+        self.shared.state.lock_unpoisoned().term.mode().contains(TermMode::APP_CURSOR)
     }
 
     /// Write raw bytes to the child's input. Safe to call alongside interactive stdin
@@ -437,7 +450,7 @@ impl Tap {
     /// inject while a human is also typing is still an open policy question, not a
     /// data-corruption risk).
     pub fn send_bytes(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut w = self.writer.lock().unwrap();
+        let mut w = self.writer.lock_unpoisoned();
         w.write_all(bytes)?;
         w.flush()
     }
@@ -461,7 +474,7 @@ impl Tap {
     /// `Condvar` rather than polling.
     pub fn wait_for_text(&self, text: &str, timeout: Duration) -> (bool, Snapshot) {
         let deadline = Instant::now() + timeout;
-        let mut guard = self.shared.state.lock().unwrap();
+        let mut guard = self.shared.state.lock_unpoisoned();
         loop {
             let snap = snapshot::build(&guard.term, guard.bytes_seen, self.title.current_title());
             if snap.lines.iter().any(|l| l.contains(text)) {
@@ -497,8 +510,8 @@ impl Tap {
                     if cols == 0 || rows == 0 {
                         continue;
                     }
-                    let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-                    shared.state.lock().unwrap().term.resize(Size { cols: cols as usize, rows: rows as usize });
+                    let _ = master.lock_unpoisoned().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                    shared.state.lock_unpoisoned().term.resize(Size { cols: cols as usize, rows: rows as usize });
                 }
             }
         });
@@ -524,7 +537,7 @@ impl Tap {
         use signal_hook::consts::SIGTERM;
         use signal_hook::iterator::Signals;
 
-        let mut killer = self.child.lock().unwrap().clone_killer();
+        let mut killer = self.child.lock_unpoisoned().clone_killer();
         let Ok(mut signals) = Signals::new([SIGTERM]) else { return };
         thread::spawn(move || {
             if signals.forever().next().is_some() {
@@ -918,7 +931,7 @@ fn serve_tty_connection(tap: &Tap, stream: std::os::unix::net::UnixStream, polic
 /// `std::process::exit` while a `Tap` is still alive need to drop or kill it explicitly first.
 impl Drop for Tap {
     fn drop(&mut self) {
-        let _ = self.child.lock().unwrap().kill();
+        let _ = self.child.lock_unpoisoned().kill();
     }
 }
 
@@ -942,7 +955,7 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
             let _ = log.write_event(chunk);
         }
         {
-            let mut state = shared.state.lock().unwrap();
+            let mut state = shared.state.lock_unpoisoned();
             parser.advance(&mut state.term, chunk);
             state.bytes_seen += n as u64;
             // Broadcast to every attached TTY client (`Tap::serve_tty`), under the same lock
@@ -954,7 +967,10 @@ fn forward_output(reader: &mut Box<dyn Read + Send>, shared: SharedState, mut lo
             // (the client disconnected) reports the channel as disconnected and is dropped the
             // same way; `serve_tty_connection` also removes its own entry on the way out, so
             // this is a belt-and-suspenders cleanup for the same case.
-            state.tty_sinks.retain(|(_, tx)| tx.try_send(chunk.to_vec()).is_ok());
+            if !state.tty_sinks.is_empty() {
+                let shared_chunk: Arc<[u8]> = chunk.into();
+                state.tty_sinks.retain(|(_, tx)| tx.try_send(shared_chunk.clone()).is_ok());
+            }
             shared.changed.notify_all();
         }
         // std's Mutex isn't fair: under a flooding child this loop re-takes the lock before a
@@ -975,7 +991,7 @@ fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human
         // `HumanPriority`'s doc comment - so this writes first, unconditionally, and only
         // *afterward* decides whether that keystroke should also revoke a remote holder.
         {
-            let mut w = writer.lock().unwrap();
+            let mut w = writer.lock_unpoisoned();
             if w.write_all(&buf[..n]).is_err() {
                 break;
             }
@@ -987,8 +1003,8 @@ fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human
     }
 }
 
-fn to_io_error(e: impl std::fmt::Display) -> io::Error {
-    io::Error::other(e.to_string())
+fn to_io_error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::other(e)
 }
 
 #[cfg(unix)]
