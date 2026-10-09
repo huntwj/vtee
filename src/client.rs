@@ -96,11 +96,10 @@ fn run_script_body(tap: &vtee::Tap, script_path: &Path, text_mode: bool) -> Exit
 
 /// `--connect`: relay our stdin to a session's command socket line by line (the same NDJSON a
 /// script file holds) and print the result lines that come back.
-#[cfg(unix)]
 pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     use crate::output::print_error;
 
-    let stream = match std::os::unix::net::UnixStream::connect(path) {
+    let stream = match vtee::net::UnixStream::connect(path) {
         Ok(s) => s,
         Err(e) => return fail(exitcode::NOHOST, format!("failed to connect to {}: {e}", path.display())),
     };
@@ -141,11 +140,6 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     let _ = writer.shutdown(std::net::Shutdown::Write);
     let _ = reader_thread.join();
     ExitCode::SUCCESS
-}
-
-#[cfg(not(unix))]
-pub fn run_connect(_path: &Path, _text_mode: bool) -> ExitCode {
-    fail(exitcode::OSERR, "--connect needs Unix (requirement 8 defers Windows)")
 }
 
 /// `--text`: print only a result's screen lines, for a human skimming output.

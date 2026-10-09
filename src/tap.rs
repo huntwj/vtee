@@ -165,14 +165,10 @@ pub struct Tap {
     pub(crate) title: ObserverListener,
     // Receiver is `Send` but not `Sync`.
     output_done: Mutex<Receiver<()>>,
-    // The three below are only read by the Unix socket servers.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) exclusive_lock: Arc<ExclusiveLock>,
     // Set by `Tap::serve` after the stdin-forwarding thread is already running, hence not a
     // constructor argument.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) human_revokes_lock: Arc<AtomicBool>,
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) next_connection_id: Arc<AtomicU64>,
 }
 
@@ -404,7 +400,8 @@ impl Tap {
     }
 
     /// Catch `SIGTERM`: restore the terminal mode, kill the child, exit. Uses `clone_killer`
-    /// because the thread that owns the `Tap` may be blocked in `wait()`. Unix only.
+    /// because the thread that owns the `Tap` may be blocked in `wait()`. On Windows the trigger is
+    /// a console close, break or shutdown event; session files are left for `ls`/`kill` to clean.
     pub fn watch_sigterm(&self) {
         #[cfg(unix)]
         {
@@ -420,6 +417,33 @@ impl Tap {
                     std::process::exit(143); // 128 + SIGTERM
                 }
             });
+        }
+        #[cfg(windows)]
+        {
+            static KILLER: std::sync::OnceLock<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> =
+                std::sync::OnceLock::new();
+            const CTRL_BREAK_EVENT: u32 = 1;
+            const CTRL_CLOSE_EVENT: u32 = 2;
+            const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
+            // Runs on a thread Windows creates for the event; the process is killed shortly after
+            // it returns, so the child must be killed before then.
+            unsafe extern "system" fn on_ctrl(event: u32) -> i32 {
+                if !matches!(event, CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_SHUTDOWN_EVENT) {
+                    return 0;
+                }
+                let _ = crossterm::terminal::disable_raw_mode();
+                if let Some(killer) = KILLER.get() {
+                    let _ = killer.lock_unpoisoned().kill();
+                }
+                std::process::exit(143);
+            }
+
+            if KILLER.set(Mutex::new(self.child.lock_unpoisoned().clone_killer())).is_ok() {
+                unsafe {
+                    SetConsoleCtrlHandler(Some(on_ctrl), 1);
+                }
+            }
         }
     }
 }
@@ -518,15 +542,17 @@ fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human
 }
 
 #[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
+}
+
+#[cfg(windows)]
 fn restore_default_ctrl_c() {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn SetConsoleCtrlHandler(handler: *const std::ffi::c_void, add: i32) -> i32;
-    }
     // (NULL, FALSE) restores normal CTRL+C processing for this process and its future children.
     // Failing (no console at all) is harmless: there is no Ctrl-C to handle either.
     unsafe {
-        SetConsoleCtrlHandler(std::ptr::null(), 0);
+        SetConsoleCtrlHandler(None, 0);
     }
 }
 

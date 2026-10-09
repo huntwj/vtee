@@ -5,11 +5,11 @@
 mod command;
 mod keys;
 mod log;
+pub mod net;
 mod rawmode;
 mod serve;
 mod session;
 pub mod snapshot;
-#[cfg(unix)]
 mod sockets;
 mod tap;
 
@@ -24,8 +24,3 @@ pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot, redraw_sequence};
 pub use tap::{SpawnOptions, Tap};
 
 pub(crate) use tap::{ObserverListener, Size};
-
-#[cfg(not(unix))]
-pub(crate) fn unsupported(what: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{what} needs Unix"))
-}

@@ -65,15 +65,18 @@ status to track per-requirement rather than as one blob.
    anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
    `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
-   **Linux: met. Windows: met for spawning and `--script`; resize and signals unverified.** A local patch to
+   **Linux: met. Windows: met, minus the watchdog and a hand-set ACL (below).** A local patch to
    `portable-pty` (`vendor/portable-pty/`, `decisions.md`) fixed the original crash (`STATUS_CONTROL_C_EXIT`).
    The later intermittent hang turned out to be ours, not a lower-level race: ConPTY's startup cursor query
    went unanswered (a stdin read begun in cooked mode, or nobody to answer in `--script`/`--headless`).
    Raw mode is now enabled before the spawn and the tap answers the child's terminal queries itself when no
    human terminal can; `tests/windows_conpty.rs` is no longer `#[ignore]`d and passed 40/40 consecutive runs.
    Resize follows the outer terminal (polled, since there is no `SIGWINCH`), Ctrl-C reaches the child, and
-   `more`/`vim`/`less`/`edit` run (`tests/windows_behavior.rs`). Not verified: `SIGTERM`-style termination (no
-   Windows equivalent), and a force-killed `vtee` does not orphan its child (ConPTY reaps it, tested).
+   `more`/`vim`/`less`/`edit` run (`tests/windows_behavior.rs`). Named sessions, `attach`/`ls`/`kill` and both
+   sockets work too (AF_UNIX via `uds_windows`, `tests/windows_sessions.rs`); a close/break/shutdown event ends the
+   session cleanly, and a force-killed `vtee` does not orphan its child (ConPTY reaps it, tested). Not done on
+   Windows: a terminal-restore watchdog for a force-killed holder, and an owner-only ACL on the session directory
+   beyond the user profile's own.
 
 ## Not goals, for now
 

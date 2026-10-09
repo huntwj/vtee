@@ -7,7 +7,7 @@ memory, and lets a script or an AI agent query it and (later) send input, while 
 their own terminal as usual. Think of it as `tee` for a TUI: the stream is copied without disturbing the original,
 but the copy is a screen you can query, not raw bytes.
 
-**Status: v0 is done** on Linux (not yet on Windows - see `docs/decisions.md`), and being hardened now
+**Status: v0 is done** on Linux and Windows (see `docs/decisions.md`), and being hardened now
 (`docs/roadmap.md`). The name is a working name.
 
 It came out of testing TinyFugue (`~/ai/mud`): its display code, status line and input editing cannot be tested

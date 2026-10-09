@@ -56,9 +56,31 @@ fn default_session_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-#[cfg(not(unix))]
+/// `%LOCALAPPDATA%i-mux` (temp if unset): already private to the user by the profile's ACL.
+/// Kept short because AF_UNIX paths cap at 107 bytes. An existing entry must be a plain
+/// directory, not a symlink or junction.
+#[cfg(windows)]
 fn default_session_dir() -> io::Result<PathBuf> {
-    Err(crate::unsupported("named sessions"))
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("vtee");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+            return Err(io::Error::other(format!(
+                "{} exists and isn't a plain directory - refusing to use it as the default session dir",
+                dir.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => match std::fs::create_dir_all(&dir) {
+            Ok(()) => return default_session_dir(),
+            Err(e) => return Err(e),
+        },
+        Err(e) => return Err(e),
+    }
+    Ok(dir)
 }
 
 /// A name must be exactly one plain path component, otherwise `join` would escape the session
@@ -75,6 +97,17 @@ pub fn session_paths(name: &str) -> io::Result<SessionPaths> {
         ));
     }
     let dir = default_session_dir()?;
+    #[cfg(windows)]
+    {
+        // The longest file is `<name>.tty.sock`; AF_UNIX addresses cap at 107 bytes.
+        let longest = dir.join(format!("{name}.tty.sock")).as_os_str().len();
+        if longest > 107 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("session name {name:?} is too long: the socket path would be {longest} bytes (limit 107)"),
+            ));
+        }
+    }
     Ok(SessionPaths {
         sock: dir.join(format!("{name}.sock")),
         tty_sock: dir.join(format!("{name}.tty.sock")),
@@ -88,18 +121,12 @@ pub fn session_is_live(name: &str) -> io::Result<bool> {
     connects(&session_paths(name)?.sock)
 }
 
-#[cfg(unix)]
 fn connects(sock: &Path) -> io::Result<bool> {
-    match std::os::unix::net::UnixStream::connect(sock) {
+    match crate::net::UnixStream::connect(sock) {
         Ok(_) => Ok(true),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => Ok(false),
         Err(e) => Err(e),
     }
-}
-
-#[cfg(not(unix))]
-fn connects(_sock: &Path) -> io::Result<bool> {
-    Err(crate::unsupported("named sessions"))
 }
 
 /// Every session name with a pidfile; stale ones are included, so check each with

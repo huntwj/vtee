@@ -621,3 +621,31 @@ default Ctrl-C handling however `vtee` was launched, as a terminal's child would
 `CREATE_NEW_PROCESS_GROUP` only when `VTEE_NEW_PROCESS_GROUP=1` is set: a machine that hits #7025 can opt back in
 and loses Ctrl-C for that session; everyone else gets working Ctrl-C. `ctrl_c_ends_a_long_running_child_and_leaves_no_orphan`
 passes (10 of 10 full-suite runs) and `the_new_process_group_opt_in_still_runs_children` keeps the escape hatch tested.
+
+## 2026-10-09: Windows sessions run over AF_UNIX sockets, not named pipes
+
+Scoped first (a spike on this Windows 11 machine, build 26300), then built. `uds_windows` 1.2 gives
+`UnixListener`/`UnixStream` with the `std` API, and everything the code relies on behaved like Unix: bind/accept/
+connect (also across processes), `try_clone`, `shutdown(Write)` giving the peer EOF, read timeouts,
+`AddrInUse` on a second bind, a stale socket file that refuses connections until removed, and a 107-byte path
+limit (longer paths fail with `InvalidInput`).
+
+**Why not named pipes:** the code half-closes sockets (`shutdown(Write)` in `relay_tty`, `attach` and
+`run_connect`) and pipes cannot; they also leave no files for `ls` to scan and need security descriptors. The
+cost of AF_UNIX is the Windows 10 1803 floor and one single-maintainer crate.
+
+**Built:** `src/net.rs` re-exports the right socket types, so the servers and clients are shared; a
+`%LOCALAPPDATA%i-mux` session directory; `kill` via `TerminateProcess`; a console control handler for
+close/break/shutdown (verified with a real `CTRL_BREAK_EVENT`: exit 143, no child left).
+
+**The riskiest unknown, measured: no socket handle leaks into the child.** Windows inherits handles at
+`CreateProcess` (unlike Unix's close-on-exec), which could have kept a session half-alive after the holder died.
+It cannot happen here: the child is spawned before any socket exists, and the vendored ConPTY spawn passes
+`bInheritHandles = FALSE`. `tests/windows_sessions.rs` pins it anyway (a listener must stop accepting while a
+later ConPTY child lives; forcing the listener inheritable did not change the result, consistent with the
+`FALSE`), and checks that peers see EOF/refusal when the holder is killed.
+
+**Left undone, on purpose:** the terminal-restore watchdog (no termios on Windows; shells reset console modes at
+the next prompt), the `ENABLE_VIRTUAL_TERMINAL_*` flags for `attach`'s raw relay (special keys through the console
+input path are unmeasured), and a PID-reuse guard beyond the liveness check.
+
