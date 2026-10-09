@@ -80,7 +80,8 @@ The error text after the colon comes from the operating system, so it differs be
 
 ### `vtee ls`
 
-One line per session: `name`, `pid=<holder pid>`, and `live` or `stale`. Prints `no sessions` when there are
+One line per session: `name`, `pid=<holder pid>`, and `live` or `stale`. A session started with `--listen=<path>`
+has a fourth field, `sock=<path>`, naming the JSON socket it actually bound. Prints `no sessions` when there are
 none.
 
 ```
@@ -92,9 +93,9 @@ A `stale` entry is a leftover from a holder that was killed without cleaning up.
 
 ### `vtee kill <NAME>`
 
-If the session is live, ends its holder process (which ends the wrapped program) and removes the session's socket
-and pidfile. If the session is stale, only the leftover files are removed and nothing is signalled. It exits 0 in
-both cases.
+If the session is live, ends its holder process (which ends the wrapped program) and removes the session's
+sockets (the ones recorded in its pidfile, including a `--listen=<path>` socket) and the pidfile. If the session
+is stale, only the leftover files are removed and nothing is signalled. It exits 0 in both cases.
 
 ```
 $ vtee kill nosuch
