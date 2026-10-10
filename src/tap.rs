@@ -350,8 +350,12 @@ impl Tap {
 
     /// Resize the child's pty and the emulator together so they never disagree.
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
+        if cols == 0 || rows == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("terminal size {cols}x{rows} is below the 1x1 minimum"),
+            ));
+        }
         if cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

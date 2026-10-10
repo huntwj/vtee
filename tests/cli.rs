@@ -886,6 +886,41 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
+    /// `--cols 0` is refused at startup, so `resize` must refuse 0 too instead of quietly raising
+    /// it to 1; a refused resize changes nothing, and a valid one afterwards still works.
+    #[test]
+    fn resize_rejects_zero_and_leaves_the_size_alone() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "zero", &["--writable"]);
+        wait_for_session(&tmpdir, "zero");
+        let sock = dir.join("zero.sock");
+
+        let out = vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"resize\",\"cols\":0,\"rows\":24}\n{\"cmd\":\"resize\",\"cols\":80,\"rows\":0}\n{\"cmd\":\"snapshot\"}\n")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout.matches("below the 1x1 minimum").count(), 2, "both zero sizes refused: {stdout}");
+        assert!(stdout.contains("\"cols\":80") && stdout.contains("\"rows\":24"), "size unchanged: {stdout}");
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"resize\",\"cols\":100,\"rows\":30}\n{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":100"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
     /// Windows PowerShell 5.1 sends the mark twice when `$OutputEncoding` already has one, and a
     /// line the server cannot parse must not look like success.
     #[test]
