@@ -71,8 +71,9 @@ C:\Users\you\vtee>
 
 Two Windows details are in `drive.ps1`. The marker is `DO^NE`: in `cmd`, `^` escapes the `N`, so the typed line
 contains `DO^NE` and the output contains `DONE`. The POSIX trick `DO''NE` does not work there, because `cmd` prints
-the quotes. And the commands go in through a file, so Windows PowerShell 5.1 does not put a byte-order mark in front
-of the first one.
+the quotes. And the commands go in through an ASCII file, so Windows PowerShell 5.1 does not put a byte-order mark in
+front of the first one; see [PowerShell and the byte-order
+mark](../docs/guide/windows.md#powershell-and-the-byte-order-mark) for when piping is safe.
 
 ## A script test that can fail
 
