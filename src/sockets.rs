@@ -158,7 +158,7 @@ fn serve_connection(tap: &Tap, stream: UnixStream, opts: ServeOptions) {
         if let CommandResult::Error { message } = &result {
             ::log::debug!("connection {id}: rejected - {message}");
         }
-        let Ok(text) = serde_json::to_string(&result) else { continue };
+        let Ok(text) = crate::ndjson::to_line(&result) else { continue };
         if writeln!(writer, "{text}").is_err() {
             break;
         }
