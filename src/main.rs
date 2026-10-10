@@ -228,6 +228,18 @@ fn main() -> ExitCode {
         return run_connect(path, cli.text);
     }
 
+    // The same bound `resize` enforces: the emulator allocates cols x rows cells.
+    for (flag, value) in [("--cols", cli.cols), ("--rows", cli.rows)] {
+        if let Some(n) = value
+            && !(1..=vtee::MAX_TERMINAL_DIMENSION).contains(&n)
+        {
+            return fail(
+                exitcode::USAGE,
+                format!("{flag} {n} is out of range: it must be between 1 and {}", vtee::MAX_TERMINAL_DIMENSION),
+            );
+        }
+    }
+
     let observed_size = observed_terminal_size();
     let (cols, rows) = (cli.cols.unwrap_or(observed_size.0), cli.rows.unwrap_or(observed_size.1));
 

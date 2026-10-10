@@ -20,7 +20,7 @@ use crate::{RawLog, Snapshot, keys, snapshot};
 
 /// Upper bound on a requested terminal size; the emulator allocates cols x rows cells, so an
 /// unbounded remote resize could otherwise OOM the whole session.
-const MAX_TERMINAL_DIMENSION: u16 = 1000;
+pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
 
 /// How often `wait`/`wait_exit` poll the child; also the worst-case added latency to noticing an exit.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);

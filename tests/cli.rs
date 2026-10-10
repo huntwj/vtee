@@ -107,6 +107,26 @@ fn cols_rejects_a_non_numeric_value() {
         .stderr(predicate::str::contains("--cols"));
 }
 
+/// The same 1-1000 bound `resize` enforces, checked before anything is spawned.
+#[test]
+fn cols_and_rows_outside_the_resize_limit_are_usage_errors() {
+    for (flag, value) in [("--cols", "5000"), ("--cols", "0"), ("--rows", "1001"), ("--rows", "0")] {
+        vtee()
+            .args([flag, value, "--no-listen", "--", "cat"])
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains(flag).and(predicate::str::contains("between 1 and 1000")));
+    }
+    // The limits themselves are accepted: the run only fails later, on the missing script.
+    vtee()
+        .args(["--cols", "1000", "--rows", "1", "--script", "missing.ndjson", "--"])
+        .args(exits_with(0))
+        .assert()
+        .failure()
+        .code(exitcode::NOINPUT);
+}
+
 #[test]
 fn env_rejects_a_value_without_an_equals_sign() {
     vtee()
