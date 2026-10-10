@@ -944,5 +944,13 @@ or two of its sentences disagree, the conservative reading was taken:
   `stdout`, `exit`); all are run through the real command by `tests/golden_vectors`. The spawn-failure vector passes `-qqq`
   because ConPTY's own error log would otherwise be the first line of standard error on Windows.
 
-Still not built: `--update=migrate` (follows the first schema or grammar bump), the user-guide promotion of the golden
-format (`docs/guide/golden-format.md`), and `--input-policy`.
+Still not built: `--update=migrate` (follows the first schema or grammar bump) and `--input-policy`.
+
+## 2026-10-10: repository goldens on both platforms, and CI runs the whole fast set
+
+- `tests/goldens/` holds two goldens (one screen, and a two-screen run that types a line) recorded on Windows with
+  `--portable`; `tests/goldens.rs` checks them with a per-platform program (`sh` or `cmd`). They pass on Linux unchanged,
+  which is what design item 12 asks for. Size 30x6.
+- The `fast` CI jobs listed only `cli`, `replay` and `differential`. They now also run `conformance`, `golden_vectors`,
+  `expect` and `goldens` on Ubuntu and Windows, so the frozen vectors are checked on both platforms.
+- `docs/guide/golden-format.md` is the user-facing format guide; the design document stays normative.
