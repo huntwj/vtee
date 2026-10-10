@@ -15,6 +15,13 @@ pub struct RecordOptions {
     pub portable: bool,
 }
 
+/// The advisory `x-producer` header line for the build that produced a snapshot, if the snapshot says.
+pub(super) fn producer_line(snapshot: &Snapshot) -> Option<String> {
+    let producer = &snapshot.producer;
+    (!producer.vtee.is_empty() || !producer.emulator.is_empty())
+        .then(|| format!("x-producer vtee {} {}", producer.vtee, producer.emulator))
+}
+
 /// The `ignore` lines `--portable` writes. Frozen at 0.1.0 (section 6.14).
 pub fn portable_profile() -> Ignore {
     Ignore {
@@ -60,12 +67,7 @@ impl Golden {
     /// least one screen.
     pub fn record(snapshots: &[Snapshot], names: &[Option<String>], options: RecordOptions) -> Golden {
         let first = snapshots.first().expect("a golden holds at least one screen");
-        let producer = &first.producer;
-        let x_lines = if producer.vtee.is_empty() && producer.emulator.is_empty() {
-            Vec::new()
-        } else {
-            vec![format!("x-producer vtee {} {}", producer.vtee, producer.emulator)]
-        };
+        let x_lines = producer_line(first).into_iter().collect();
         Golden {
             grammar: GRAMMAR_VERSION,
             schema: first.schema_version,

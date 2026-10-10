@@ -10,6 +10,7 @@ mod parse;
 pub mod pattern;
 mod report;
 mod run;
+mod update;
 mod version;
 mod write;
 
@@ -27,5 +28,6 @@ pub use report::{
     display_name, refuse_unread,
 };
 pub use run::{Run, RunError, RunProblem, read_run, read_run_for_build};
+pub use update::{ScreenChange, Update, plan_record, plan_screen, restamped};
 pub use version::{Build, Invocation, Refusal, WayForward};
 pub use write::{RecordOptions, portable_profile};
