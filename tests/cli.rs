@@ -339,6 +339,7 @@ fn replay_shows_the_final_screen_of_a_log() {
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!((snapshot["cols"].as_u64(), snapshot["rows"].as_u64()), (Some(70), Some(12)));
     assert_eq!(snapshot["schema_version"], 1);
+    assert_eq!(snapshot["semantics_version"], 1);
     assert!(snapshot["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("replay-me-xyz")));
 
     let _ = std::fs::remove_file(&log);
@@ -1169,6 +1170,46 @@ mod unix_behavior {
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(result_lines(&out.stdout)[0]["matched"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `wait_for` matches one screen row at a time by default, so text that crosses a soft wrap is not
+    /// found; with `join_wrapped` the rows of a wrapped line are joined first. A hard line break stays a
+    /// break either way.
+    #[test]
+    fn wait_for_can_match_across_a_soft_wrap_when_asked() {
+        let dir = isolated_tmpdir();
+        let script = script_file(
+            &dir,
+            &[
+                r#"{"cmd":"wait_for","text":"delta-echo","timeout_ms":8000}"#,
+                r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":300}"#,
+                r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":8000,"join_wrapped":true}"#,
+                r#"{"cmd":"wait_for","text":"echo-zulu","timeout_ms":300,"join_wrapped":true}"#,
+                r#"{"cmd":"snapshot"}"#,
+            ],
+        );
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args([
+                "--cols",
+                "20",
+                "--rows",
+                "6",
+                "--",
+                "sh",
+                "-c",
+                "echo alpha-bravo-charlie-delta-echo; echo zulu; sleep 30",
+            ])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let results = result_lines(&out.stdout);
+        let matched: Vec<_> = results.iter().take(4).map(|r| r["matched"].clone()).collect();
+        assert_eq!(matched, [true, false, true, false], "{results:?}");
+        assert_eq!(results[4]["snapshot"]["wrapped_rows"], serde_json::json!([0]), "{results:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

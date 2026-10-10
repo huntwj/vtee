@@ -89,7 +89,8 @@ and fails to spawn it. Write `--listen=/tmp/x.sock`.
 
 ## `wait_for` never matches (or matches too early)
 
-- It matches inside one screen line, so text that wraps does not match.
+- It matches inside one screen row, so text that wraps does not match. Add `"join_wrapped":true` to join the rows of a
+  soft-wrapped line first.
 - It can match the echo of what you just typed. Wait for text that only the output contains.
 - It only sees the visible screen. Text that has scrolled off is in `scrollback`.
 

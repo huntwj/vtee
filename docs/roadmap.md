@@ -24,8 +24,8 @@ State as of 2026-10-09. The core feature set works on Linux and Windows. What is
   dotted, dashed) and `underline_color`.
 - [ ] **Both screen buffers.** Only the active buffer is exposed. Blocked by `alacritty_terminal` (see
   `decisions.md`, 2026-10-07).
-- [ ] **Richer wait conditions.** `wait_for` is a substring match on one screen line; there is no regular
-  expression, region, or match across a wrapped line. `exit_status` and `wait_exit` exist for the process itself.
+- [ ] **Richer wait conditions.** `wait_for` is a substring match on one screen row, or on a soft-wrapped line with
+  `join_wrapped`; there is no regular expression or region. `exit_status` and `wait_exit` exist for the process itself.
   A "screen unchanged" wait was deliberately not built (requirement 4).
 - [ ] **Masking volatile regions** (a clock) for golden comparisons. Left to the caller so far; a golden-file format
   with masks and attribute checks is proposed but not built.

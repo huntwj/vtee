@@ -13,8 +13,9 @@
 //! vtee = { git = "https://github.com/huntwj/vtee", tag = "v0.1.0" }
 //! ```
 //!
-//! The JSON a [`Snapshot`] serialises to carries [`SCHEMA_VERSION`]; additive fields do not change
-//! it, renames and removals do.
+//! The JSON a [`Snapshot`] serialises to carries two numbers: [`SCHEMA_VERSION`] for the layout
+//! (renames and removals change it, additive fields do not) and [`SEMANTICS_VERSION`] for what the
+//! values mean (an emulation fix or a newly reported name changes it).
 //!
 //! # Example
 //!
@@ -78,7 +79,10 @@ pub use session::{
     SessionPaths, SessionRecord, default_log_path, session_is_live, session_names, session_paths, session_record,
     write_session_record,
 };
-pub use snapshot::{Cell, Color, Cursor, CursorShape, SCHEMA_VERSION, Snapshot, UnderlineStyle, redraw_sequence};
+pub use snapshot::{
+    Cell, Color, Cursor, CursorShape, EMULATOR, Producer, SCHEMA_VERSION, SEMANTICS_VERSION, Snapshot, UnderlineStyle,
+    redraw_sequence,
+};
 #[cfg(windows)]
 pub use tap::restore_default_ctrl_c;
 pub use tap::{MAX_TERMINAL_DIMENSION, SpawnOptions, Tap};

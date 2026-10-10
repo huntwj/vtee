@@ -232,12 +232,35 @@ pub struct Cursor {
     pub shape: CursorShape,
 }
 
-/// Bumped only when an existing field is renamed, removed or changes meaning. Adding a field
-/// does not bump it. See `docs/guide/protocol.md`.
+/// The layout of the JSON: bumped when a field is renamed, removed or changes type. Adding an
+/// optional field does not bump it. See `docs/guide/protocol.md`.
 pub const SCHEMA_VERSION: u32 = 1;
 
-fn default_schema_version() -> u32 {
-    1
+/// What a cell, mode or position means for given program output, and which names are reported at
+/// all. Bumped by an emulation fix, an emulator upgrade, or a newly reported mode, attribute or
+/// attribute value. Every bump is an entry in `docs/guide/snapshot-semantics.md`.
+pub const SEMANTICS_VERSION: u32 = 1;
+
+/// The emulator this build links, as `name version`. A test checks it against `Cargo.lock`, so
+/// upgrading the dependency without updating this string fails the build.
+pub const EMULATOR: &str = "alacritty_terminal 0.26.0";
+
+/// Which build produced a snapshot. Debugging information only: nothing may depend on it and a
+/// comparison never looks at it. An absent `producer` reads as empty strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Producer {
+    /// The `vtee` version.
+    pub vtee: String,
+    /// The terminal emulator and its version.
+    pub emulator: String,
+}
+
+impl Producer {
+    /// The build that is running.
+    pub fn current() -> Self {
+        Producer { vtee: env!("CARGO_PKG_VERSION").to_string(), emulator: EMULATOR.to_string() }
+    }
 }
 
 /// The full state of a tap's screen as of `byte_offset` bytes of child output. Two snapshots
@@ -245,10 +268,12 @@ fn default_schema_version() -> u32 {
 /// identical - that's what makes a golden test out of this stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// The JSON schema version this snapshot follows (`SCHEMA_VERSION`). Absent in JSON written
-    /// before the field existed, which reads as 1.
-    #[serde(default = "default_schema_version")]
+    /// The JSON layout this snapshot follows (`SCHEMA_VERSION`). Required: there is no unnumbered
+    /// form, so JSON without it is refused.
     pub schema_version: u32,
+    /// What the values mean (`SEMANTICS_VERSION`). Required, for the same reason. A snapshot written
+    /// before 0.1.0 has no such field and is refused.
+    pub semantics_version: u32,
     pub byte_offset: u64,
     pub cols: usize,
     pub rows: usize,
@@ -256,6 +281,11 @@ pub struct Snapshot {
     pub lines: Vec<String>,
     /// Row-major cells, `rows` x `cols`.
     pub cells: Vec<Vec<Cell>>,
+    /// Sorted indices of the rows whose last cell wraps into the next row: the row ended because the
+    /// text reached the right margin, not because the program moved to a new line. Also set when a
+    /// wide character did not fit and moved to the next row, leaving a blank cell behind. Empty when
+    /// no row wraps. Without it a soft wrap and a hard line break look alike.
+    pub wrapped_rows: Vec<usize>,
     pub cursor: Cursor,
     /// Active modes, as a set written sorted: private modes by number (`"?1"`, `"?1000"`, `"?1002"`, `"?1003"`,
     /// `"?1005"`, `"?1006"`, `"?2004"`), then names alphabetically (`"DECKPAM"`). A reader accepts any order. The
@@ -266,6 +296,9 @@ pub struct Snapshot {
     /// Scrolled-off rows, oldest first, text only (cell-level scrollback detail is not
     /// exposed - a possible future addition if something needs it).
     pub scrollback: Vec<String>,
+    /// The build that produced this snapshot. Informational; see [`Producer`].
+    #[serde(default)]
+    pub producer: Producer,
 }
 
 pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Option<String>) -> Snapshot {
@@ -275,6 +308,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
 
     let mut lines = Vec::with_capacity(rows);
     let mut cells = Vec::with_capacity(rows);
+    let mut wrapped_rows = Vec::new();
     for r in 0..rows {
         let line = Line(r as i32);
         let mut text = String::new();
@@ -306,6 +340,9 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
                 conceal: f.contains(Flags::HIDDEN),
                 hyperlink: cell.hyperlink().map(|h| h.uri().to_string()),
             });
+        }
+        if cols > 0 && grid[Point::new(line, Column(cols - 1))].flags.contains(Flags::WRAPLINE) {
+            wrapped_rows.push(r);
         }
         lines.push(text);
         cells.push(row_cells);
@@ -339,11 +376,13 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
 
     Snapshot {
         schema_version: SCHEMA_VERSION,
+        semantics_version: SEMANTICS_VERSION,
         byte_offset,
         cols,
         rows,
         lines,
         cells,
+        wrapped_rows,
         cursor: Cursor {
             row: usize::try_from(cursor_point.line.0).unwrap_or(0).min(rows.saturating_sub(1)),
             col: cursor_point.column.0,
@@ -354,7 +393,43 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
         alt_screen: mode.contains(TermMode::ALT_SCREEN),
         title,
         scrollback: build_scrollback(term),
+        producer: Producer::current(),
     }
+}
+
+/// The visible screen as logical lines: rows joined across soft wraps (`Snapshot::wrapped_rows`), so a
+/// long line the program printed is one string however narrow the screen is. Cell text only, with the
+/// blank a wide character left behind at the end of a wrapped row dropped, so the text reads as the
+/// program wrote it. Trailing blanks of the last row of a line are kept, as in `Snapshot::lines`.
+pub(crate) fn logical_lines(term: &Term<ObserverListener>) -> Vec<String> {
+    let grid = term.grid();
+    let cols = grid.columns();
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for r in 0..grid.screen_lines() {
+        let line = Line(r as i32);
+        let mut wraps = false;
+        for c in 0..cols {
+            let cell = &grid[Point::new(line, Column(c))];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            current.push(display_char(cell.c));
+            if let Some(zw) = cell.zerowidth() {
+                current.extend(zw);
+            }
+        }
+        if cols > 0 {
+            wraps = grid[Point::new(line, Column(cols - 1))].flags.contains(Flags::WRAPLINE);
+        }
+        if !wraps {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 /// Reconstructs `snap`'s visible screen as raw ANSI bytes for a freshly attached raw-TTY
@@ -757,21 +832,102 @@ mod emulator_tests {
     }
 
     #[test]
-    fn the_schema_version_comes_first_and_older_json_reads_as_version_one() {
+    fn both_versions_come_first_and_are_required() {
         let s = snap(b"x", 5, 2);
-        assert_eq!(s.schema_version, SCHEMA_VERSION);
+        assert_eq!((s.schema_version, s.semantics_version), (SCHEMA_VERSION, SEMANTICS_VERSION));
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.starts_with("{\"schema_version\":1,\"byte_offset\":"), "{}", &json[..60]);
+        assert!(json.starts_with("{\"schema_version\":1,\"semantics_version\":1,\"byte_offset\":"), "{}", &json[..80]);
 
-        let mut v = serde_json::to_value(&s).unwrap();
-        v.as_object_mut().unwrap().remove("schema_version");
-        let old: Snapshot = serde_json::from_value(v).unwrap();
-        assert_eq!(old.schema_version, 1);
+        for missing in ["schema_version", "semantics_version"] {
+            let mut v = serde_json::to_value(&s).unwrap();
+            v.as_object_mut().unwrap().remove(missing);
+            let err = serde_json::from_value::<Snapshot>(v).unwrap_err().to_string();
+            assert!(err.contains(missing), "{err}");
+        }
 
         let mut v = serde_json::to_value(&s).unwrap();
         v["schema_version"] = 7.into();
+        v["semantics_version"] = 9.into();
         let newer: Snapshot = serde_json::from_value(v).unwrap();
-        assert_eq!(newer.schema_version, 7, "a newer version is kept, not rewritten");
+        assert_eq!((newer.schema_version, newer.semantics_version), (7, 9), "numbers are kept, not rewritten");
+    }
+
+    #[test]
+    fn a_soft_wrap_is_reported_and_a_hard_line_break_is_not() {
+        let rows = |bytes: &[u8]| snap(bytes, 10, 5).wrapped_rows;
+        assert_eq!(rows(b"abcdefghijklmnopqrst"), [0]);
+        assert_eq!(rows(b"abcdefghijklmnopqrstuvwxy"), [0, 1]);
+        assert_eq!(rows(b"abcdefghij\r\nklm"), Vec::<usize>::new(), "a hard break is not a wrap");
+        assert_eq!(rows(b"abcdefghij"), Vec::<usize>::new(), "text that exactly fills a row has not wrapped yet");
+        assert_eq!(rows(b"short\r\nabcdefghijklm"), [1]);
+        assert_eq!(rows(b""), Vec::<usize>::new());
+        let s = snap(b"abcdefghijklm", 10, 5);
+        assert_eq!(s.lines[0], "abcdefghij");
+        assert_eq!(s.lines[1].trim_end(), "klm");
+    }
+
+    #[test]
+    fn logical_lines_join_soft_wraps_but_not_hard_breaks() {
+        let logical = |bytes: &[u8], cols, rows| {
+            let mut term = Term::new(Config::default(), &Size { cols, rows }, ObserverListener::new());
+            Processor::<vte::ansi::StdSyncHandler>::new().advance(&mut term, bytes);
+            logical_lines(&term).iter().map(|l| l.trim_end().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(logical(b"abcdefghijklmnopqrst\r\nxyz", 10, 4), ["abcdefghijklmnopqrst", "xyz", ""]);
+        assert_eq!(logical(b"abcdefghij\r\nklm", 10, 3), ["abcdefghij", "klm", ""]);
+        // The blank left where a wide character moved down is not part of the text.
+        assert_eq!(logical("abcdefghi\u{4f60}z".as_bytes(), 10, 3), ["abcdefghi\u{4f60}z", ""]);
+    }
+
+    #[test]
+    fn a_wide_character_pushed_to_the_next_row_marks_the_row_as_wrapped() {
+        let s = snap("abcdefghi\u{4f60}z".as_bytes(), 10, 3);
+        assert_eq!(s.wrapped_rows, [0]);
+        assert_eq!(s.lines[0], "abcdefghi ", "the cell left behind is blank");
+        assert_eq!(s.cells[1][0].ch, "\u{4f60}");
+        assert_eq!(s.cells[1][1].ch, "", "the continuation cell");
+        assert_eq!(s.cells[1][2].ch, "z");
+    }
+
+    #[test]
+    fn wrapped_rows_survive_a_json_round_trip_and_are_required() {
+        let s = snap(b"abcdefghijklm", 10, 3);
+        let mut v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["wrapped_rows"], serde_json::json!([0]));
+        assert_eq!(serde_json::from_value::<Snapshot>(v.clone()).unwrap().wrapped_rows, [0]);
+        v.as_object_mut().unwrap().remove("wrapped_rows");
+        assert!(serde_json::from_value::<Snapshot>(v).is_err());
+        let json = serde_json::to_string(&snap(b"x", 4, 1)).unwrap();
+        assert!(json.contains(r#""cells":[[{"ch":"x"},{},{},{}]],"wrapped_rows":[],"cursor":"#), "{json}");
+    }
+
+    #[test]
+    fn the_producer_names_this_build_and_is_written_last() {
+        let s = snap(b"x", 5, 2);
+        assert_eq!(
+            s.producer,
+            Producer { vtee: env!("CARGO_PKG_VERSION").to_string(), emulator: EMULATOR.to_string() }
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        let tail = format!(r#""producer":{{"vtee":"{}","emulator":"{EMULATOR}"}}}}"#, env!("CARGO_PKG_VERSION"));
+        assert!(json.ends_with(&tail), "{json}");
+        // Nothing may depend on it, so a snapshot without one still reads.
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("producer");
+        assert_eq!(serde_json::from_value::<Snapshot>(v).unwrap().producer, Producer::default());
+    }
+
+    #[test]
+    fn the_emulator_string_matches_the_locked_dependency() {
+        let lock = include_str!("../Cargo.lock");
+        let start = lock.find("name = \"alacritty_terminal\"").expect("alacritty_terminal is not in Cargo.lock");
+        let version = lock[start..]
+            .lines()
+            .nth(1)
+            .and_then(|l| l.strip_prefix("version = \""))
+            .and_then(|l| l.strip_suffix('"'))
+            .expect("no version line after the package name");
+        assert_eq!(EMULATOR, format!("alacritty_terminal {version}"), "update EMULATOR and bump semantics_version");
     }
 
     #[test]
