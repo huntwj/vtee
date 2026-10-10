@@ -20,8 +20,8 @@ State as of 2026-10-09. The core feature set works on Linux and Windows. What is
   terminal restore after a signal) now have tests.
 - [ ] **Mouse and bracketed-paste input.** The modes are tracked in snapshots; there is no way to send mouse or
   paste events. On Windows ConPTY hides the mouse modes from the emulator (`guide/windows.md`).
-- [x] **Underline styles.** Snapshot cells carry `underline_style` (single, double, curly, dotted, dashed) and
-  `underline_color`; `underline` stays as the on/off flag.
+- [x] **Underline styles.** Snapshot cells carry `underline` as one style string (none, single, double, curly,
+  dotted, dashed) and `underline_color`.
 - [ ] **Both screen buffers.** Only the active buffer is exposed. Blocked by `alacritty_terminal` (see
   `decisions.md`, 2026-10-07).
 - [ ] **Richer wait conditions.** `wait_for` is a substring match on one screen line; there is no regular

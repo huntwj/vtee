@@ -69,7 +69,7 @@ fn run_script_body(tap: &vtee::Tap, script_path: &Path, text_mode: bool) -> Exit
                 if text_mode {
                     print_text(&mut out, &result);
                 } else {
-                    match serde_json::to_string(&result) {
+                    match vtee::ndjson::to_line(&result) {
                         Ok(text) => {
                             let _ = writeln!(out, "{text}");
                         }
@@ -192,7 +192,7 @@ pub fn run_replay(path: &Path, json: bool) -> ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     if json {
-        match serde_json::to_string(&snapshot) {
+        match vtee::ndjson::to_line(&snapshot) {
             Ok(text) => {
                 let _ = writeln!(out, "{text}");
             }

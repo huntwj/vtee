@@ -59,6 +59,7 @@
 mod command;
 mod keys;
 mod log;
+pub mod ndjson;
 pub mod net;
 mod rawmode;
 mod serve;
