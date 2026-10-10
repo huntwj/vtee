@@ -1,0 +1,5 @@
+{"cmd":"wait_for","text":"ready","timeout_ms":15000}
+{"cmd":"snapshot","name":"before"}
+{"cmd":"send","text":"hi\r"}
+{"cmd":"wait_for","text":"got:hi","timeout_ms":15000}
+{"cmd":"snapshot","name":"after"}

@@ -1,0 +1,39 @@
+vtee-golden 1
+schema 1
+semantics 1
+ignore modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 DECKPAM
+ignore attrs ulcolor
+ignore title
+x-producer vtee 0.0.1 alacritty_terminal 0.26.0
+
+[screen 1]
+size 30x6
+cursor row=1 col=0 shape=block hidden=false
+modes
+alt_screen false
+title "C:\\windows\\system32\\cmd.EXE"
+name "before"
+
+[text]
+0|ready
+1|
+2|
+3|
+4|
+5|
+
+[screen 2]
+size 30x6
+cursor row=3 col=0 shape=block hidden=false
+modes
+alt_screen false
+title "C:\\windows\\system32\\cmd.EXE"
+name "after"
+
+[text]
+0|ready
+1|hi
+2|got:hi
+3|
+4|
+5|

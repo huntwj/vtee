@@ -1,0 +1,2 @@
+{"cmd":"wait_for","text":"END","timeout_ms":15000}
+{"cmd":"snapshot","name":"greeting"}

@@ -12,12 +12,12 @@ another, so a failure in one does not hide the others:
 | Job | Runner | What it does |
 | --- | --- | --- |
 | `lint` | `ubuntu-latest` | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings`. Platform-independent, so checked once. |
-| `fast` | `ubuntu-latest` and `windows-latest` | Clippy with warnings denied, then `cargo test --lib --bins --test cli --test replay --test differential`. On Windows it also runs `cargo doc` with warnings denied, because rustdoc output differs for items that exist on one platform only. |
+| `fast` | `ubuntu-latest` and `windows-latest` | Clippy with warnings denied, then `cargo test --lib --bins --test cli --test replay --test differential --test conformance --test golden_vectors --test expect --test goldens`. On Windows it also runs `cargo doc` with warnings denied, because rustdoc output differs for items that exist on one platform only. |
 | `linux-pty` | `ubuntu-latest` | Installs `less`, `vim-tiny`, `procps` and `python3`, builds the tests, and runs `cargo test --test linux_sessions` with `VTEE_REQUIRE_TOOLS=1` and `RUST_TEST_THREADS=2`. |
 | `windows-pty` | `windows-latest` | Puts Git for Windows' `less` and `vim` on `PATH` (and fails if either is missing), builds the tests, and runs `windows_conpty`, `windows_console`, `windows_behavior` and `windows_sessions` with `VTEE_REQUIRE_TOOLS=less,vim`. |
 | `msrv` | `ubuntu-latest` | Reads `rust-version` from `Cargo.toml` (1.89) and runs `cargo check --all-targets` on that toolchain. If `Cargo.toml` has no `rust-version` it prints a notice and does nothing. |
 
-Together they run every test suite in the repository: `differential` in the `fast` jobs on both platforms, and
+Together they run every test suite in the repository: `differential`, `conformance`, `golden_vectors`, `expect` and `goldens` in the `fast` jobs on both platforms, and
 `windows_console` in `windows-pty`. See [testing](testing.md) for what each suite covers.
 
 Details that apply to all of them:
