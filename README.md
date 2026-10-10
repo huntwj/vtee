@@ -1,6 +1,6 @@
 # vtee
 
-A terminal multiplexer for AI agents and for testing. A Rust crate and command-line tool.
+A tee for terminal programs: watch, share, drive and test any TUI's screen. A Rust crate and command-line tool.
 
 `vtee` runs a program in a pseudo-terminal and keeps the terminal's screen in memory. A script or an AI agent
 can read that screen as structured data (text, colours, cursor, title, modes) and send keystrokes to the program.
