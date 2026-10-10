@@ -26,6 +26,6 @@ pub use session::{
 pub use snapshot::{Cell, Color, Cursor, CursorShape, SCHEMA_VERSION, Snapshot, UnderlineStyle, redraw_sequence};
 #[cfg(windows)]
 pub use tap::restore_default_ctrl_c;
-pub use tap::{SpawnOptions, Tap};
+pub use tap::{MAX_TERMINAL_DIMENSION, SpawnOptions, Tap};
 
 pub(crate) use tap::{ObserverListener, Size};

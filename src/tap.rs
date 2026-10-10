@@ -20,7 +20,7 @@ use crate::{RawLog, Snapshot, keys, snapshot};
 
 /// Upper bound on a requested terminal size; the emulator allocates cols x rows cells, so an
 /// unbounded remote resize could otherwise OOM the whole session.
-const MAX_TERMINAL_DIMENSION: u16 = 1000;
+pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
 
 /// How often `wait`/`wait_exit` poll the child; also the worst-case added latency to noticing an exit.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -479,6 +479,15 @@ impl Tap {
     /// because the thread that owns the `Tap` may be blocked in `wait()`. On Windows the trigger is
     /// a console close, break or shutdown event; session files are left for `ls`/`kill` to clean.
     pub fn watch_sigterm(&self) {
+        self.watch_sigterm_removing(&[]);
+    }
+
+    /// As [`watch_sigterm`](Self::watch_sigterm), and on Unix also delete `files` (a session's pid
+    /// record and sockets) before exiting: `process::exit` skips destructors, so an external
+    /// `kill <pid>` would otherwise leave them behind for `ls` to show as stale. Ignored on Windows.
+    pub fn watch_sigterm_removing(&self, files: &[PathBuf]) {
+        #[cfg(not(unix))]
+        let _ = files;
         #[cfg(unix)]
         {
             use signal_hook::consts::SIGTERM;
@@ -486,8 +495,12 @@ impl Tap {
 
             let mut killer = self.child.lock_unpoisoned().clone_killer();
             let Ok(mut signals) = Signals::new([SIGTERM]) else { return };
+            let files = files.to_vec();
             thread::spawn(move || {
                 if signals.forever().next().is_some() {
+                    for file in &files {
+                        let _ = std::fs::remove_file(file);
+                    }
                     let _ = crossterm::terminal::disable_raw_mode();
                     let _ = killer.kill();
                     std::process::exit(143); // 128 + SIGTERM

@@ -228,6 +228,18 @@ fn main() -> ExitCode {
         return run_connect(path, cli.text);
     }
 
+    // The same bound `resize` enforces: the emulator allocates cols x rows cells.
+    for (flag, value) in [("--cols", cli.cols), ("--rows", cli.rows)] {
+        if let Some(n) = value
+            && !(1..=vtee::MAX_TERMINAL_DIMENSION).contains(&n)
+        {
+            return fail(
+                exitcode::USAGE,
+                format!("{flag} {n} is out of range: it must be between 1 and {}", vtee::MAX_TERMINAL_DIMENSION),
+            );
+        }
+    }
+
     let observed_size = observed_terminal_size();
     let (cols, rows) = (cli.cols.unwrap_or(observed_size.0), cli.rows.unwrap_or(observed_size.1));
 
@@ -449,7 +461,9 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
     if !cli.headless {
         tap.watch_resize(cli.observed_size);
     }
-    tap.watch_sigterm();
+    let session_files: Vec<PathBuf> =
+        [cli.pidfile, cli.listen_path, cli.tty_path].into_iter().flatten().map(Path::to_path_buf).collect();
+    tap.watch_sigterm_removing(&session_files);
 
     if let Some(path) = cli.listen_path {
         let write_policy = cli.write_policy.unwrap_or(vtee::WritePolicy::ReadOnly);

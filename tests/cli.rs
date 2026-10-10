@@ -107,6 +107,26 @@ fn cols_rejects_a_non_numeric_value() {
         .stderr(predicate::str::contains("--cols"));
 }
 
+/// The same 1-1000 bound `resize` enforces, checked before anything is spawned.
+#[test]
+fn cols_and_rows_outside_the_resize_limit_are_usage_errors() {
+    for (flag, value) in [("--cols", "5000"), ("--cols", "0"), ("--rows", "1001"), ("--rows", "0")] {
+        vtee()
+            .args([flag, value, "--no-listen", "--", "cat"])
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains(flag).and(predicate::str::contains("between 1 and 1000")));
+    }
+    // The limits themselves are accepted: the run only fails later, on the missing script.
+    vtee()
+        .args(["--cols", "1000", "--rows", "1", "--script", "missing.ndjson", "--"])
+        .args(exits_with(0))
+        .assert()
+        .failure()
+        .code(exitcode::NOINPUT);
+}
+
 #[test]
 fn env_rejects_a_value_without_an_equals_sign() {
     vtee()
@@ -241,6 +261,24 @@ fn text_mode_prints_the_exit_status_on_one_line() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--- wait_exit exited code=3 timed_out=false ---"));
+    let _ = std::fs::remove_file(&script);
+}
+
+/// Windows PowerShell 5.1 writes a UTF-8 byte order mark at the start of a file or pipe; the first
+/// command line must still parse.
+#[test]
+fn a_script_with_a_byte_order_mark_still_parses() {
+    let script = exit_script(&["\u{feff}{\"cmd\":\"wait_exit\",\"timeout_ms\":15000}"]);
+    vtee()
+        .arg("--script")
+        .arg(&script)
+        .arg("--text")
+        .arg("--")
+        .args(exits_with(0))
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wait_exit exited code=0"));
     let _ = std::fs::remove_file(&script);
 }
 
@@ -715,6 +753,29 @@ mod unix_behavior {
             .arg(&sock)
             .timeout(Duration::from_secs(5))
             .write_stdin("{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":80"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark; `--connect` must not
+    /// forward it as part of the first JSON line.
+    #[test]
+    fn connect_accepts_a_first_line_with_a_byte_order_mark() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "bom", &[]);
+        wait_for_session(&tmpdir, "bom");
+
+        vtee()
+            .arg("--connect")
+            .arg(dir.join("bom.sock"))
+            .timeout(Duration::from_secs(5))
+            .write_stdin("\u{feff}{\"cmd\":\"snapshot\"}\n")
             .assert()
             .success()
             .stdout(predicate::str::contains("\"cols\":80"));
