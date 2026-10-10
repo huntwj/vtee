@@ -114,7 +114,8 @@ emulators, `avt` and `vt100` (`oracle_avt.json`, `oracle_vt100.json`). An attrib
 
 Of the 80 cases, 57 agree across all three emulators and 23 are adjudicated. Most of those are `vt100` or `avt`
 lacking a feature (HVP, `CSI s`/`u`, IND/NEL, IRM, REP, `?7l`, charsets, colon-form colours, `4:3`/`4:0` underline
-sub-parameters). Five are vtee deviations, inherited from `alacritty_terminal` 0.26.0 and not fixed in vtee:
+sub-parameters). Five cases, four distinct problems, are vtee deviations, inherited from `alacritty_terminal`
+0.26.0 and not fixed in vtee:
 
 | Case | What vtee does | What xterm does |
 | --- | --- | --- |
