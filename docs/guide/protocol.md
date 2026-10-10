@@ -21,7 +21,7 @@ Strings are ordinary JSON. Control characters must be escaped, and JSON has no o
 | `cmd` | Fields | Reply | Needs write access |
 | --- | --- | --- | --- |
 | `snapshot` | none | `snapshot` | no |
-| `wait_for` | `text` (string), `timeout_ms` (integer) | `wait_for` | no |
+| `wait_for` | `text` (string), `timeout_ms` (integer), optional `join_wrapped` (boolean, default `false`) | `wait_for` | no |
 | `wait_ms` | `ms` (integer) | none | no |
 | `exit_status` | none | `exit_status` | no |
 | `wait_exit` | `timeout_ms` (integer) | `wait_exit` | no |
@@ -43,11 +43,16 @@ Reply: `{"cmd":"snapshot","snapshot":{...}}`. See [the snapshot schema](#snapsho
 
 ```
 {"cmd":"wait_for","text":"via-socket","timeout_ms":3000}
+{"cmd":"wait_for","text":"via-socket","timeout_ms":3000,"join_wrapped":true}
 ```
 
-Blocks until some line of the screen contains `text`, or until `timeout_ms` milliseconds have passed. The match is
-a plain substring test against each screen line separately, so text that wraps across two lines never matches.
-Only the visible screen is searched, not the scrollback. It wakes as soon as new output arrives and does not poll.
+Blocks until some line of the screen contains `text`, or until `timeout_ms` milliseconds have passed. By default the
+match is a plain substring test against each screen row separately, so text that wraps across two rows never matches.
+With `"join_wrapped":true` the rows of a soft-wrapped line (those listed in `wrapped_rows`) are joined into one
+logical line first, so text the program printed on one line matches however narrow the screen is. A hard line
+break still separates two lines, and the blank that a wide character leaves at the end of a wrapped row is not part
+of the joined text. Only the visible screen is searched, not the scrollback. It wakes as soon as new output arrives
+and does not poll.
 
 Reply: `{"cmd":"wait_for","matched":true,"snapshot":{...}}`. `matched` is `false` when it timed out; the snapshot is
 the screen at that moment either way, so a timeout is not an error. The snapshot is taken at the instant of the
@@ -171,7 +176,7 @@ is internally consistent: the state and `byte_offset` always agree.
 A real reply from a 12 by 3 screen that shows `$ ` and a bold red `R`, with the last two rows of cells shortened:
 
 ```
-{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"cursor":{"row":0,"col":3,"hidden":false,"shape":"block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
+{"cmd":"snapshot","snapshot":{"schema_version":1,"semantics_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"wrapped_rows":[],"cursor":{"row":0,"col":3,"hidden":false,"shape":"block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[],"producer":{"vtee":"0.0.0","emulator":"alacritty_terminal 0.26.0"}}}
 ```
 
 Cells are sparse: a field that has its default value is left out, and a blank cell is `{}`. A full 80 by 24 screen
@@ -179,27 +184,40 @@ is about 8 KB when empty and 11 KB for a typical shell session, instead of about
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | The version of this schema, currently `1`. Always the first field. JSON without it reads as `1`. |
+| `schema_version` | integer | The layout of this JSON, currently `1`. Always the first field. Required: a snapshot without it is refused. |
+| `semantics_version` | integer | What the values mean, currently `1`. Always the second field. Required: a snapshot without it is refused. See below. |
 | `byte_offset` | integer | Total bytes of program output processed so far. Use it to tell whether the screen can have changed between two snapshots. |
 | `cols`, `rows` | integer | Screen size. |
-| `lines` | array of string | One string per row, padded with spaces to `cols`. Combining marks are included. Convenient when attributes do not matter. |
+| `lines` | array of string | One string per row: exactly the concatenation of that row's cells' `ch`, so blank cells are spaces (trailing ones included) and combining marks are included. The continuation cell of a wide character contributes nothing, so a row with a wide character has fewer characters than `cols`. Convenient when attributes do not matter. |
 | `cells` | array of array of Cell | `rows` by `cols` cells, row-major. |
+| `wrapped_rows` | array of integer | Sorted row indices whose last cell wraps into the next row: the row ended because the text reached the right margin, not because the program started a new line. Also set for a row where a wide character did not fit and moved to the next row. Always present; empty when no row wraps. Text that exactly fills a row has not wrapped until the next character arrives. |
 | `cursor` | object | `row`, `col` (zero-based, non-negative; `col` can point at the continuation cell of a wide character), `hidden` (boolean, true when the program turned the cursor off with `?25l`), `shape`: `"block"`, `"underline"` or `"bar"`. Blinking styles are reported as the steady shape. |
 | `modes` | array of string | Active modes. See below. |
 | `alt_screen` | boolean | Whether the alternate screen (used by full-screen programs) is active. |
 | `title` | string or null | The window title set by the program, `null` if none. |
 | `scrollback` | array of string | Rows that scrolled off the top, oldest first, text only. |
+| `producer` | object | `{"vtee": "<version>", "emulator": "<name> <version>"}`: which build produced the snapshot. For debugging only; nothing may depend on it and a comparison ignores it. |
 
 ### Schema versioning
 
-`schema_version` changes only when an existing field is renamed, removed or changes meaning. Adding a field does
-not change it, so a reader should ignore fields it does not know. A stored golden should record the version it was
-written with: if a snapshot arrives with a higher number than the one a golden was recorded under, regenerate
-and review the golden instead of trusting a comparison across versions. Fields added so far without a bump:
-`underline_color` and `conceal` on cells.
+There are two version numbers, and both are required.
 
-The cell layout changed before 0.1.0 (sparse cells, string colours, one `underline` string, no `blink`) without a
-new number, because nothing had been released. Snapshots written by those earlier builds are not read.
+- `schema_version` is the **layout**. It changes when an existing field is renamed, removed or changes type.
+- `semantics_version` is the **meaning**: what a cell, a mode or a position denotes for given program output, and
+  which names are reported at all. An emulation fix, an emulator upgrade, or a newly reported mode, attribute or
+  attribute value changes it, because any of those can change what a stored comparison finds. Every change is
+  recorded in the semantics changelog. It starts at `1`.
+
+A snapshot without either number is refused: there is no unnumbered form. That includes every snapshot written
+before 0.1.0, which has no `semantics_version` and an older cell layout; those are not supported.
+
+Adding an optional field does not change either number, so a reader should ignore fields it does not know. A stored
+golden should record both numbers it was written under; if a snapshot arrives with a different number, regenerate and
+review the golden instead of trusting a comparison across versions.
+
+The layout took its final shape before 0.1.0 (sparse cells, string colours, one `underline` string, `conceal`, no
+`blink`, lowercase cursor shapes, sorted `modes`, `wrapped_rows`) while `schema_version` was already `1`, because
+nothing had been released. Snapshots written by those earlier builds are not read.
 
 ### Cell
 

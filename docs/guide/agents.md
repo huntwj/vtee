@@ -70,8 +70,9 @@ information: look at the snapshot to see what the program is actually showing.
   quotes are printed, so the output is `DO''NE` too and the wait would time out; there `echo DO^NE` works (`^`
   escapes the `N`, so the typed line has `DO^NE` and the output `DONE`). In PowerShell, send `"DO"+"NE"`. Each of
   these was run for real on Windows.
-- **Text that wraps across two lines does not match.** Keep waited-for text short, or widen the screen with
-  `--cols`.
+- **Text that wraps across two rows does not match, unless you ask.** Add `"join_wrapped":true` to join the rows of
+  a soft-wrapped line before matching (a hard line break still separates two lines). Or keep waited-for text short,
+  or widen the screen with `--cols`.
 - **Padding.** Every line in a snapshot is padded with spaces to the screen width. Trim before comparing, or match
   with a substring.
 

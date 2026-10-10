@@ -91,7 +91,8 @@ from a script file without any interactive session, use `--script`. See
 
 - Mouse and bracketed-paste modes are tracked in snapshots, but there is no command to send mouse or paste input.
 - Only the active screen buffer is exposed (not the primary and alternate buffers separately).
-- `wait_for` waits for text on a single line; there is no richer wait condition yet.
+- `wait_for` waits for text on a single screen row, or on a soft-wrapped line with `"join_wrapped":true`; there is no
+  richer wait condition yet.
 - Blink is never reported (the emulator has no blink flag).
 - Three escape-sequence behaviours differ from xterm; see
   [Known terminal-emulation differences](docs/guide/protocol.md#known-terminal-emulation-differences).
