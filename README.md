@@ -19,7 +19,11 @@ It started as a way to test TinyFugue, whose display code cannot be tested witho
 ## Status
 
 Pre-1.0. The core feature set works on Linux and Windows and is covered by automated tests that run in CI on
-Ubuntu and Windows runners. There has not been a release yet, and the interface may still change. Version numbers
+Ubuntu and Windows runners. The interface may still change.
+
+Versions 0.0.x are early previews that reserve the crate name. The snapshot shape is frozen, but the golden-file
+format and the `--expect` runner for screen tests are not built yet, and the input-policy options are still being
+designed. Version numbers
 follow semantic versioning driven by commit messages: see [docs/releasing.md](docs/releasing.md) and the
 [stability policy](docs/guide/versioning.md).
 
