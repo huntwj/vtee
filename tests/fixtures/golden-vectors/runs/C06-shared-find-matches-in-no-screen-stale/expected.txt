@@ -1,0 +1,2 @@
+FAIL golden.golden: 1 mismatch in 0 of 3 screens
+  mask       golden line 6   mask find=/\d\d:\d\d/ text=ignore   matched nothing (stale)

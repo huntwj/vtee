@@ -6,12 +6,7 @@
 //!
 //! # Status
 //!
-//! Pre-1.0: the API may change in any `0.x` release. The crate is not published to crates.io
-//! (`publish = false`); depend on it by git, ideally pinned to a commit or tag:
-//!
-//! ```toml
-//! vtee = { git = "https://github.com/huntwj/vtee", tag = "v0.1.0" }
-//! ```
+//! Pre-1.0: the API may change in any `0.x` release.
 //!
 //! The JSON a [`Snapshot`] serialises to carries two numbers: [`SCHEMA_VERSION`] for the layout
 //! (renames and removals change it, additive fields do not) and [`SEMANTICS_VERSION`] for what the
@@ -49,6 +44,8 @@
 //!   screen as data, and as the escape sequences that redraw it.
 //! - [`Command`], [`CommandResult`], [`WritePolicy`]: the NDJSON protocol the command-line tool
 //!   speaks over its sockets; [`Tap::serve`] and [`Tap::serve_tty`] serve a `Tap` with it.
+//! - [`golden`]: golden files, the expected output of a screen test: read, write, compare with a run and report
+//!   ([`golden::Golden`], [`golden::check_saved`]).
 //! - [`RawLog`] and [`replay`]: record a session's raw output (asciicast v2) and replay it into an
 //!   emulator.
 //! - [`session_paths`], [`session_is_live`], [`session_names`] and friends: where named sessions
@@ -58,6 +55,7 @@
 //! detail of the command-line tool and may change without notice.
 
 mod command;
+pub mod golden;
 mod keys;
 mod log;
 pub mod ndjson;

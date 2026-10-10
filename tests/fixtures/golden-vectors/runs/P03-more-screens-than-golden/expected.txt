@@ -1,0 +1,2 @@
+FAIL golden.golden: 1 mismatch in 0 of 2 screens
+  screens    expected 2   actual 3   extra 3

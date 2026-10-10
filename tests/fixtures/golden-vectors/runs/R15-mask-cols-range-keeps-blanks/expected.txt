@@ -1,0 +1,3 @@
+FAIL golden.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  mask       golden line 16   mask row=0 cols=0-5 text=/[a-z]+/   row 0 col 0-5   actual 'xyz   ' does not match

@@ -1,0 +1,6 @@
+FAIL golden.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  text       row 0 col 2   expected 'c'   actual 'd'
+             0| abc   (expected)
+             0| abd   (actual)
+                  ^

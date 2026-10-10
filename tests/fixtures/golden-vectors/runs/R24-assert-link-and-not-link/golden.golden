@@ -1,0 +1,21 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 20x1
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|abcdef
+
+[attrs]
+0: 0-2 link="https://example.org/a"
+
+[assert]
+assert row=0 cols=0-2 link="https://example.org/a"
+assert row=0 cols=3-5 !link
+assert row=0 cols=0-2 !link

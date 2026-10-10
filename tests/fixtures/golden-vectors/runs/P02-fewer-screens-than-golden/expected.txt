@@ -1,0 +1,7 @@
+FAIL golden.golden: 2 mismatches in 1 of 3 screens
+  screens    expected 3   actual 2   missing 3
+screen 2:
+  text       row 1 col 0-4   expected 'hello'   actual 'zzz  '
+             1| hello   (expected)
+             1| zzz   (actual)
+                ^^^^^

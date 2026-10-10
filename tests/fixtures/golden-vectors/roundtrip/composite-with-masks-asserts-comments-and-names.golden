@@ -1,0 +1,58 @@
+vtee-golden 1
+schema 1
+semantics 1
+ignore title
+
+[masks]
+# The clock at the right end of the last row, on every screen.
+mask row=3 cols=15-19 text=/\d\d:\d\d/
+
+[screen 1]
+size 20x4
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+name "startup"
+
+[text]
+0|welcome
+1|
+2|
+3|               12:01
+
+[masks]
+# These lines change with the build.
+mask row=1 text=ignore
+
+[screen 2]
+size 20x4
+cursor row=0 col=0 shape=block hidden=false
+modes ?1 DECKPAM
+alt_screen false
+title "tf \"mud\""
+
+[text]
+0|connected
+1|hello
+2|
+3|               12:02
+
+[assert]
+assert row=1 text="hello" !bold
+assert find=/hello/ fg=default
+
+[screen 3]
+size 20x4
+cursor row=2 col=3 shape=block hidden=false
+modes
+alt_screen false
+title null
+wrapped 1
+name "end"
+
+[text]
+0|done
+1|world
+2|
+3|               12:03

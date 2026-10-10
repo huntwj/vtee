@@ -1,0 +1,1 @@
+{"golden":"golden.golden","result":"fail","grammar":1,"schema":1,"semantics":1,"snapshot":{"schema":1,"semantics":1},"screens_expected":1,"screens_actual":1,"total":1,"shown":1,"run":[],"screens":[{"index":1,"name":null,"result":"fail","mismatches":[{"kind":"attrs","row":0,"col_start":6,"col_end":6,"cells":1,"expected":["bold"],"actual":[]}]}]}

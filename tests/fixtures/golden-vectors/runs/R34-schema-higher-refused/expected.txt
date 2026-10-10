@@ -1,0 +1,2 @@
+REFUSED golden.golden: schema 2 in the golden, 1 in this vtee; nothing was compared
+  the golden was written by a newer vtee; upgrade vtee

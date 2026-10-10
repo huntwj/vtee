@@ -1,0 +1,7 @@
+FAIL golden.golden: 2 mismatches in 1 of 2 screens
+  wait       script line 7   wait_for "10/10mv>" timed out after 5000 ms
+screen 2:
+  text       row 1 col 0-4   expected 'hello'   actual 'zzz  '
+             1| hello   (expected)
+             1| zzz   (actual)
+                ^^^^^

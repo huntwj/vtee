@@ -1,0 +1,3 @@
+FAIL golden.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  assert     golden line 21   assert row=0 cols=0-2 !link   row 0 col 0   actual link="https://example.org/a"   (first failing cell of 3)

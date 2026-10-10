@@ -1,0 +1,1 @@
+{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":5,"cols":2,"rows":1,"lines":["ab"],"cells":[[{"ch":"a","fg":"Default","bg":"Default","bold":false},{"ch":"b","fg":"Default","bg":"Default","bold":false}]],"cursor":{"row":0,"col":0,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}

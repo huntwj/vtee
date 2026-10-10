@@ -1,0 +1,2 @@
+FAIL golden.golden: 1 mismatch in 0 of 3 screens
+  wait       script line 7   wait_for "10/10mv>" timed out after 5000 ms

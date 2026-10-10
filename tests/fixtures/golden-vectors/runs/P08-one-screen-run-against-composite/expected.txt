@@ -1,0 +1,2 @@
+FAIL golden.golden: 1 mismatch in 0 of 3 screens
+  screens    expected 3   actual 1   missing 2 3   (use --screen N to compare one screen)
