@@ -116,7 +116,7 @@ impl UnderlineStyle {
     }
 }
 
-fn underline_style(flags: Flags) -> UnderlineStyle {
+fn underline_of(flags: Flags) -> UnderlineStyle {
     if flags.contains(Flags::UNDERCURL) {
         UnderlineStyle::Curly
     } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
@@ -167,11 +167,9 @@ pub struct Cell {
     pub dim: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub italic: bool,
-    /// True for any underline style; see `underline_style` for which one.
-    #[serde(skip_serializing_if = "is_false")]
-    pub underline: bool,
+    /// How the cell is underlined; omitted when it is not.
     #[serde(skip_serializing_if = "UnderlineStyle::is_none")]
-    pub underline_style: UnderlineStyle,
+    pub underline: UnderlineStyle,
     /// SGR 58 underline colour; `Default` when none was set.
     #[serde(skip_serializing_if = "Color::is_default")]
     pub underline_color: Color,
@@ -196,8 +194,7 @@ impl Default for Cell {
             bold: false,
             dim: false,
             italic: false,
-            underline: false,
-            underline_style: UnderlineStyle::None,
+            underline: UnderlineStyle::None,
             underline_color: Color::Default,
             blink: false,
             reverse: false,
@@ -299,8 +296,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
                 bold: f.contains(Flags::BOLD) || f.contains(Flags::DIM_BOLD),
                 dim: f.contains(Flags::DIM) || f.contains(Flags::DIM_BOLD),
                 italic: f.contains(Flags::ITALIC),
-                underline: f.intersects(Flags::ALL_UNDERLINES),
-                underline_style: underline_style(f),
+                underline: underline_of(f),
                 underline_color: cell.underline_color().map(convert_color).unwrap_or_default(),
                 blink: false,
                 reverse: f.contains(Flags::INVERSE),
@@ -389,8 +385,7 @@ pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
             // Plain `4` for a single underline (understood everywhere); the others use the
             // colon sub-parameter form `4:N` (xterm, kitty, VTE, Windows Terminal). `21` is not
             // used for double: the Linux console reads it as "normal intensity".
-            match cell.underline_style {
-                UnderlineStyle::None if cell.underline => codes.push("4".to_string()),
+            match cell.underline {
                 UnderlineStyle::None => {}
                 UnderlineStyle::Single => codes.push("4".to_string()),
                 UnderlineStyle::Double => codes.push("4:2".to_string()),
@@ -532,11 +527,12 @@ mod emulator_tests {
         assert!(c[0].bold && !c[0].dim && !c[0].italic);
         assert!(c[1].dim && !c[1].bold);
         assert!(c[2].italic);
-        assert!(c[3].underline);
+        assert_eq!(c[3].underline, UnderlineStyle::Single);
         assert!(c[4].reverse);
         assert!(c[5].strike);
         let plain = &c[6];
-        assert!(!plain.bold && !plain.dim && !plain.italic && !plain.underline && !plain.reverse && !plain.strike);
+        assert!(!plain.bold && !plain.dim && !plain.italic && !plain.reverse && !plain.strike);
+        assert_eq!(plain.underline, UnderlineStyle::None);
         assert_eq!(row_text(&s, 0), "BDIURSP");
     }
 
@@ -638,8 +634,7 @@ mod emulator_tests {
         ];
         for (bytes, want) in styles {
             let c = &snap(bytes, 10, 2).cells[0][0];
-            assert_eq!(c.underline_style, want, "{:?}", String::from_utf8_lossy(bytes));
-            assert_eq!(c.underline, want != UnderlineStyle::None, "{:?}", String::from_utf8_lossy(bytes));
+            assert_eq!(c.underline, want, "{:?}", String::from_utf8_lossy(bytes));
         }
         let c = &snap(b"\x1b[4:3m\x1b[58;2;1;2;3mx\x1b[58;5;9my\x1b[59mz", 10, 2).cells[0];
         assert_eq!(c[0].underline_color, Color::Rgb(1, 2, 3));
@@ -654,10 +649,7 @@ mod emulator_tests {
         let cell = |i: usize| serde_json::to_value(&s.cells[0][i]).unwrap();
         assert_eq!(cell(0), serde_json::json!({"ch": "R", "fg": "idx:1", "bold": true}));
         assert_eq!(cell(1), serde_json::json!({"fg": "idx:1", "bold": true}), "a blank cell keeps its attributes only");
-        assert_eq!(
-            cell(2),
-            serde_json::json!({"ch": "U", "underline": true, "underline_style": "single", "underline_color": "rgb:#010203"})
-        );
+        assert_eq!(cell(2), serde_json::json!({"ch": "U", "underline": "single", "underline_color": "rgb:#010203"}));
         assert_eq!(cell(5), serde_json::json!({}));
         assert_eq!(cell(3), serde_json::json!({}));
     }
@@ -665,8 +657,8 @@ mod emulator_tests {
     #[test]
     fn absent_fields_read_as_defaults_and_explicit_defaults_are_accepted() {
         assert_eq!(serde_json::from_str::<Cell>("{}").unwrap(), Cell::default());
-        let dense = r#"{"ch":" ","fg":"default","bg":"default","bold":false,"dim":false,"italic":false,"underline":false,
-            "underline_style":"none","underline_color":"default","blink":false,"reverse":false,"strike":false,"hyperlink":null}"#;
+        let dense = r#"{"ch":" ","fg":"default","bg":"default","bold":false,"dim":false,"italic":false,
+            "underline":"none","underline_color":"default","blink":false,"reverse":false,"strike":false,"hyperlink":null}"#;
         assert_eq!(serde_json::from_str::<Cell>(dense).unwrap(), Cell::default());
         let continuation: Cell = serde_json::from_str(r#"{"ch":""}"#).unwrap();
         assert_eq!(continuation.ch, "", "an empty ch is a wide character's continuation cell, not a default");
@@ -704,16 +696,22 @@ mod emulator_tests {
     }
 
     #[test]
-    fn older_json_without_the_underline_fields_still_reads() {
-        let mut v = serde_json::to_value(snap(b"\x1b[4mx", 5, 2).cells[0][0].clone()).unwrap();
-        let o = v.as_object_mut().unwrap();
-        o.remove("underline_style");
-        o.remove("underline_color");
-        let cell: Cell = serde_json::from_value(v).unwrap();
-        assert!(cell.underline);
-        assert_eq!(cell.underline_style, UnderlineStyle::None);
-        assert_eq!(cell.underline_color, Color::Default);
-        assert_eq!(serde_json::to_value(UnderlineStyle::Curly).unwrap(), "curly");
+    fn underline_is_one_style_string_and_the_provisional_shapes_are_not_read() {
+        for (style, text) in [
+            (UnderlineStyle::Single, "single"),
+            (UnderlineStyle::Double, "double"),
+            (UnderlineStyle::Curly, "curly"),
+            (UnderlineStyle::Dotted, "dotted"),
+            (UnderlineStyle::Dashed, "dashed"),
+        ] {
+            assert_eq!(serde_json::to_value(style).unwrap(), text);
+            let cell: Cell = serde_json::from_str(&format!(r#"{{"underline":"{text}"}}"#)).unwrap();
+            assert_eq!(cell.underline, style);
+        }
+        assert!(serde_json::from_str::<Cell>(r#"{"underline":true}"#).is_err(), "the old boolean is not read");
+        assert!(serde_json::from_str::<Cell>(r#"{"underline":"wavy"}"#).is_err());
+        let single = serde_json::to_value(snap(b"\x1b[4mx", 5, 2).cells[0][0].clone()).unwrap();
+        assert!(single.get("underline_style").is_none(), "there is no separate underline_style field");
     }
 
     /// Replaying a snapshot's redraw into a fresh emulator must give back the same screen, which

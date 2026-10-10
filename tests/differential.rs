@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use vtee::{Color, Snapshot};
+use vtee::{Color, Snapshot, UnderlineStyle};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/differential")
@@ -142,7 +142,7 @@ fn from_snapshot(snap: &Snapshot) -> Screen {
                 (cell.bold, 'b'),
                 (cell.dim, 'd'),
                 (cell.italic, 'i'),
-                (cell.underline, 'u'),
+                (cell.underline != UnderlineStyle::None, 'u'),
                 (cell.reverse, 'r'),
                 (cell.strike, 's'),
             ] {
