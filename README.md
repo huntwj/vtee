@@ -97,6 +97,14 @@ from a script file without any interactive session, use `--script`. See
 
 The roadmap has the full list: [docs/roadmap.md](docs/roadmap.md).
 
+## Related tools
+
+Related tools: [teetty](https://github.com/mitsuhiko/teetty) (a tee with a fake tty, for watching and remote
+controlling a process), [tmux](https://github.com/tmux/tmux) (the session and attach model `vtee` borrows),
+`script` and `ttyrec` (record a terminal session), `expect` and [pexpect](https://github.com/pexpect/pexpect)
+(script interactive programs, with no screen model). `vtee` adds an in-memory screen you can query, several
+simultaneous clients, and golden files for screen-level tests.
+
 ## Documentation
 
 Start where your use is:

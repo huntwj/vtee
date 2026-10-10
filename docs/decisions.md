@@ -784,3 +784,38 @@ A sink is removed only when its writer thread has exited (a write failed or the 
 **Not changed:** the original guarantee. The stall test still fails (after 10 s) if the producer is made to wait
 for a full queue, checked by temporarily doing exactly that in a scratch copy. The cost of resynchronising is the
 lines that scrolled by during the gap, which that client does not see; every other client and the emulator do.
+
+## 2026-10-10: the project is renamed from ai-mux to vtee
+
+**Decision:** the project, crate, library, binary, session and config directories, environment variables
+(`AI_MUX_*` became `VTEE_*`) and the golden file magic (`vtee-golden`) take the name `vtee` (VT + tee, pronounced
+"vee-tee"). Nothing had been released under the old name, so no compatibility shims were added: old session
+directories (`ai-mux-<uid>`, `%LOCALAPPDATA%/ai-mux`) are ignored and can be deleted.
+
+**Why rename:**
+- The "ai" prefix mislabels a tool that serves people, CI authors and AI agents alike, and a name tied to a
+  technology of the moment ages.
+- "mux" promises a tmux-style multiplexer with panes and windows, which is a stated non-goal (`requirements.md`).
+  What the tool multiplexes is clients onto one pty.
+- Search noise: results for "ai-mux" are mostly Mux, the video platform.
+- The name was about to be frozen into the formats (the golden magic line, `x-producer`, directories, variables),
+  so renaming before 0.1.0 was mechanical and renaming after would have meant a grammar bump or legacy names
+  for ever.
+
+**Candidates considered** (checked against crates.io and GitHub on 2026-10-10): `vtee`, `kankan`, `kan`, `ptyscope`,
+`ttyscope`, `vtscope`, `tuiprobe`, `termtap`, `termscope`, and the pinyin names `tayin`, `fenliu`, `chaosong`,
+`tongping`, `touping`. Rejected for a collision: `termscope` (a headless terminal emulator CLI with the same
+purpose), `scry`, `tuiscope`, `screentap`, `tuitap`, `kan` (its crate is taken and "KAN" also means
+Kolmogorov-Arnold networks), `vty` (a well-known Haskell terminal UI library). `vtee` won: it says what the core
+function is, sits beside the `vte`, `vt100` and `avt` crates, and has no terminal-space collision. The known
+trade-off is that "TEE" also means Trusted Execution Environment in security circles.
+
+**Prior art:** mitsuhiko/teetty (about 340 stars at the time) already does a tee with a fake tty for watching and
+remote controlling a process. vtee differs in keeping an emulated screen you can query, many simultaneous
+clients of two kinds, session naming with attach, ls and kill, golden-file testing, and Windows support. Names
+combining "tee" and "tty" were avoided for that reason, and the README now lists related tools.
+
+**History:** because nothing had been released and nobody depended on the old hashes, the whole version control
+history was rewritten the same day, so every commit, message and file name uses `vtee` and this entry is the only
+place that keeps the old name. **Not changed:** the local checkout folder name and third-party names. The GitHub
+repository still has to be renamed by the owner.
