@@ -2,11 +2,8 @@
 # How it works and the one-time repo setup: docs/releasing.md.
 
 [workspace]
-# release-plz never runs `cargo publish` for now: releases are a git tag + GitHub Release, and crates.io uploads
-# are manual (docs/releasing.md, "Publishing to crates.io").
-publish = false
-# Versions are read from git tags (`vX.Y.Z`) instead of from the crates.io index.
-git_only = true
+# Publishing to crates.io uses Trusted Publishing from the `release` job (docs/releasing.md); no token is stored.
+# Do not set `git_only = true`: it makes release-plz skip `cargo publish`. Versions come from the crates.io index.
 git_tag_enable = true
 git_release_enable = true
 # cargo-semver-checks needs a published baseline to compare against.
