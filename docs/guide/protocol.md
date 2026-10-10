@@ -9,6 +9,9 @@ simply relays its stdin to the socket and prints the replies.
 - Some commands produce a result line; the rest produce nothing when they succeed. An error produces an error line.
 - Replies come back in order, one per command that has one.
 - A connection stays open until you close it. A bad command gets an error line and the connection continues.
+- Result lines never contain a character that a reader might take for a line break: besides `\n` and `\r`, which JSON
+  always escapes, vtee writes U+0085, U+2028 and U+2029 as `\u0085`, ` ` and ` `, so splitting on any
+  Unicode line terminator is safe.
 
 Strings are ordinary JSON. Control characters must be escaped, and JSON has no octal escape, so write ESC as
 `\u001b` (not `\033`) and carriage return as `\r`.
@@ -165,11 +168,14 @@ The raw terminal socket used by `attach` is separate and always allows typing.
 Everything about the screen at one instant, together with the number of output bytes that produced it. A snapshot
 is internally consistent: the state and `byte_offset` always agree.
 
-A real reply from a 12 by 3 screen, with the cell lists shortened:
+A real reply from a 12 by 3 screen that shows `$ ` and a bold red `R`, with the last two rows of cells shortened:
 
 ```
-{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":2,"cols":12,"rows":3,"lines":["$           ","            ","            "],"cells":[[{"ch":"$","fg":"Default","bg":"Default","bold":false,"dim":false,"italic":false,"underline":false,"underline_style":"none","underline_color":"Default","blink":false,"reverse":false,"strike":false,"hyperlink":null}, ...]],"cursor":{"row":0,"col":2,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
+{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"cursor":{"row":0,"col":3,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
 ```
+
+Cells are sparse: a field that has its default value is left out, and a blank cell is `{}`. A full 80 by 24 screen
+is about 8 KB when empty and 11 KB for a typical shell session, instead of about 410 KB.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -190,29 +196,42 @@ A real reply from a 12 by 3 screen, with the cell lists shortened:
 not change it, so a reader should ignore fields it does not know. A stored golden should record the version it was
 written with: if a snapshot arrives with a higher number than the one a golden was recorded under, regenerate
 and review the golden instead of trusting a comparison across versions. Fields added so far without a bump:
-`underline_style` and `underline_color` on cells (older JSON without them reads as `"none"` and `"Default"`).
+`underline_color` and `conceal` on cells.
+
+The cell layout changed before 0.1.0 (sparse cells, string colours, one `underline` string, no `blink`) without a
+new number, because nothing had been released. Snapshots written by those earlier builds are not read.
 
 ### Cell
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `ch` | string | The character, with any combining marks. The second half of a wide character is the empty string. |
-| `fg`, `bg` | Color | See below. |
-| `bold`, `dim`, `italic`, `underline`, `reverse`, `strike` | boolean | Text attributes. `underline` is true for any underline style. |
-| `underline_style` | string | `"none"`, `"single"`, `"double"`, `"curly"`, `"dotted"` or `"dashed"`. Set by `SGR 4` (single) and the `4:N` forms (`4:2` double, `4:3` curly, `4:4` dotted, `4:5` dashed). `SGR 21` is "bold off" in this emulator, not double underline. Older JSON without the field reads as `"none"`. |
-| `underline_color` | Color | The underline colour set by `SGR 58`, `"Default"` when none. Older JSON without the field reads as `"Default"`. |
-| `blink` | boolean | Always `false`; blink is not tracked. |
-| `hyperlink` | string or null | The target of an OSC 8 hyperlink. |
+A field is left out when it has its default value, and a reader treats an absent field as the default.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `ch` | string | `" "` | The character, with any combining marks. The second half of a wide character is the empty string. |
+| `fg`, `bg` | Color | `"default"` | See below. |
+| `bold`, `dim`, `italic`, `reverse`, `strike` | boolean | `false` | Text attributes. |
+| `conceal` | boolean | `false` | `SGR 8`: the text is hidden. The character is still reported in `ch`. |
+| `underline` | string | `"none"` | `"none"`, `"single"`, `"double"`, `"curly"`, `"dotted"` or `"dashed"`. Set by `SGR 4` (single) and the `4:N` forms (`4:2` double, `4:3` curly, `4:4` dotted, `4:5` dashed). `SGR 21` is "bold off" in this emulator, not double underline. |
+| `underline_color` | Color | `"default"` | The underline colour set by `SGR 58`. |
+| `hyperlink` | string | absent | The target of an OSC 8 hyperlink; written only when there is one. |
+
+Blink is not reported: the emulator has no blink flag. The name `blink` is reserved.
+
+A cell with an underline and an underline colour, and one with a hyperlink:
+
+```
+{"ch":"c","underline":"curly","underline_color":"rgb:#c80a14"}
+{"ch":"x","fg":"idx:4","hyperlink":"https://example.com/"}
+```
 
 ### Color
 
-`"Default"`, `{"Indexed":N}` for the 256-colour palette (0 to 15 are the standard and bright colours), or
-`{"Rgb":[r,g,b]}` for truecolour.
+A string: `"default"`, `"idx:N"` for the 256-colour palette (0 to 15 are the standard and bright colours), or
+`"rgb:#rrggbb"` for truecolour, with lower-case hexadecimal digits. A reader also accepts upper-case digits.
 
 ```
-"fg":"Default"
-"fg":{"Indexed":6}
-"fg":{"Rgb":[1,2,3]}
+"fg":"idx:6"
+"fg":"rgb:#010203"
 ```
 
 ### Modes
