@@ -1,0 +1,188 @@
+{
+ "alt_screen_47": {
+  "verdict": "vtee BUG",
+  "reason": "Mode ?47 (switch to the alternate screen, no clear, no cursor save) is not implemented in alacritty_terminal, so 'alt' lands on the main screen. xterm and avt keep it off the main screen. vt100 also restores the cursor, which xterm does not do for ?47. Not fixed here.",
+  "problems": [
+   "oracles disagree: cursor (row, col, hidden): avt=(0, 7, false) vt100=(0, 4, false)",
+   "vtee vs avt: row 0 text, first difference at col 4: vtee=\"mainalt             \" avt=\"main                \"",
+   "vtee vs vt100: row 0 text, first difference at col 4: vtee=\"mainalt             \" vt100=\"main                \""
+  ]
+ },
+ "alt_screen_stays": {
+  "verdict": "vtee correct",
+  "reason": "?1049h saves the cursor and switches screens without moving the cursor; vt100 homes it.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"                    \" vt100=\"alt                 \"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"                    \" vt100=\"alt                 \""
+  ]
+ },
+ "autowrap_off": {
+  "verdict": "vtee correct",
+  "reason": "With ?7l, text past the last column overwrites it instead of wrapping; vt100 wraps anyway.",
+  "problems": [
+   "oracles disagree: row 1 text, first difference at col 0: avt=\"                    \" vt100=\"xxxxx               \"",
+   "vtee vs vt100: row 1 text, first difference at col 0: vtee=\"                    \" vt100=\"xxxxx               \""
+  ]
+ },
+ "combining_mark": {
+  "verdict": "vtee correct",
+  "reason": "A combining mark attaches to the previous cell (x stays in column 1). avt gives the mark a cell of its own and shifts x right; vt100 agrees with vtee.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"e\\u{301}x                 \" vt100=\"e\\u{301}x                  \"",
+   "vtee vs avt: row 0 text, first difference at col 0: vtee=\"e\\u{301}x                  \" avt=\"e\\u{301}x                 \""
+  ]
+ },
+ "dec_special_graphics": {
+  "verdict": "vtee correct",
+  "reason": "ESC ( 0 selects line drawing; vt100 has no charset support.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"┌──┐                \" vt100=\"lqqk                \"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"┌──┐                \" vt100=\"lqqk                \""
+  ]
+ },
+ "erase_display_above": {
+  "verdict": "vtee BUG",
+  "reason": "ED 1 (CSI 1 J) must erase from the top of the screen to the cursor. alacritty_terminal 0.26.0 only clears the lines above when cursor.line > 1, so with the cursor on the second row the first row survives. Both oracles agree with xterm. Fix needs a change in or around alacritty_terminal; not fixed here.",
+  "problems": [
+   "vtee vs avt: row 0 text, first difference at col 0: vtee=\"AAAA                \" avt=\"                    \"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"AAAA                \" vt100=\"                    \""
+  ]
+ },
+ "hvp": {
+  "verdict": "vtee correct",
+  "reason": "CSI f is HVP, same as CUP; vt100 ignores it.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"                    \" vt100=\"H                   \"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"                    \" vt100=\"H                   \""
+  ]
+ },
+ "index_and_nel": {
+  "verdict": "vtee correct",
+  "reason": "ESC D (IND) and ESC E (NEL) are standard; vt100 ignores both.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 1: avt=\"A                   \" vt100=\"ABC                 \"",
+   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"A                   \" vt100=\"ABC                 \""
+  ]
+ },
+ "insert_mode": {
+  "verdict": "vtee correct",
+  "reason": "CSI 4 h (IRM) inserts instead of overwriting; vt100 ignores it.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 4: avt=\"ABxyCDEF            \" vt100=\"ABxyEF              \"",
+   "vtee vs vt100: row 0 text, first difference at col 4: vtee=\"ABxyCDEF            \" vt100=\"ABxyEF              \""
+  ]
+ },
+ "origin_mode": {
+  "verdict": "vtee BUG",
+  "reason": "In xterm both setting and resetting DECOM (?6) homes the cursor. alacritty_terminal homes it on set but not on reset, so the cursor stays at (1, 1) instead of (0, 0). Not fixed here.",
+  "problems": [
+   "vtee vs avt: cursor (row, col, hidden): vtee=(1, 1, false) avt=(0, 0, false)",
+   "vtee vs vt100: cursor (row, col, hidden): vtee=(1, 1, false) vt100=(0, 0, false)"
+  ]
+ },
+ "repeat_char": {
+  "verdict": "vtee correct",
+  "reason": "CSI n b (REP) repeats the last character in xterm; vt100 lacks it.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 1: avt=\"aaaaaa              \" vt100=\"a                   \"",
+   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"aaaaaa              \" vt100=\"a                   \""
+  ]
+ },
+ "resize_grow_rows": {
+  "verdict": "vtee correct",
+  "reason": "Growing the screen pulls scrolled-off lines back into view (xterm does this; so does avt). vt100 keeps no history for this to restore.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"1         \" vt100=\"3         \"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"1         \" vt100=\"3         \""
+  ]
+ },
+ "resize_shrink_cols": {
+  "verdict": "terminal-dependent; vtee reflows",
+  "reason": "Shrinking the width re-wraps long lines in alacritty, VTE and kitty (vtee and avt do the same); xterm and vt100 truncate instead. vtee inherits alacritty_terminal's reflow, so an xterm-based golden would differ.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"klmnopqrst\" vt100=\"abcdefghij\"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"klmnopqrst\" vt100=\"abcdefghij\""
+  ]
+ },
+ "save_restore_cursor_csi": {
+  "verdict": "vtee correct",
+  "reason": "CSI s / CSI u save and restore the cursor in xterm; vt100 lacks them.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 2: avt=\"abcd                \" vt100=\"ab                  \"",
+   "vtee vs vt100: row 0 text, first difference at col 2: vtee=\"abcd                \" vt100=\"ab                  \""
+  ]
+ },
+ "sgr_bold_and_dim": {
+  "verdict": "vtee correct",
+  "reason": "Same as sgr_selective_off: bold and faint can both be set in xterm.",
+  "problems": [
+   "vtee vs avt: cell (row 0, col 1) attributes: vtee=fg=default bg=default flags=[bd] avt=fg=default bg=default flags=[d]",
+   "vtee vs vt100: cell (row 0, col 1) attributes: vtee=fg=default bg=default flags=[bd] vt100=fg=default bg=default flags=[d]"
+  ]
+ },
+ "sgr_selective_off": {
+  "verdict": "vtee correct",
+  "reason": "xterm keeps bold and faint as independent attributes (alacritty_terminal: BOLD | DIM); avt and vt100 make intensity one-of, last wins.",
+  "problems": [
+   "vtee vs avt: cell (row 0, col 0) attributes: vtee=fg=default bg=default flags=[bdiurs] avt=fg=default bg=default flags=[diurs]",
+   "vtee vs vt100: cell (row 0, col 0) attributes: vtee=fg=default bg=default flags=[bdiur] vt100=fg=default bg=default flags=[diur]"
+  ]
+ },
+ "shift_out_in": {
+  "verdict": "vtee correct",
+  "reason": "SO/SI switch between G0 and G1; vt100 ignores them.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 1: avt=\"a─q                 \" vt100=\"aqq                 \"",
+   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"a─q                 \" vt100=\"aqq                 \""
+  ]
+ },
+ "tab_default_stops": {
+  "verdict": "vtee BUG (cosmetic)",
+  "reason": "A tab writes a literal TAB character into the cell where it starts, so snapshot text contains TAB where xterm and both oracles have a blank. Positions are right. A mapping fix in snapshot.rs (render TAB as a space) would close it; not fixed here.",
+  "problems": [
+   "vtee vs avt: row 0 text, first difference at col 1: vtee=\"a\\t      b\\t      c             \" avt=\"a       b       c             \"",
+   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"a\\t      b\\t      c             \" vt100=\"a       b       c             \""
+  ]
+ },
+ "tab_forward_backward": {
+  "verdict": "vtee correct",
+  "reason": "CSI n I (CHT) and CSI Z (CBT) work; vt100 lacks them.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 0: avt=\"                b             \" vt100=\"ab                            \"",
+   "vtee vs vt100: row 0 text, first difference at col 0: vtee=\"                b             \" vt100=\"ab                            \""
+  ]
+ },
+ "tab_set_and_clear": {
+  "verdict": "vtee BUG (cosmetic)",
+  "reason": "Same TAB-in-cell artifact as tab_default_stops; the tab stop positions are correct (b lands in column 4, as in avt). vt100 ignores TBC/HTS.",
+  "problems": [
+   "oracles disagree: row 0 text, first difference at col 4: avt=\"a   b               \" vt100=\"a       b           \"",
+   "vtee vs avt: row 0 text, first difference at col 1: vtee=\"a\\t  b               \" avt=\"a   b               \"",
+   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"a\\t  b               \" vt100=\"a       b           \""
+  ]
+ },
+ "truecolor_colon_form": {
+  "verdict": "vtee correct",
+  "reason": "xterm accepts the ITU colon form 38:2::R:G:B; vt100 ignores it.",
+  "problems": [
+   "oracles disagree: cell (row 0, col 0) attributes: avt=fg=rgb:10,200,30 bg=default flags=[] vt100=fg=default bg=default flags=[]",
+   "vtee vs vt100: cell (row 0, col 0) attributes: vtee=fg=rgb:10,200,30 bg=default flags=[] vt100=fg=default bg=default flags=[]"
+  ]
+ },
+ "underline_curly": {
+  "verdict": "vtee correct",
+  "reason": "4:3 is a curly underline in xterm 282+/kitty; avt and vt100 ignore sub-parameters. vtee reports it as plain underline (the style itself is not exposed yet).",
+  "problems": [
+   "vtee vs avt: cell (row 0, col 0) attributes: vtee=fg=default bg=default flags=[u] avt=fg=default bg=default flags=[]",
+   "vtee vs vt100: cell (row 0, col 0) attributes: vtee=fg=default bg=default flags=[u] vt100=fg=default bg=default flags=[]"
+  ]
+ },
+ "underline_off_variants": {
+  "verdict": "vtee correct",
+  "reason": "4:0 turns underline off; avt and vt100 read it as plain underline.",
+  "problems": [
+   "vtee vs avt: cell (row 0, col 1) attributes: vtee=fg=default bg=default flags=[] avt=fg=default bg=default flags=[u]",
+   "vtee vs vt100: cell (row 0, col 1) attributes: vtee=fg=default bg=default flags=[] vt100=fg=default bg=default flags=[u]"
+  ]
+ }
+}

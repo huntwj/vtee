@@ -16,6 +16,8 @@ Counts and timings are from a run on 2026-10-09 and will drift. Windows timings 
 | `tests/windows_conpty.rs` | Windows | 2 | about 1 s | A real ConPTY playing the terminal for `vtee.exe`: interactive completion, and script mode answering ConPTY's startup query |
 | `tests/windows_behavior.rs` | Windows | 13 | about 60 s | Size overrides and live resize, Ctrl-C, force-kill outcome, exit codes, `more`, Edit, `vim`/`less`, 20 repeated script runs, multi-line paste, output floods |
 | `tests/windows_sessions.rs` | Windows | 11 | about 14 s | Sessions, `ls`, `kill`, duplicate names, both sockets, two clients, stale-file cleanup, and that the child does not inherit socket handles |
+| `tests/differential.rs` | both (4 resize cases Unix-only) | 1 test over 80 cases | under 1 s | Runs each escape-sequence case through vtee's emulator and compares every cell with two independent emulators; see [Differential emulator tests](#differential-emulator-tests) |
+| `tests/windows_console.rs` | Windows | 2 | under 1 s | The console VT flags `RawModeGuard` sets and restores, and that an Up-arrow reaches the program as `ESC [ A` |
 
 The CLI tests run the real binary through `assert_cmd` and check what a user sees (exit code, output, files), not
 internals. The Linux and Windows session suites do the same against live sessions.
@@ -89,6 +91,53 @@ The Windows ConPTY tests were once flaky (about half of runs hung) because ConPT
 unanswered. That is fixed; see [internals](internals.md#conpty-startup-query). If they hang again, suspect that
 first.
 
+## Differential emulator tests
+
+`tests/differential.rs` answers "is vtee's virtual terminal right?" by comparison. The corpus is
+`tests/fixtures/differential/cases.json`: 80 small named cases (SGR attributes and colours, cursor movement,
+erase, scroll regions, insert/delete, wide and combining characters, tabs, alternate screen, line-drawing
+charsets, wrapping, origin mode, live resize, and a few vtee-only checks for title, hyperlinks and cursor
+shape). Inputs use `\e` for ESC and `\\` for a backslash; CR, LF and BEL are ordinary JSON escapes.
+
+Each case runs through vtee's emulator (`vtee::replay`, the same `Term` the live tap uses; the resize
+cases go through a live `Tap`, on Unix only) and is compared cell by cell, on text, colours, six attributes
+(bold, dim, italic, underline, reverse, strike) and the cursor, with the committed output of two independent
+emulators, `avt` and `vt100` (`oracle_avt.json`, `oracle_vt100.json`). An attribute an oracle cannot report
+(`vt100` has no strike-through) is skipped for that oracle.
+
+- **A case passes** when vtee equals both oracles.
+- **A disagreement is only accepted** if `adjudications.json` records it, with a verdict and the exact list of
+  differences. The test checks that list, so a fix or a regression changes it and fails the test: a recorded bug
+  that gets fixed makes the test fail until its entry is removed.
+- **Reading a failure:** the message names the case, the two emulators, and the first differing row and column with
+  both sets of attributes.
+
+Of the 80 cases, 57 agree across all three emulators and 23 are adjudicated. Most of those are `vt100` or `avt`
+lacking a feature (HVP, `CSI s`/`u`, IND/NEL, IRM, REP, `?7l`, charsets, colon-form colours, `4:3`/`4:0` underline
+sub-parameters). Five cases, four distinct problems, are vtee deviations, inherited from `alacritty_terminal`
+0.26.0 and not fixed in vtee:
+
+| Case | What vtee does | What xterm does |
+| --- | --- | --- |
+| `erase_display_above` | `CSI 1 J` with the cursor on the second row leaves the first row | Erases from the top of the screen to the cursor |
+| `origin_mode` | Resetting `?6` leaves the cursor where it is | Homes the cursor on both set and reset |
+| `alt_screen_47` | Ignores `?47`, so text lands on the main screen | Switches screens |
+| `tab_default_stops`, `tab_set_and_clear` | A tab writes a literal TAB into the cell it starts in, so snapshot `lines` contain TAB | Leaves the cell blank (positions are correct) |
+
+`resize_shrink_cols` is a difference of design: vtee re-wraps long lines when the width shrinks, as alacritty, VTE
+and kitty do, where xterm truncates.
+
+### Adding or changing a case
+
+1. Edit `cases.json`.
+2. Regenerate the oracles: `sh tests/differential/regenerate.sh` (uses Docker, or a local toolchain with network
+   access; the generator in `tests/differential/oracle/` is a standalone crate, not part of the vtee build).
+3. Triage: `VTEE_DIFF_REPORT=/tmp/report.json cargo test --test differential` writes every disagreement to the
+   file instead of failing. Decide for each which emulator is right, by xterm's documented behaviour, not by
+   majority.
+4. Add an entry to `adjudications.json` with `verdict`, `reason` and the `problems` list from the report. A case
+   where all three agree needs no entry.
+
 ## Reading a failure
 
 `assert_cmd` prints the command, its exit code, and its stdout and stderr. For a session test, rerun it with
@@ -97,6 +146,6 @@ first.
 
 ## Known gaps
 
-The main untested areas are listed in the [roadmap](../roadmap.md#beta-readiness): the full snapshot attribute set,
-the `redraw_sequence` round trip, `--log` through the CLI, the config-file path, terminal restore after a
-signal, and write-policy enforcement for read-only sockets.
+The main untested areas are listed in the [roadmap](../roadmap.md#beta-readiness): the `redraw_sequence` round
+trip, `--log` through the CLI, the config-file path, terminal restore after a signal, and write-policy enforcement
+for read-only sockets. The differential tests now cover the per-cell attributes of the snapshot.
