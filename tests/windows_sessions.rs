@@ -514,7 +514,7 @@ fn killing_the_holder_closes_its_sockets_for_every_peer() {
 
 /// The scoping report's riskiest unknown: does a socket handle leak into a process spawned
 /// afterwards (Windows inherits handles at `CreateProcess`, unlike Unix's close-on-exec)? Not
-/// today: the vendored ConPTY spawn calls `CreateProcessW` with `bInheritHandles = FALSE`, and
+/// today: `portable-pty`'s ConPTY spawn calls `CreateProcessW` with `bInheritHandles = FALSE`, and
 /// the session sockets are only bound after the child exists anyway. This pins the measurement
 /// (bind, spawn a long-lived child the way `Tap::spawn` does, drop the listener: the socket must
 /// stop accepting while the child lives) so a change to either of those shows up.

@@ -6,10 +6,9 @@
 //! `ESC[row;colR` reply arrives on its input. Two different things have to answer that:
 //!
 //! - **Interactive** (`vtee_runs_to_completion_under_a_real_conpty_terminal`): the human's
-//!   terminal does. This test stands in for one: it opens a real pty via our own (patched)
-//!   `portable_pty`, spawns `vtee` attached to it, and answers every `ESC[6n` it sees. Also
-//!   the regression test for the `CREATE_NEW_PROCESS_GROUP` patch
-//!   (`vendor/portable-pty/README-vtee-patch.md`). Used to hang on roughly every other run:
+//!   terminal does. This test stands in for one: it opens a real pty via `portable_pty`,
+//!   spawns `vtee` attached to it, and answers every `ESC[6n` it sees. Used to hang on roughly
+//!   every other run:
 //!   the reply reached `vtee`'s stdin, but `forward_input`'s first read had started while the
 //!   console was still in cooked mode, and a cooked read swallowed it. `run_spawn` now enables
 //!   raw mode *before* `Tap::spawn`; measured 0 hangs in 30+ consecutive runs after the fix.
