@@ -397,6 +397,41 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     }
 }
 
+/// The visible screen as logical lines: rows joined across soft wraps (`Snapshot::wrapped_rows`), so a
+/// long line the program printed is one string however narrow the screen is. Cell text only, with the
+/// blank a wide character left behind at the end of a wrapped row dropped, so the text reads as the
+/// program wrote it. Trailing blanks of the last row of a line are kept, as in `Snapshot::lines`.
+pub(crate) fn logical_lines(term: &Term<ObserverListener>) -> Vec<String> {
+    let grid = term.grid();
+    let cols = grid.columns();
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for r in 0..grid.screen_lines() {
+        let line = Line(r as i32);
+        let mut wraps = false;
+        for c in 0..cols {
+            let cell = &grid[Point::new(line, Column(c))];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            current.push(display_char(cell.c));
+            if let Some(zw) = cell.zerowidth() {
+                current.extend(zw);
+            }
+        }
+        if cols > 0 {
+            wraps = grid[Point::new(line, Column(cols - 1))].flags.contains(Flags::WRAPLINE);
+        }
+        if !wraps {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 /// Reconstructs `snap`'s visible screen as raw ANSI bytes for a freshly attached raw-TTY
 /// client, sent before the live feed so it sees the current picture at once. `alacritty_terminal`
 /// has no API that re-emits ANSI.
@@ -829,6 +864,19 @@ mod emulator_tests {
         let s = snap(b"abcdefghijklm", 10, 5);
         assert_eq!(s.lines[0], "abcdefghij");
         assert_eq!(s.lines[1].trim_end(), "klm");
+    }
+
+    #[test]
+    fn logical_lines_join_soft_wraps_but_not_hard_breaks() {
+        let logical = |bytes: &[u8], cols, rows| {
+            let mut term = Term::new(Config::default(), &Size { cols, rows }, ObserverListener::new());
+            Processor::<vte::ansi::StdSyncHandler>::new().advance(&mut term, bytes);
+            logical_lines(&term).iter().map(|l| l.trim_end().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(logical(b"abcdefghijklmnopqrst\r\nxyz", 10, 4), ["abcdefghijklmnopqrst", "xyz", ""]);
+        assert_eq!(logical(b"abcdefghij\r\nklm", 10, 3), ["abcdefghij", "klm", ""]);
+        // The blank left where a wide character moved down is not part of the text.
+        assert_eq!(logical("abcdefghi\u{4f60}z".as_bytes(), 10, 3), ["abcdefghi\u{4f60}z", ""]);
     }
 
     #[test]

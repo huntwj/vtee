@@ -1173,6 +1173,46 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `wait_for` matches one screen row at a time by default, so text that crosses a soft wrap is not
+    /// found; with `join_wrapped` the rows of a wrapped line are joined first. A hard line break stays a
+    /// break either way.
+    #[test]
+    fn wait_for_can_match_across_a_soft_wrap_when_asked() {
+        let dir = isolated_tmpdir();
+        let script = script_file(
+            &dir,
+            &[
+                r#"{"cmd":"wait_for","text":"delta-echo","timeout_ms":8000}"#,
+                r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":300}"#,
+                r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":8000,"join_wrapped":true}"#,
+                r#"{"cmd":"wait_for","text":"echo-zulu","timeout_ms":300,"join_wrapped":true}"#,
+                r#"{"cmd":"snapshot"}"#,
+            ],
+        );
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args([
+                "--cols",
+                "20",
+                "--rows",
+                "6",
+                "--",
+                "sh",
+                "-c",
+                "echo alpha-bravo-charlie-delta-echo; echo zulu; sleep 30",
+            ])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let results = result_lines(&out.stdout);
+        let matched: Vec<_> = results.iter().take(4).map(|r| r["matched"].clone()).collect();
+        assert_eq!(matched, [true, false, true, false], "{results:?}");
+        assert_eq!(results[4]["snapshot"]["wrapped_rows"], serde_json::json!([0]), "{results:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn send_key_and_wait_ms_drive_the_child_in_script_mode() {
         let dir = isolated_tmpdir();

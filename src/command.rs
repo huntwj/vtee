@@ -43,9 +43,13 @@ pub enum Command {
     },
     /// Blocks until the screen's text contains `text`, or `timeout_ms` elapses - the "text
     /// appears" case of wait-for-predicate that TinyFugue actually asked for (`roadmap.md`).
+    /// By default each screen row is matched on its own; with `join_wrapped` the rows of a soft-wrapped
+    /// line are joined first, so `text` can span the wrap.
     WaitFor {
         text: String,
         timeout_ms: u64,
+        #[serde(default)]
+        join_wrapped: bool,
     },
     Snapshot,
     /// Whether the child has exited, and how. Never blocks.
@@ -193,8 +197,13 @@ impl Command {
                 std::thread::sleep(Duration::from_millis(*ms));
                 Ok(None)
             }
-            Command::WaitFor { text, timeout_ms } => {
-                let (matched, snapshot) = tap.wait_for_text(text, Duration::from_millis(*timeout_ms));
+            Command::WaitFor { text, timeout_ms, join_wrapped } => {
+                let timeout = Duration::from_millis(*timeout_ms);
+                let (matched, snapshot) = if *join_wrapped {
+                    tap.wait_for_joined_text(text, timeout)
+                } else {
+                    tap.wait_for_text(text, timeout)
+                };
                 Ok(Some(CommandResult::WaitFor { matched, snapshot }))
             }
             Command::Snapshot => Ok(Some(CommandResult::Snapshot { snapshot: tap.snapshot() })),
@@ -220,7 +229,7 @@ mod tests {
     fn commands() -> Vec<(&'static str, Command)> {
         vec![
             ("snapshot", Command::Snapshot),
-            ("wait_for", Command::WaitFor { text: "x".into(), timeout_ms: 1 }),
+            ("wait_for", Command::WaitFor { text: "x".into(), timeout_ms: 1, join_wrapped: false }),
             ("wait_ms", Command::WaitMs { ms: 1 }),
             ("exit_status", Command::ExitStatus),
             ("wait_exit", Command::WaitExit { timeout_ms: 1 }),
@@ -268,6 +277,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn wait_for_joins_wrapped_lines_only_when_asked() {
+        let plain: Command = serde_json::from_str(r#"{"cmd":"wait_for","text":"x","timeout_ms":5}"#).unwrap();
+        assert!(matches!(plain, Command::WaitFor { join_wrapped: false, .. }));
+        let joined: Command =
+            serde_json::from_str(r#"{"cmd":"wait_for","text":"x","timeout_ms":5,"join_wrapped":true}"#).unwrap();
+        assert!(matches!(joined, Command::WaitFor { join_wrapped: true, .. }));
     }
 
     #[test]

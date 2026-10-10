@@ -480,11 +480,28 @@ impl Tap {
     /// Block until the screen text contains `text` or `timeout` elapses; returns whether it
     /// matched and the snapshot at that moment. Wakes on new output via a `Condvar`.
     pub fn wait_for_text(&self, text: &str, timeout: Duration) -> (bool, Snapshot) {
+        self.wait_for(text, timeout, false)
+    }
+
+    /// Like [`Tap::wait_for_text`], but matches against logical lines: rows joined across soft wraps
+    /// (`Snapshot::wrapped_rows`), so text the program printed on one line matches however narrow the
+    /// screen is. A hard line break still separates two lines. The wrap blank a wide character leaves at
+    /// the end of a row is not part of the joined text.
+    pub fn wait_for_joined_text(&self, text: &str, timeout: Duration) -> (bool, Snapshot) {
+        self.wait_for(text, timeout, true)
+    }
+
+    fn wait_for(&self, text: &str, timeout: Duration, join_wrapped: bool) -> (bool, Snapshot) {
         let deadline = Instant::now() + timeout;
         let mut guard = self.shared.state.lock_unpoisoned();
         loop {
             let snap = snapshot::build(&guard.term, guard.bytes_seen, self.title.current_title());
-            if snap.lines.iter().any(|l| l.contains(text)) {
+            let found = if join_wrapped {
+                snapshot::logical_lines(&guard.term).iter().any(|l| l.contains(text))
+            } else {
+                snap.lines.iter().any(|l| l.contains(text))
+            };
+            if found {
                 return (true, snap);
             }
             let now = Instant::now();
