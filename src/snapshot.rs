@@ -289,7 +289,8 @@ pub struct Snapshot {
     pub cursor: Cursor,
     /// Active modes, as a set written sorted: private modes by number (`"?1"`, `"?1000"`, `"?1002"`, `"?1003"`,
     /// `"?1005"`, `"?1006"`, `"?2004"`), then names alphabetically (`"DECKPAM"`). A reader accepts any order. The
-    /// mouse report modes are mutually exclusive in the emulator, and so are the mouse encodings.
+    /// emulator keeps at most one mouse report mode and one mouse encoding: setting another replaces the earlier
+    /// one, and a reset clears only the mode it names.
     pub modes: Vec<String>,
     pub alt_screen: bool,
     pub title: Option<String>,
