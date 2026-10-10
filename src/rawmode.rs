@@ -7,6 +7,12 @@ use std::io;
 /// child unmodified (requirement 7), restoring it on drop and on panic unwind. A no-op when
 /// stdin isn't a terminal.
 ///
+/// On Windows it also turns on the console's virtual-terminal flags (`ENABLE_VIRTUAL_TERMINAL_INPUT` on
+/// stdin, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on stdout) so escape sequences in the child's output
+/// are interpreted rather than printed and special keys reach the child as escape sequences. Terminals
+/// like Windows Terminal already do this; a legacy `conhost` window does not. The original modes are
+/// restored on drop and by the console control handler ([`restore_console_modes`]).
+///
 /// On Unix it also spawns a watchdog process that restores the terminal after `SIGKILL`. The
 /// watchdog's stdin is one end of a socketpair; we hold the other end, so when we die for any
 /// reason the OS closes it and the watchdog sees EOF. The watchdog can't call
@@ -24,7 +30,15 @@ impl RawModeGuard {
         let is_tty = io::stdin().is_terminal();
         #[cfg(unix)]
         let original_termios = if is_tty { capture_termios() } else { None };
+        #[cfg(windows)]
+        if is_tty {
+            console::save_originals();
+        }
         let active = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
+        #[cfg(windows)]
+        if active {
+            console::enable_vt();
+        }
         RawModeGuard {
             active,
             #[cfg(unix)]
@@ -43,7 +57,85 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
             let _ = crossterm::terminal::disable_raw_mode();
+            #[cfg(windows)]
+            console::restore();
         }
+    }
+}
+
+/// Puts back the console modes saved by the guard. For the console control handler, which exits the
+/// process without running destructors. A no-op if no guard is active.
+#[cfg(windows)]
+pub(crate) fn restore_console_modes() {
+    console::restore();
+}
+
+#[cfg(windows)]
+mod console {
+    use std::sync::Mutex;
+
+    type Handle = isize;
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const INVALID_HANDLE_VALUE: Handle = -1;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(std_handle: u32) -> Handle;
+        fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
+    }
+
+    /// (handle, mode before we touched it, flag to add) for each console handle we changed.
+    static SAVED: Mutex<Vec<(Handle, u32, u32)>> = Mutex::new(Vec::new());
+
+    fn console_mode(std_handle: u32) -> Option<(Handle, u32)> {
+        unsafe {
+            let handle = GetStdHandle(std_handle);
+            if handle == 0 || handle == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let mut mode = 0u32;
+            // Fails for a redirected handle, which is exactly when there is nothing to set.
+            if GetConsoleMode(handle, &mut mode) == 0 { None } else { Some((handle, mode)) }
+        }
+    }
+
+    /// Remembers the modes to restore. Called before raw mode changes the input mode.
+    pub(super) fn save_originals() {
+        let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+        saved.clear();
+        if let Some((h, mode)) = console_mode(STD_INPUT_HANDLE) {
+            saved.push((h, mode, ENABLE_VIRTUAL_TERMINAL_INPUT));
+        }
+        if let Some((h, mode)) = console_mode(STD_OUTPUT_HANDLE) {
+            saved.push((h, mode, ENABLE_VIRTUAL_TERMINAL_PROCESSING));
+        }
+    }
+
+    /// Adds the VT flags on top of the *current* modes, so raw mode's own changes are kept.
+    pub(super) fn enable_vt() {
+        let saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+        for &(handle, _, flag) in saved.iter() {
+            unsafe {
+                let mut current = 0u32;
+                if GetConsoleMode(handle, &mut current) != 0 {
+                    SetConsoleMode(handle, current | flag);
+                }
+            }
+        }
+    }
+
+    pub(super) fn restore() {
+        let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+        for &(handle, original, _) in saved.iter() {
+            unsafe {
+                SetConsoleMode(handle, original);
+            }
+        }
+        saved.clear();
     }
 }
 

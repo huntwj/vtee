@@ -509,6 +509,7 @@ impl Tap {
                     return 0;
                 }
                 let _ = crossterm::terminal::disable_raw_mode();
+                crate::rawmode::restore_console_modes();
                 if let Some(killer) = KILLER.get() {
                     let _ = killer.lock_unpoisoned().kill();
                 }

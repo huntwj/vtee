@@ -98,12 +98,24 @@ application-cursor state on Windows. `send_key` picks the arrow-key form from th
 state, which therefore always reads as off here; whether a program that insists on the application form still
 accepts it was not tested.
 
+## Console flags
+
+While `vtee attach` or an interactive run owns your console, it turns on two virtual-terminal flags and puts
+the original modes back when it exits, including when the console is closed or Ctrl-Break is pressed:
+
+- `ENABLE_VIRTUAL_TERMINAL_INPUT` on input, so arrow keys, Home, End and function keys reach the program as the
+  escape sequences it expects (`ESC [ A` for Up). Without it a console in raw mode delivers no bytes for those
+  keys at all; the test `the_guard_enables_vt_flags_and_restores_them` measures exactly that.
+- `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on output, so a redraw's escape sequences are interpreted instead of
+  printed. Windows Terminal and a ConPTY console already have this on. A legacy `conhost` window may not, which
+  is why it is set. That case cannot be reproduced by the test harness, so it is untested here.
+
+Nothing is changed if the handle is not a console, for example when output is redirected to a file.
+
 ## Known gaps
 
 - **No terminal-restore watchdog.** On Linux a helper process restores the terminal mode if the holder is
   killed. On Windows nothing does; a shell normally resets the console at its next prompt.
-- **`attach` does not set the console's virtual-terminal flags.** Escape sequences and special keys may not
-  behave correctly through `vtee attach` in every console host. This is untested.
 - **`kill` and process id reuse.** `kill` checks that the session answers before it terminates the holder, and
   refuses to terminate a process that was created after the session record was last written, since that process
   cannot be the holder. A reused process id is therefore left alone; the check relies on file and process times.
