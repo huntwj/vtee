@@ -109,4 +109,4 @@ check that you are running a current build. See [Windows](windows.md#terminal-qu
 
 Run with `-v` (repeat for more detail). In an interactive session the log goes to `<session dir>/<pid>.log`, and
 `vtee` prints the path at startup; in other modes it goes to stderr. `--log <path>` records the program's raw
-output as an asciicast file you can replay.
+output as an asciicast file; `vtee replay <path>` prints the screen it ends with (`--json` for the full snapshot).

@@ -49,4 +49,5 @@ no cleanup. Use `vtee kill` to end a session.
 [CONTRIBUTING](../../CONTRIBUTING.md#the-linux-test-image).
 
 **Where do I report a screen that looks wrong?** Open an issue with the command you ran and a recording made with
-`--log run.cast`; see [CONTRIBUTING](../../CONTRIBUTING.md#reporting-problems).
+`--log run.cast` (check it first with `vtee replay run.cast`); see
+[CONTRIBUTING](../../CONTRIBUTING.md#reporting-problems).

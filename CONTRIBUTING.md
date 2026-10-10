@@ -147,4 +147,5 @@ protocol command, a snapshot field, a command-line flag or an emulation case. Fo
 
 Open an issue with the command you ran, what you expected, what happened, your OS and the output of
 `vtee --version`. For a hang or a screen that looks wrong, `vtee --log run.cast ...` records the raw output,
-which makes it reproducible.
+which makes it reproducible; `vtee replay run.cast` prints the screen the recording ends with, so you can check
+it shows the problem before attaching it.

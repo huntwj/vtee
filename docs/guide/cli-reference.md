@@ -5,11 +5,13 @@ vtee [OPTIONS] [--] [PROGRAM]...
 vtee attach [NAME]
 vtee ls
 vtee kill <NAME>
+vtee replay [--json] <FILE>
 ```
 
 The mode is chosen by which flags you give, not by a subcommand: `--script` runs a script, `--connect` talks to an
-existing session, anything else spawns `PROGRAM`. The three subcommands (`attach`, `ls`, `kill`) manage existing
-sessions. The text here comes from `vtee --help`; run that for the exact wording on your build.
+existing session, anything else spawns `PROGRAM`. The subcommands `attach`, `ls` and `kill` manage existing
+sessions, and `replay` shows a recording. `vtee help <subcommand>` and `vtee <subcommand> --help` print the
+help for one. The option descriptions below follow `vtee --help`; run that for the exact wording on your build.
 
 Everything after the last recognised flag is the program and its arguments. Put `--` before the program if its
 name or first argument could be mistaken for an `vtee` flag. Flags that come after the program name are passed
@@ -36,24 +38,36 @@ $ vtee --no-listen -- printenv HOME
 | `-q`, `--quiet` | | Decrease log verbosity (repeatable). |
 | `--text` | off | With `--script` or `--connect`: print only the screen text of each result instead of the full JSON. Ignored otherwise. |
 | `--connect <PATH>` | | Connect to a session's JSON socket instead of spawning. |
-| `--log <PATH>` | off | Record the program's raw output as an asciicast v2 file. |
+| `--log <PATH>` | off | Record the program's raw output as an asciicast v2 file. `vtee replay <PATH>` shows its final screen. `-v` controls diagnostic logging, which is separate. |
 | `--script <PATH>` | | Run a newline-delimited JSON script, then exit. |
 | `--listen[=<PATH>]` | on, at the default path | Choose the JSON socket path. The `=` is required for a path: `--listen /tmp/x` is read as the program `/tmp/x`. Conflicts with `--no-listen`. |
-| `--no-listen` | | Create no sockets, no pidfile and no session directory. Conflicts with `--listen`, `--writable` and `--headless`. |
-| `--writable[=<MODE>]` | read-only | Allow `send`, `send_key` and `resize` on the JSON socket. Bare `--writable` means `open`. Modes: `open`, `exclusive`, `exclusive-shared`. See [write policies](protocol.md#write-policies). |
-| `--no-stdin` | off | Do not forward your stdin to the program; you can watch but not type. |
-| `--dump-on-exit` | off | Print the final screen to stderr when the program exits. |
-| `--headless` | off | No human terminal; see [Getting started](getting-started.md#headless-for-agents). |
-| `--name <NAME>` | program basename | Session name. See [Sessions](sessions.md). |
-| `--attach-if-exists` | off, or the config file | If the name is taken by a live session, attach to it instead of failing. |
-| `--no-attach-if-exists` | | Force the failure even if the config file turns attach-if-exists on. |
-| `--cols <N>` | terminal width, else 80 | Virtual terminal width. |
-| `--rows <N>` | terminal height, else 24 | Virtual terminal height. |
-| `--env <KEY=VALUE>` | | Set an environment variable for the program (repeatable). Added to the inherited environment. |
+| `--no-listen` | | Create no socket, pid file or session name, so nothing is left in the session directory (useful for a CI run driven only through stdin and stdout). Conflicts with `--listen`, `--writable` and `--headless`. |
+| `--writable[=<MODE>]` | read-only | Let clients of the JSON socket write (`send`, `send_key`, `resize`), not just read. Bare `--writable` means `open`. Modes: `open` (anyone, no arbitration), `exclusive` (one writer at a time, who takes access with `acquire_write`), `exclusive-shared` (as `exclusive`, and typing at this session's own terminal takes access back). See [write policies](protocol.md#write-policies). |
+| `--no-stdin` | off | Show the program's output in this terminal but do not send this terminal's keystrokes to it. Socket clients and `attach` can still type. |
+| `--dump-on-exit` | off | When the program exits, print the final screen to stderr. |
+| `--headless` | off | Run without using this terminal at all: no input or output forwarding, so the session is driven through its sockets and `vtee attach`. See [Getting started](getting-started.md#headless-for-agents). |
+| `--name <NAME>` | program basename | Session name, so `attach`, `ls` and `kill` can find it. A live session's name cannot be reused unless `--attach-if-exists` is set. See [Sessions](sessions.md). |
+| `--attach-if-exists` | off, or the config file | If a live session already has this name, attach to it instead of failing (like tmux's `new-session -A`). Overrides the config file's `attach_if_exists`. |
+| `--no-attach-if-exists` | | Fail if the name is taken, even when the config file sets `attach_if_exists = true`. |
+| `--cols <N>` | terminal width, else 80 | Terminal width in columns, 1 to 1000. Applies to `--script` too. A value outside the range is refused at startup with exit status 64. |
+| `--rows <N>` | terminal height, else 24 | Terminal height in rows, 1 to 1000. Applies to `--script` too. Same range check as `--cols`. |
+| `--env <KEY=VALUE>` | | Set an environment variable for the program (repeatable). Added to the inherited environment, which is not cleared. Applies to `--script` too. |
 | `-h`, `--help` | | Print help. |
 | `-V`, `--version` | | Print the version (`vtee 0.0.0` at the time of writing). |
 
 `--writable` also needs an equals sign for its value: `--writable=exclusive`.
+
+`--cols` and `--rows` are checked before anything starts:
+
+```
+$ vtee --no-listen --cols 0 -- true
+vtee: --cols 0 is out of range: it must be between 1 and 1000
+$ echo $?
+64
+```
+
+The `resize` command on the JSON socket uses the same upper limit but raises `0` to `1` instead of refusing it (see
+[protocol](protocol.md#resize)).
 
 The raw-terminal socket that `attach` uses always allows typing. `--writable` governs only the JSON socket.
 
@@ -115,6 +129,45 @@ $ echo $?
 68
 ```
 
+A name that cannot be a session here also exits 68, with the reason after the colon (on Windows, a session
+directory so long that no socket fits; see [Windows](windows.md#sessions)).
+
+### `vtee replay <FILE> [--json]`
+
+Replays a recording made with `--log` into a fresh emulator and prints the final screen. The terminal size comes
+from the recording's header. By default the output is the same text form `--text` gives; with `--json` it is the
+full snapshot, as the JSON socket would return it.
+
+```
+$ vtee --script s.ndjson --text --log run.cast --cols 20 --rows 4 -- sh -c 'printf "one\ntwo\n"; sleep 2'
+--- wait_for matched=true (byte_offset=10) ---
+one
+two
+
+
+$ vtee replay run.cast
+--- snapshot (byte_offset=10) ---
+one
+two
+
+
+$ vtee replay run.cast --json | cut -c1-150
+{"schema_version":1,"byte_offset":10,"cols":20,"rows":4,"lines":["one                 ","two                 ","                    ","
+```
+
+```
+$ vtee replay nosuch.cast
+vtee: failed to open nosuch.cast: No such file or directory (os error 2)
+$ echo $?
+66
+$ vtee replay bad.cast
+vtee: bad.cast is not an asciicast v2 recording: its first line has no usable width and height
+$ echo $?
+65
+```
+
+A file that cannot be opened exits 66 (NOINPUT); a file that is not an asciicast v2 recording exits 65 (DATAERR).
+
 ## Exit codes
 
 `vtee` uses the BSD `sysexits.h` numbers for its own failures. In interactive and headless mode, when the program
@@ -123,12 +176,12 @@ runs to completion, `vtee` exits with the program's own exit status (low 8 bits)
 | Code | Name | Seen when |
 | --- | --- | --- |
 | 0 | OK | Success, or the program exited 0. |
-| 64 | USAGE | Bad flags, no program given (`a command is required`), duplicate session name, `attach` with no live session, `attach` without a terminal. |
-| 65 | DATAERR | `--script` line that is not a valid command, or a script `send_key` with an unknown key. |
-| 66 | NOINPUT | `--script` file could not be opened. |
-| 68 | NOHOST | `kill` or `attach` for a session that does not exist, `--connect` to a socket that is not there. |
+| 64 | USAGE | Bad flags, no program given (`a command is required`), `--cols` or `--rows` outside 1 to 1000, duplicate session name, `attach` with no live session, `attach` without a terminal. |
+| 65 | DATAERR | `--script` line that is not a valid command, a script `send_key` with an unknown key, or a `replay` file that is not an asciicast v2 recording. |
+| 66 | NOINPUT | `--script` file or `replay` file could not be opened. |
+| 68 | NOHOST | `kill` or `attach` for a session that does not exist (or whose name cannot be a session), `--connect` to a socket that is not there. |
 | 70 | SOFTWARE | A script command failed while running, or its result could not be serialised. |
-| 71 | OSERR | The program could not be spawned, the socket could not be bound, or a session name was rejected. |
+| 71 | OSERR | The program could not be spawned, the socket could not be bound, or starting a session failed because its name was rejected or its socket path would be too long. |
 | 74 | IOERR | A script file could not be read. |
 
 A write that is refused on a connection (for example `send` on a read-only socket) is not an exit code: the error
