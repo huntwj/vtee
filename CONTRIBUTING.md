@@ -80,8 +80,9 @@ Run the platform's whole suite with `cargo test`. Some suites only exist on one 
 | `cargo test --test windows_console` | Windows | The console VT flags and that arrow keys arrive as escape sequences |
 
 Test files are gated by platform, so on the wrong platform they compile to nothing. A plain `cargo test` runs all
-of them for your platform. CI does not run `differential` or `windows_console` yet, so run them yourself when you
-touch the emulator, the snapshot or the console code.
+of them for your platform. CI runs every suite: `differential` in the fast jobs on both platforms and
+`windows_console` in the Windows pty job. Run the one that covers your change before you push, for example
+`differential` when you touch the emulator or the snapshot and `windows_console` when you touch the console code.
 
 ### The Linux test image
 
@@ -103,11 +104,12 @@ passing. Without it, a green run in a bare image does not prove the full-screen 
 
 ## Continuous integration
 
-GitHub Actions runs the checks on Ubuntu and Windows for every push to `main` and every pull request: formatting,
-clippy with warnings denied, the documentation build, the fast suites on both platforms, the pty suites on both
-(with the Linux tools required), and a build on the minimum Rust version. It has run on real runners and is green.
-See [docs/development/ci.md](docs/development/ci.md). A failure that only happens on a runner is most likely a
-timing assumption; see [flakiness](docs/development/testing.md#hunting-flakiness).
+GitHub Actions runs five jobs for every push to `main` and every pull request: `lint` (formatting, clippy with
+warnings denied, and the documentation build with warnings denied), `fast` (clippy and the unit, CLI, replay and
+differential suites, on Ubuntu and Windows), `linux-pty` and `windows-pty` (the suites that drive real pty
+children, with the required tools enforced), and `msrv` (a build on the minimum Rust version). It has run on real
+runners and is green. See [docs/development/ci.md](docs/development/ci.md). A failure that only happens on a runner
+is most likely a timing assumption; see [flakiness](docs/development/testing.md#hunting-flakiness).
 
 ## Adding a feature or a test
 
