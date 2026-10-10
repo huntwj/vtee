@@ -54,18 +54,14 @@ clears them. Plain Ctrl-C is left to the program, not handled by `vtee`.
 
 ### Ctrl-C and process groups
 
-A child normally gets Ctrl-C from the console. Two settings on Windows can stop that:
+A child normally gets Ctrl-C from the console. On Windows the process-wide "ignore Ctrl-C" attribute can stop
+that: a child inherits it from any ancestor that was started in a new process group. `Tap::spawn` calls
+`SetConsoleCtrlHandler(NULL, FALSE)` to clear it for `vtee` and its future children. `portable-pty` does not
+create the child in a new process group.
 
-1. The process-wide "ignore Ctrl-C" attribute, which a child inherits from any ancestor that was started in a new
-   process group. `Tap::spawn` calls `SetConsoleCtrlHandler(NULL, FALSE)` to clear it for `vtee` and its future
-   children.
-2. `CREATE_NEW_PROCESS_GROUP` on the child itself, which disables Ctrl-C for that group. The vendored
-   `portable-pty` used to set it. It now sets it only when `VTEE_NEW_PROCESS_GROUP` is set to a value other than
-   `0`.
-
-The flag was originally added to avoid a startup crash (`STATUS_CONTROL_C_EXIT`, upstream wezterm issue 7025). The
-crash did not reproduce after the startup-query fix below, so the flag is opt-in. See the 2026-10-09 entries in
-[decisions.md](../decisions.md).
+An earlier vendored copy of `portable-pty` did, and the startup crash it was meant to avoid
+(`STATUS_CONTROL_C_EXIT`, upstream wezterm issue 7025) turned out to come from the unanswered startup query below.
+See the 2026-10-09 and 2026-10-10 entries in [decisions.md](../decisions.md).
 
 ## ConPTY startup query
 
@@ -85,14 +81,6 @@ reply (`ESC[row;colR`) arrives on its input. Two situations left that reply unse
 The rule for "no human terminal": the session was not started with both input and output forwarding on, or stdin or
 stdout is not a terminal. This also helps on Linux, for programs that ask the terminal something at startup.
 
-## Vendored `portable-pty`
-
-`vendor/portable-pty/` is `portable-pty` 0.9.0 with one change, in `src/win/psuedocon.rs`: the opt-in
-`CREATE_NEW_PROCESS_GROUP` described above. It is wired in through `[patch.crates-io]` in `Cargo.toml`. Its
-README (`vendor/portable-pty/README-vtee-patch.md`) states the removal plan: delete the directory and the patch
-entry when upstream fixes the underlying issue. The files in `vendor/` keep upstream's line endings, so the
-repository's LF normalisation does not apply to them.
-
 ## Windows sessions
 
 - **Transport.** AF_UNIX sockets (Windows 10 1803 and later) through `uds_windows`, wrapped by `src/net.rs` so the
@@ -102,7 +90,7 @@ repository's LF normalisation does not apply to them.
   the socket path stays under the 107-byte AF_UNIX limit.
 - **`kill`.** After the liveness check, `OpenProcess` and `TerminateProcess`. There is no process-id-reuse guard
   beyond the liveness check.
-- **Handle inheritance.** Not an issue: the child is spawned before any socket is created, and the vendored ConPTY
+- **Handle inheritance.** Not an issue: the child is spawned before any socket is created, and `portable-pty`'s ConPTY
   spawn passes `bInheritHandles = FALSE`. A test pins this (`tests/windows_sessions.rs`).
 - **Resize.** No `SIGWINCH` on Windows, so `Tap::watch_resize` polls the console size every 200 ms.
 

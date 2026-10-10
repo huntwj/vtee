@@ -60,7 +60,7 @@ cargo test
 - **Formatting.** `rustfmt.toml` sets `max_width = 120` and `use_small_heuristics = "Max"`. Run `cargo fmt` and
   the formatting question is closed. Every commit in the history is formatted.
 - **Line endings.** Files are LF. `.gitattributes` normalises them for Git users. Do not commit CRLF; some Windows
-  editors and tools add it silently. Files under `vendor/` are left as upstream wrote them.
+  editors and tools add it silently.
 - **Clippy.** Warnings are errors. Fix them rather than silencing them; if an `allow` is genuinely right, say why in
   a short comment.
 - **Comments.** The default is no comment. Write one only for a non-obvious reason, such as a constraint or a
@@ -140,7 +140,6 @@ protocol command, a snapshot field, a command-line flag or an emulation case. Fo
 | `src/rawmode.rs` | Raw-mode guard and the terminal-restore watchdog |
 | `src/command.rs`, `src/snapshot.rs`, `src/keys.rs`, `src/log.rs` | Protocol types, snapshot and redraw, named keys, asciicast log |
 | `src/net.rs` | Unix sockets on both platforms |
-| `vendor/portable-pty/` | A patched copy of `portable-pty` (see its README) |
 | `tests/` | Integration tests |
 | `examples/` | Runnable examples of driving a session |
 | `docs/` | Documentation; `docs/decisions.md` is the dated record of why things are the way they are |
@@ -156,4 +155,4 @@ it shows the problem before attaching it.
 
 vtee is dual-licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Unless you
 explicitly state otherwise, any contribution you intentionally submit for inclusion is licensed the same way,
-without any additional terms or conditions. The vendored `portable-pty` copy keeps its own upstream license.
+without any additional terms or conditions.

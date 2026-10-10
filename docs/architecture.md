@@ -532,6 +532,6 @@ Sessions, `attach`/`ls`/`kill` and both sockets work on native Windows. The piec
   the child and exits 143. Session files are left for `ls`/`kill`, as after a `SIGKILL`.
 - **No terminal-restore watchdog:** nothing restores console modes if the holder is force-killed (shells reset
   them at the next prompt). `RawModeGuard` is a plain raw-mode toggle on Windows.
-- **Handle inheritance:** not an issue. The child is spawned before any socket exists, and the vendored ConPTY
+- **Handle inheritance:** not an issue. The child is spawned before any socket exists, and `portable-pty`'s ConPTY
   spawn calls `CreateProcessW` with `bInheritHandles = FALSE` (measured, `tests/windows_sessions.rs`).
 

@@ -102,11 +102,6 @@ See [the agents guide](agents.md#choosing-what-to-wait-for).
 - Use `\r`, not `\n`, for Enter.
 - Under `--writable=exclusive` you must `acquire_write` first.
 
-## Ctrl-C does nothing on Windows
-
-If `VTEE_NEW_PROCESS_GROUP` is set in the environment, the program starts in a new process group, which
-disables Ctrl-C for it. Unset it. See [Windows](windows.md#ctrl-c).
-
 ## Windows: the program hangs at startup
 
 Older builds hung roughly half the time because ConPTY's startup cursor query went unanswered. If you see this,
