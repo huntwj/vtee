@@ -19,6 +19,12 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+/// `alacritty_terminal` stores a literal TAB in the cell where a tab stop movement started; a
+/// terminal shows a blank there.
+fn display_char(c: char) -> char {
+    if c == '\t' { ' ' } else { c }
+}
+
 /// How a cell is underlined. Serialised as a lowercase string.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -158,7 +164,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
             // The second half of a wide char is padding the first half already covers; keeping
             // it as ' ' would shift every later column in the text and in `redraw_sequence`.
             if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                ch.push(cell.c);
+                ch.push(display_char(cell.c));
                 if let Some(zw) = cell.zerowidth() {
                     ch.extend(zw);
                 }
@@ -321,7 +327,7 @@ fn build_scrollback(term: &Term<ObserverListener>) -> Vec<String> {
             (0..cols)
                 .map(|c| &grid[Point::new(line, Column(c))])
                 .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
-                .map(|cell| cell.c)
+                .map(|cell| display_char(cell.c))
                 .collect::<String>()
         })
         .collect()
@@ -429,6 +435,21 @@ mod emulator_tests {
         assert_eq!(scrolled, ["one", "two"]);
         assert_eq!(row_text(&s, 0), "three");
         assert_eq!(row_text(&s, 2), "five");
+    }
+
+    #[test]
+    fn tab_stops_leave_blanks_not_tab_characters() {
+        let s = snap(b"a\tb\tc", 20, 2);
+        assert_eq!(s.lines[0], "a       b       c   ");
+        assert!(s.cells[0].iter().all(|c| !c.ch.contains('\t')));
+        assert!(!redraw_sequence(&s).contains(&b'\t'));
+    }
+
+    #[test]
+    fn tab_stops_leave_blanks_in_scrollback_too() {
+        let s = snap(b"a\tb\r\ntwo\r\nthree\r\nfour", 20, 2);
+        let first = s.scrollback.first().expect("a row scrolled off");
+        assert_eq!(first.trim_end(), "a       b");
     }
 
     #[test]

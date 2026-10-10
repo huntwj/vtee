@@ -699,3 +699,22 @@ not change the log on this machine (Windows 11, build 26300), and was reverted. 
 `conpty.dll`/`OpenConsole.exe`, which is the likelier route if this ever matters. Accepted as a platform
 limitation and documented in `docs/guide/windows.md`; `tests/windows_behavior.rs` pins only what does get through
 (alternate screen, cursor visibility) so a Windows update that starts forwarding more cannot fail CI.
+
+**Differential harness: TAB cells fixed, three emulator deviations accepted for 0.1.0.** The harness
+(`tests/differential.rs`, 80 cases against `avt` and `vt100`) found one vtee mapping bug and three behaviours that
+come from `alacritty_terminal` 0.26.0 itself.
+
+- *Fixed:* `alacritty_terminal` stores a literal TAB in the cell where a tab-stop movement started, so `lines`,
+  `cells[].ch` and scrollback text contained U+0009 where a terminal shows a blank. `src/snapshot.rs` now maps a TAB
+  cell to a space (grid and scrollback), so `redraw_sequence` can no longer emit one. Positions were always right.
+- *Accepted, upstream behaviour (read in the 0.26.0 source, not assumed):*
+  - **ED 1 (`CSI 1 J`) on the second row.** `Term::clear_screen` handles `ClearMode::Above` with
+    `if cursor.line > 1 { self.grid.reset_region(..cursor.line) }`. With the cursor on line 1 that guard is false,
+    so line 0 is not cleared, where xterm erases from the top of the screen to the cursor.
+  - **DECOM reset (`?6l`) does not home the cursor.** `set_private_mode` for `Origin` inserts the flag and calls
+    `goto(0, 0)`; `unset_private_mode` only removes the flag. xterm homes on both.
+  - **Mode `?47` is ignored.** `vte` 0.15.0 maps only `1049` to `SwapScreenAndSetRestoreCursor`, so `?47` (and `?1047`)
+    never reach the terminal and the text lands on the main screen.
+  Each would need a change in or around `alacritty_terminal` (an upstream fix or a vendored patch). All three are rare
+  in real programs, so they are accepted for 0.1.0 and listed under "Known terminal-emulation differences" in
+  `docs/guide/protocol.md`. The harness pins them: fixing one makes the test fail until its adjudication is removed.

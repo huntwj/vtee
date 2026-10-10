@@ -9,7 +9,7 @@ Counts and timings are from a run on 2026-10-09 and will drift. Windows timings 
 
 | Suite | Platform | Tests | Time | What it covers |
 | --- | --- | --- | --- | --- |
-| Unit tests in `src/` | both | 6 | under 1 s | Named-key tables (`keys.rs`), colour mapping (`snapshot.rs`) |
+| Unit tests in `src/` | both | 37 | under 1 s | Named-key tables (`keys.rs`), write-policy authorization (`command.rs`), snapshot fields, colour mapping, TAB cells and the redraw round trip (`snapshot.rs`), session-record parsing |
 | `tests/cli.rs` | both (some Unix-only) | 26 on Linux, 10 on Windows | about 2 s | Flag parsing and conflicts, exit codes, the session directory and its permissions, duplicate and invalid session names, `ls` and `kill`, `--attach-if-exists`, script-mode terminal queries, hostile input to the JSON socket, a stalled attach client |
 | `tests/replay.rs` | both | 1 | about 9 s on Windows | Replays 15 recorded byte streams into the emulator and compares the result with the live snapshot, byte for byte |
 | `tests/linux_sessions.rs` | Linux | 12 | about 5 s | Terminal-query replies with and without an attach client, many clients of both kinds, exclusive-write handoff, `less` and `vim` using the alternate screen and repainting on resize, `kill`/`SIGTERM`/`SIGKILL` lifecycle and orphan checks, attach and detach during a flood, garbage input, random escape-sequence input |
@@ -112,17 +112,22 @@ emulators, `avt` and `vt100` (`oracle_avt.json`, `oracle_vt100.json`). An attrib
 - **Reading a failure:** the message names the case, the two emulators, and the first differing row and column with
   both sets of attributes.
 
-Of the 80 cases, 57 agree across all three emulators and 23 are adjudicated. Most of those are `vt100` or `avt`
+Of the 80 cases, 58 agree across all three emulators and 22 are adjudicated. Most of those are `vt100` or `avt`
 lacking a feature (HVP, `CSI s`/`u`, IND/NEL, IRM, REP, `?7l`, charsets, colon-form colours, `4:3`/`4:0` underline
-sub-parameters). Five cases, four distinct problems, are vtee deviations, inherited from `alacritty_terminal`
-0.26.0 and not fixed in vtee:
+sub-parameters, tab-stop set and clear). Three cases are vtee deviations, inherited from `alacritty_terminal`
+0.26.0 and not fixed in vtee (see `docs/decisions.md`):
 
 | Case | What vtee does | What xterm does |
 | --- | --- | --- |
 | `erase_display_above` | `CSI 1 J` with the cursor on the second row leaves the first row | Erases from the top of the screen to the cursor |
 | `origin_mode` | Resetting `?6` leaves the cursor where it is | Homes the cursor on both set and reset |
 | `alt_screen_47` | Ignores `?47`, so text lands on the main screen | Switches screens |
-| `tab_default_stops`, `tab_set_and_clear` | A tab writes a literal TAB into the cell it starts in, so snapshot `lines` contain TAB | Leaves the cell blank (positions are correct) |
+
+The harness found a fourth problem that vtee did fix: `alacritty_terminal` writes a literal TAB into the cell where a
+tab-stop movement started, so snapshot `lines` and `cells[].ch` contained TAB characters where a terminal shows a
+blank. `src/snapshot.rs` now maps a TAB cell to a space, in the visible grid and in scrollback text, and
+`redraw_sequence` never emits one (`tab_default_stops` now agrees with both oracles; `tab_set_and_clear` differs only
+where `vt100` ignores tab-stop set and clear).
 
 `resize_shrink_cols` is a difference of design: vtee re-wraps long lines when the width shrinks, as alacritty, VTE
 and kitty do, where xterm truncates.
@@ -146,6 +151,8 @@ and kitty do, where xterm truncates.
 
 ## Known gaps
 
-The main untested areas are listed in the [roadmap](../roadmap.md#beta-readiness): the `redraw_sequence` round
-trip, `--log` through the CLI, the config-file path, terminal restore after a signal, and write-policy enforcement
-for read-only sockets. The differential tests now cover the per-cell attributes of the snapshot.
+The main untested area is listed in the [roadmap](../roadmap.md#beta-readiness): a live read-only socket rejecting
+`send`, `send_key` and `resize` (the policy table in `command.rs` is unit-tested, the wiring in `sockets.rs` is
+not). Snapshot fields, the `redraw_sequence` round trip, `--log` through the CLI, the config-file path and terminal
+restore after a signal are covered, and the differential tests cover the per-cell attributes of the snapshot.
+Windows has no test for a force-killed holder restoring the console, because nothing does.

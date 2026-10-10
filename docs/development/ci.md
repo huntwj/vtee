@@ -1,9 +1,9 @@
 # Continuous integration
 
-Status: **designed but never run on real runners.** The workflow lives in `.github/workflows/ci.yml`. At the time
-of writing it is not yet on `main` in this tree (it is being added with the CI hardening change), and nothing has
-exercised it on GitHub's machines. Everything below describes the intended setup; check the file for the current
-truth, and expect the first real run to need fixes.
+Status: **ran green on its first push, 2026-10-09.** All six jobs passed on GitHub's runners: `lint`, `msrv`, and the
+fast and pty jobs on both `ubuntu-latest` and `windows-latest` (the Windows pty job took about four and a half
+minutes). The workflow lives in `.github/workflows/ci.yml`; check the file for the current truth. The release workflow
+is separate and has not yet produced a release (see [releasing](../releasing.md)).
 
 ## What it runs
 
@@ -30,15 +30,16 @@ changing the workflow.
 
 ## What to expect on a hosted runner
 
-These are the differences from a development machine that are most likely to cause a first-run failure:
+These are the differences from a development machine that can cause a failure on a hosted runner; the first run
+hit none of them:
 
-- **Windows ConPTY.** The tests create their own ConPTY, so a console window is not needed, but the runner
-  has never been tried. The Ctrl-C test depends on the runner's process tree not leaving the "ignore Ctrl-C"
+- **Windows ConPTY.** The tests create their own ConPTY, so a console window is not needed, and the first run on
+  `windows-latest` passed. The Ctrl-C test depends on the runner's process tree not leaving the "ignore Ctrl-C"
   setting on an ancestor; the code resets it at spawn, which should cover this.
 - **Tools.** Windows tests that drive Git for Windows' `vim` and `less`, or `edit.exe`, look the programs up. They
   may not be on the runner's `PATH`; they skip when not found (see
-  [testing](testing.md#tests-that-need-external-programs)). Setting `VTEE_REQUIRE_TOOLS` once it exists in the
-  tree will turn that into a visible failure instead of a silent pass.
+  [testing](testing.md#tests-that-need-external-programs)). Setting `VTEE_REQUIRE_TOOLS` (the workflow does, on both
+  platforms) turns that into a visible failure instead of a silent pass.
 - **Ubuntu.** `bash`, `less` and `vim` are present on the image, and `/proc` is there, so the apt step mostly
   guarantees `vim-tiny` and `procps`.
 - **Timing.** Hosted runners are slow and have few cores. The Windows behaviour suite takes about a minute on a

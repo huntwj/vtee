@@ -83,7 +83,9 @@ To run a program with your own terminal as usual while still exposing it to othe
 - Mouse and bracketed-paste modes are tracked in snapshots, but there is no command to send mouse or paste input.
 - Only the active screen buffer is exposed (not the primary and alternate buffers separately).
 - `wait_for` waits for text on a single line; there is no richer wait condition yet.
-- Underline styles (curly, double) are reported as plain underline. Blink is never reported.
+- Blink is never reported (the emulator has no blink flag).
+- Three escape-sequence behaviours differ from xterm; see
+  [Known terminal-emulation differences](docs/guide/protocol.md#known-terminal-emulation-differences).
 - If the process holding a session is killed with `SIGKILL`, the wrapped program is orphaned. See
   [Troubleshooting](docs/guide/troubleshooting.md).
 

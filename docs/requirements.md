@@ -24,7 +24,8 @@ status to track per-requirement rather than as one blob.
    *separate* process can now attach to a live session too (on Linux and on Windows), not just query it - named sessions,
    `vtee attach`/`ls`/`kill`, a second raw-TTY protocol alongside the existing NDJSON one
    (`architecture.md`, "Named sessions and `vtee attach`"), multiple clients of either kind at once,
-   verified end to end including a remote attach client's own typing reaching the child.
+   verified end to end including a remote attach client's own typing reaching the child. A socket client can also
+   ask whether the program has exited and with what code or signal (`exit_status`, `wait_exit`, any write policy).
 2. **Broad, extensible emulation.** VT100 and VT220 up to the xterm superset: alternate screen, scroll regions,
    256-colour and truecolour, mouse reporting, bracketed paste, DEC special graphics, OSC (title, hyperlinks), wide
    and combining characters. We should not cap the target at what one program uses today.
@@ -33,8 +34,9 @@ status to track per-requirement rather than as one blob.
    send mouse/paste sequences yet (v1).
 3. **Full state exposure.** Every cell attribute (including dim, italic, strikethrough, underline styles), cursor
    shape and visibility, active modes, both screen buffers, scroll regions, scrollback, title.
-   **Mostly met.** Open gaps: blink is structurally absent from `alacritty_terminal` (accepted, see
-   `decisions.md`); underline *styles* (curly/double, not just on/off) aren't distinguished in the snapshot yet;
+   **Mostly met.** Underline styles (single, double, curly, dotted, dashed) and the underline colour are in the
+   snapshot, and snapshots carry a `schema_version`. Open gaps: blink is structurally absent from
+   `alacritty_terminal` (accepted, see `decisions.md`);
    **only the active screen buffer is exposed, not both** - deferred, 2026-10-07, a verified `alacritty_terminal`
    API gap rather than something to build around right now (`decisions.md`, `roadmap.md`).
 4. **Synchronisation that does not rely on the screen going quiet.** A server may stream constantly. So: wait for
@@ -71,8 +73,9 @@ status to track per-requirement rather than as one blob.
    `--script`/`--headless`). Raw mode now comes before the spawn and the tap answers the child's terminal queries
    when no human terminal can. Resize (console-size polling) and Ctrl-C work, and named sessions, `attach`, `ls`,
    `kill` and both sockets run over AF_UNIX sockets (`architecture.md`, "Named sessions on Windows"). Remaining
-   Windows gaps: no terminal-restore watchdog, `attach` does not set the console's virtual-terminal flags, and
-   continuous integration has not run on a hosted runner (`roadmap.md`, "Beta readiness").
+   `RawModeGuard` also sets the console's virtual-terminal input and output flags (restored on exit), and continuous
+   integration passes on a hosted `windows-latest` runner. Remaining Windows gap: no terminal-restore watchdog if
+   the holder is force-killed (`roadmap.md`, "Beta readiness").
 
 ## Not goals, for now
 
