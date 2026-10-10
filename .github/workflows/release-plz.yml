@@ -4,7 +4,8 @@ name: Release
 #
 # Every push to main:
 #   release-pr - opens or updates the release PR (version bump + CHANGELOG.md), computed from Conventional Commits.
-#   release    - when that PR has been merged, creates the git tag and GitHub Release (never publishes to crates.io).
+#   release    - when that PR has been merged, publishes to crates.io (Trusted Publishing, no stored token), then
+#                creates the git tag and GitHub Release.
 #   binaries   - builds vtee for Linux and Windows and attaches the archives to the new release.
 
 on:
@@ -46,6 +47,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+      # crates.io Trusted Publishing: release-plz exchanges this job's OIDC token for a short-lived crates.io
+      # token itself. Do not add rust-lang/crates-io-auth-action or a CARGO_REGISTRY_TOKEN secret.
+      id-token: write
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:

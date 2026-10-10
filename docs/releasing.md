@@ -1,8 +1,9 @@
 # Releasing
 
 Versions, `CHANGELOG.md`, git tags and GitHub Releases are generated from [Conventional Commits](https://www.conventionalcommits.org/)
-on `main` by [release-plz](https://release-plz.dev/). release-plz does not publish to crates.io: uploads are manual
-for now ([Publishing to crates.io](#publishing-to-cratesio)).
+on `main` by [release-plz](https://release-plz.dev/). Merging a release PR also publishes the crate to crates.io through
+Trusted Publishing, with no stored token ([Publishing to crates.io](#publishing-to-cratesio)). The very first upload
+(`0.0.1`) was manual.
 Status: the `CI` workflow has run on GitHub and is green. The `Release` workflow has run once, on a push to `main`:
 it failed at the step that opens the release PR with "GitHub Actions is not permitted to create or approve pull
 requests", which is the repository setting in the [checklist](#one-time-repository-setup-maintainer-checklist) below.
@@ -22,12 +23,10 @@ run yet; treat the first release as the test of it.
 (release-plz alone would bump only the patch). Only `feat`, `fix`, `perf` and `!` commits trigger a release; the
 rest never open a release PR on their own, and `docs`/`test`/`chore`/`ci`/`style`/`build` are left out of the changelog.
 
-**First release needs a baseline tag.** `Cargo.toml` is at `0.0.0`. With `git_only = true`,
-release-plz finds the previous release from the latest `vX.Y.Z` git tag, so create `v0.0.0` on the first commit once and push
-it: `jj tag set v0.0.0 -r 'root()+'` then `jj git push --tag v0.0.0`. Dry-run result with that tag (release-plz 0.3.170, on a
-copy of the history): `0.0.0 -> 0.1.0`, with a changelog grouped into Added / Changed / Fixed. Without the tag the dry run also
-proposed `0.1.0`, but that path is less clear, so create the tag. The release step itself (tag + GitHub Release) needs a GitHub
-token and was not dry-run.
+**Baseline.** release-plz reads the current version from the crates.io index (`vtee 0.0.1` is there) and the git tag
+`v0.0.1` marks where to start counting commits. Dry run of `release-plz update` (0.3.171) on a clone of `main` plus one
+`feat` commit that touches a package file: `0.0.1 -> 0.1.0`, with a changelog entry under Added. Only commits that touch
+files of the package count, so an empty `feat:` commit does not trigger a release.
 
 **Minimum Rust version.** `rust-version = "1.89"`: the build and the whole Linux test suite pass on 1.89.0 and fail on 1.88.0,
 because the locked `uuid 1.27.0` requires 1.89. Windows was only built on current stable. Raising it later is a normal
@@ -39,9 +38,9 @@ because the locked `uuid 1.27.0` requires 1.89. Windows was only built on curren
 2. On each push to `main` the `Release` workflow opens or updates a PR titled `chore: release v…` with the version bump and the
    new `CHANGELOG.md` section.
 3. Review that PR (the version, the changelog wording) and merge it.
-4. The same workflow then creates the tag `vX.Y.Z` and the GitHub Release, and builds `vtee` for Linux x86_64 and
-   Windows x86_64 and attaches the archives plus `.sha256` files. If the build fails, rerun it by hand with
-   Actions > Release binaries > Run workflow > tag.
+4. The same workflow then publishes the crate to crates.io, creates the tag `vX.Y.Z` and the GitHub Release, and
+   builds `vtee` for Linux x86_64 and Windows x86_64 and attaches the archives plus `.sha256` files. If the build
+   fails, rerun it by hand with Actions > Release binaries > Run workflow > tag.
 
 ## With jj
 
@@ -82,12 +81,30 @@ crate, so the first publish is done by hand by the owner:
    the next version from the latest `vX.Y.Z` tag, so from `v0.0.1` the next `feat` proposes `0.1.0`. The `v0.0.0`
    baseline tag stays as history. The open release PR is recomputed on the next push to `main`; keep it unmerged
    until the release it describes is ready.
-4. On crates.io, open the crate's settings and add a Trusted Publisher (GitHub, owner `huntwj`, repository `vtee`,
-   the release workflow's file name, optionally an environment). After that the workflow can publish without a
-   stored token.
-5. Only then turn publishing on in `release-plz.toml` (`publish = true` and drop `git_only`). **Unverified:** how
-   release-plz behaves with trusted publishing and with a crate that has a `v0.0.1` tag made by hand. Try it with a
-   dry run before relying on it.
+4. On crates.io the crate has a Trusted Publisher configured (GitHub, owner `huntwj`, repository `vtee`, workflow
+   `release-plz.yml`, no environment). The API token used for step 2 is revoked.
+
+### How later releases publish
+
+Merging the release PR triggers the `release` job in `.github/workflows/release-plz.yml`. That job has
+`permissions: id-token: write`. release-plz asks GitHub for an OIDC token for the job, exchanges it with crates.io for a
+short-lived publish token (the same calls as `rust-lang/crates-io-auth-action`), runs `cargo publish`, then creates the
+tag and the GitHub Release. Per release-plz's documentation, do not add the auth action and do not set a
+`CARGO_REGISTRY_TOKEN` secret: either one makes release-plz use that token instead. `release-plz.toml` must not set
+`git_only = true`, because git-only mode skips `cargo publish`; with it unset, release-plz reads the current version
+from the crates.io index.
+
+If the exchange fails (the job log shows an OIDC or 403 error from crates.io): check that the Trusted Publisher on
+crates.io matches the repository and the workflow file name exactly (renaming `release-plz.yml` breaks it), and that
+the job still has `id-token: write`. As a fallback, publish by hand as in steps 1 and 2 with a short-lived token, then
+make sure the tag `vX.Y.Z` and the GitHub Release exist (re-running the failed job after a manual publish skips the
+upload and creates them).
+
+**Unverified.** The first real run of this path is the `0.1.0` release merge. Not yet exercised: the OIDC exchange
+from the release-plz action, `cargo publish` from CI, and `release-plz release` end to end (it needs a GitHub token,
+so it was not dry-run). What was checked locally with release-plz 0.3.171: `update` computes `0.0.1 -> 0.1.0` with and
+without `git_only`, finds `vtee 0.0.1` on the registry without it, and `actionlint` passes on all workflows. The
+re-run-after-manual-publish behaviour in the paragraph above comes from release-plz's documented design, not from a test.
 
 `cargo package` ships the source, tests, fixtures and docs, about 1.1 MB over roughly 200 files. The `exclude` list
 in `Cargo.toml` leaves out CI configuration, the Docker test image, `HANDOFF.md`, `release-plz.toml` and the oracle
