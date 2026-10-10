@@ -1,14 +1,14 @@
 # Snapshot and golden contract (design)
 
-Status: **proposed, revised after two independent reviews and after the owner chose the run-and-compare test model,
-for owner decision before 0.1.0.** First written and revised 2026-10-10. When accepted, the normative parts (sections 3
-to 6) move to the user guide and this page stays as the record of why. Nothing here is implemented yet except where a
-section says "today". The reviews and what was done with each finding are in appendix C.
+Status: **decided by the owner on 2026-10-10 (section 8, "Decisions"); not yet implemented.** Written and revised
+2026-10-10 after two independent reviews and after the owner chose the run-and-compare test model. When implemented,
+the normative parts (sections 3 to 6) move to the user guide and this page stays as the record of why. Nothing here is
+implemented yet except where a section says "today". The reviews and what was done with each finding are in appendix C.
 
 **The test model.** A test is an app, an input and an expected output: `vtee --script flow.ndjson --expect
 flow.golden -- APP`. The script is the existing NDJSON script; each `snapshot` in it is a checkpoint; the screens a run
 produces, in order, are its output; a **golden** is the file holding the expected output (one or more screens). Check,
-record, restamp, re-vocabulary and migrate are all options of that one command (`--expect`, `--update[=MODE]`, 6.11).
+record, restamp and migrate are all options of that one command (`--expect`, `--update[=MODE]`, 6.11).
 There is no `golden` subcommand: "golden" names the file kind and its extension.
 
 The snapshot JSON and the golden file format are a long-lived contract. A stored golden outlives any one `vtee`
@@ -22,8 +22,10 @@ contract.
 
 1. A stored golden either still means what it meant when it was recorded, or `vtee` says so clearly. It never
    silently passes or fails for a reason that is not about the program being tested.
-2. Adding something to `vtee` (a new mode token, a new cell attribute) never makes a stored golden fail. This is a
-   goal of its own because the first draft of this document got it wrong (section 4.1; findings TF1 and FA-A1 in appendix C).
+2. Adding something to `vtee` that a golden compares (a new mode token, a new cell attribute) never makes a stored
+   golden *fail* for a reason that is not about the program: it changes a version number, so the golden is *refused*
+   with a clear message until it is restamped or re-recorded (section 4.1; findings TF1 and FA-A1 in appendix C; owner
+   decision OD8). This is a goal of its own because the first draft of this document got it wrong.
 3. A language-neutral format: no Rust-isms in the JSON, no tables a reader needs to parse the files (Unicode width or
    category data, for example).
 4. A small frozen core, with named, reserved paths for everything we know we will add.
@@ -43,7 +45,7 @@ contract.
 
 | Dependant | What it relies on |
 | --- | --- |
-| Stored goldens (TinyFugue and others) | The golden grammar, `schema_version`, `semantics_version`, the declared vocabulary, and the meaning of every cell |
+| Stored goldens (TinyFugue and others) | The golden grammar, `schema_version`, `semantics_version`, the reported vocabulary (section 3.8), and the meaning of every cell |
 | AI agents reading snapshots | Field names, types and defaults; `lines` as a convenient view |
 | Procedural tests in any language | The same, plus the exit codes of an `--expect` run and its JSON report |
 | `vtee`'s own conformance set | The meaning of cells for the 80 escape-sequence cases and the width sample (section 5.4) |
@@ -95,13 +97,13 @@ for the run-and-compare model.
 
 ### 3.1 Shape at a glance
 
-Schema version 2. Every top-level field is present in every snapshot; cell fields are written only when they differ
+Schema version 1. Every top-level field is present in every snapshot; cell fields are written only when they differ
 from their default (section 3.3). The order of keys has no meaning; `vtee` writes them as below, with
 `schema_version` and `semantics_version` first so a reader can refuse before reading the rest.
 
 ```
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "semantics_version": 1,
   "byte_offset": 2466,
   "cols": 80, "rows": 24,
@@ -133,11 +135,14 @@ scalar, not none.
 
 ### 3.2 Field by field
 
-Today's shape is `schema_version` 1 on `main`. The right-hand column is the decision.
+Today's shape on `main` is a **provisional** layout that also says `schema_version` 1 and was never released. The
+shape in this document is the first frozen one and **keeps the number 1** (owner decision OD1): the two are
+indistinguishable by number, so snapshots and goldens recorded before 0.1.0 are *unsupported* (there is no migration
+from them; they are re-recorded). The right-hand column is the decision.
 
-| Field | Today | Problem | Decision (schema 2) |
+| Field | Today (provisional) | Problem | Decision (schema 1, frozen at 0.1.0) |
 | --- | --- | --- | --- |
-| `schema_version` | integer, first | none | Keep, first field. Value becomes 2 for the shape in this document. |
+| `schema_version` | integer, first | none | Keep, first field. Value is 1 for the shape in this document. |
 | `semantics_version` | absent | An output fix (TAB, ED 1) changes what a stored golden means but not the layout | **New**, second field. Integer, starts at 1. See section 4. |
 | `byte_offset` | u64 | Meaningless across sessions and platforms (E3), and tempting to store | Keep. Defined as an opaque, per-session, monotonic count of bytes read from the pty. Valid only for ordering two snapshots of one session. Never stored in a golden. |
 | `cols`, `rows` | integers | none | Keep. Integers 1 to 1000 (the resize limit). |
@@ -205,16 +210,19 @@ freeze two shapes; a single canonical sparse shape is simpler.
   same entry, because they are the same palette entry. The named foreground, background and cursor colours map to
   `"default"`. The dim variants map to their index and carry the `dim` flag separately. Bold is never converted to
   bright.
-- The attribute vocabulary of schema 2 is the list of names a golden can declare and compare: `bold`, `dim`,
-  `italic`, `reverse`, `strike`, `conceal`, `underline`, `ulcolor` (the golden's name for `underline_color`), `link` (the
-  golden's name for `hyperlink`). The colours `fg` and `bg` are part of the core and are always compared. Reserved,
-  never emitted until the emulator supports them: `blink`, `overline`, `hyperlink_id`.
-- New attributes are new optional fields. Readers ignore fields they do not know (section 4.3). A golden does not
-  fail because of an attribute it did not declare (section 4.1, row 2).
+- The attributes a golden compares are: `bold`, `dim`, `italic`, `reverse`, `strike`, `conceal`, `underline`,
+  `ulcolor` (the golden's name for `underline_color`) and `link` (the golden's name for `hyperlink`), plus the colours
+  `fg` and `bg`, which are part of the core. The full frozen list is in section 3.8. Reserved, never emitted until the
+  emulator supports them: `blink`, `overline`, `hyperlink_id`.
+- A new attribute is a new optional field, which JSON readers ignore (section 4.3); but because a golden compares
+  attributes, **reporting a new attribute is a `semantics_version` bump** (section 4.1), as is a new value of an
+  existing one.
 
 ### 3.6 Modes
 
-`modes` reports the input-affecting modes the program has turned on, as a set. The vocabulary of schema 2:
+`modes` reports the input-affecting modes the program has turned on, as a set. The vocabulary at the 0.1.0 freeze
+(the code reports exactly the five "reported today" tokens before this change: `?1000`, `?1006`, `?2004`, `?1` and
+`DECKPAM`, checked against `src/snapshot.rs`):
 
 | Token | Meaning | Status |
 | --- | --- | --- |
@@ -231,10 +239,11 @@ The mouse report modes (`?1000`, `?1002`, `?1003`) are mutually exclusive in the
 encodings (`?1005`, `?1006`); the set reflects the emulator's model, not the sequences sent (E18).
 
 The first draft proposed five new tokens: `?1002`, `?1003`, `?1004`, `?1005` and `?1007`. Two are **withdrawn for 0.1.0**
-and reserved: `?1004` (focus reporting) is injected by ConPTY at the start of every session whether or not the program
-asked for it (E16), so it would be set on Windows and not on Linux for the same program, and `?1007` (alternate scroll)
-has no consumer. They can be added later without a bump, because goldens declare the vocabulary they were written with
-(section 4.1). Autowrap (`?7`) is reserved with the other output-affecting modes (origin, insert, newline) and the kitty
+and reserved (owner decision OD9): `?1004` (focus reporting) is injected by ConPTY at the start of every session
+whether or not the program asked for it (E16), so it would be set on Windows and not on Linux for the same program, and
+`?1007` (alternate scroll) has no consumer. **Adding either later is a `semantics_version` bump** (section 4.1): every
+newly reported token can change a stored golden's comparison, so each one arrives as a deliberate, changelogged
+event. Autowrap (`?7`) is reserved with the other output-affecting modes (origin, insert, newline) and the kitty
 keyboard flags (section 10); nearly every program leaves it on, so it would be the commonest token in every golden.
 
 The platform differences in this vocabulary (E15) are in section 6.14.
@@ -248,19 +257,45 @@ The platform differences in this vocabulary (E15) are in section 6.14.
   required change.)
 - Numbers are integers. No fractions, no exponents.
 
+### 3.8 The reported vocabulary at 0.1.0 (frozen)
+
+Because every newly reported name is a `semantics_version` bump (section 4.1), the complete list of what a 0.1.0
+snapshot reports and a golden compares is stated once, here. A name not in this table is not reported at semantics 1.
+
+| Kind | Frozen list at 0.1.0 | Compared by a golden |
+| --- | --- | --- |
+| Mode tokens (`modes`) | `?1`, `?1000`, `?1002`, `?1003`, `?1005`, `?1006`, `?2004`, `DECKPAM` | yes, as a set, minus `ignore modes` |
+| Cell attributes | `bold`, `dim`, `italic`, `reverse`, `strike`, `conceal`, `underline`, `ulcolor`, `link`, and the colours `fg`, `bg` | yes, as a set per cell, minus `ignore attrs` |
+| Colour forms | `default`, `idx:0` to `idx:255`, `rgb:#rrggbb` | part of `fg`, `bg`, `ulcolor` |
+| `underline` values | `single`, `double`, `curly`, `dotted`, `dashed` | part of `underline` |
+| `cursor.shape` values | `block`, `underline`, `bar` | yes |
+| Screen fields | `size`, `cursor` (row, col, shape, hidden), `modes`, `alt_screen`, `title`, `wrapped` | yes, each unless ignored |
+| Never compared | `byte_offset`, `scrollback`, `producer`, `x-` keys | no |
+
+**Reserved names** (never emitted at semantics 1; the emulator or a consumer would have to ask for them): modes `?1004`,
+`?1007`, `?7` and the other output-affecting modes of section 10; attributes `blink`, `overline`; fields
+`hyperlink_id`, `cursor.pending_wrap`, `inactive`, `scrollback_cells`, `cursor.shape` value `hollow_block`. **Each
+reserved name arrives with a `semantics_version` bump**, a changelog entry and a `feat(snapshot)` or `fix(snapshot)`
+commit, and it makes every stored golden refused until it is restamped or re-recorded (section 5.3).
+
 ## 4. The versioning model
 
-Two numbers describe a snapshot, and a third describes what a golden declares it can check.
+Two numbers describe a snapshot, and a golden records both.
 
 | Number | Says | Changes when |
 | --- | --- | --- |
 | `schema_version` | **Layout**: names, types and shapes of the JSON, and what each field means | A field or token is removed, renamed, retyped, or its default changes |
-| `semantics_version` | **Meaning**: what an existing cell, mode or position denotes for given program output | An emulation fix or an emulator upgrade changes what existing output produces |
-| the golden's declared **vocabulary** | **What the golden checks**: the mode tokens and cell attributes it was written knowing about | A newer `vtee` can report more; the golden does not change, and does not fail (4.1) |
+| `semantics_version` | **Meaning and reporting**: what an existing cell, mode or position denotes for given program output, **and which names are reported at all** | An emulation fix, an emulator upgrade, or a newly reported name (mode token, attribute, attribute value) changes what a stored golden would compare |
 
-Schema 2 and semantics 1 are the values at the 0.1.0 freeze. Schema 1 is the provisional shape that exists on `main`
-today; it was never released, and it is readable only through `--update=migrate` (section 5.3). The number is bumped to 2 so
-that anything recorded against the provisional shape, including TinyFugue's recordings, is identifiable.
+**A golden is only ever read against a build with the same two numbers.** Any difference is a refusal (exit 2, nothing
+compared; sections 4.3 and 6.8). The way forward is `--update=restamp` (safe when nothing the golden compares would
+differ), `--update` (re-record) or, for a layout change, `--update=migrate` (section 5.3). There is no overlap window
+and no "compare anyway" mode (owner decisions OD3 and OD4).
+
+Schema 1 and semantics 1 are the values at the 0.1.0 freeze. The provisional shape on `main` today also says schema 1
+and was never released; **snapshots and goldens recorded before 0.1.0 are unsupported** and are re-recorded (owner
+decision OD1). TinyFugue's recordings of the provisional shape fall under this and are re-recorded after step 2 of
+section 9.
 
 ### 4.1 What bumps what
 
@@ -269,24 +304,26 @@ it". Both reviews showed that this is false: a check run compares `modes` as a s
 so an old golden **fails** against a snapshot that reports the addition (demonstrated: expected `?1 DECKPAM`, actual
 `?1 ?1004 DECKPAM`, exit 1, even with `ignore modes ?1 ?1000 ?1006`). Two repairs were considered.
 
-1. *Every newly reported thing is a semantics bump.* Simple to state, but additions are frequent (every attribute the
-   emulator learns, every mode). Each one would make every stored golden suspect, including goldens of programs that
-   never use the new thing, and people learn to wave the warning through.
+1. *Every newly reported thing is a semantics bump.* Simple to state and to implement: one rule, no extra header lines,
+   no undeclared-token handling. The cost is that additions make every stored golden refused until it is restamped
+   (which is a scripted pass for goldens of programs that never use the new thing) or re-recorded (for those that do).
 2. *Goldens declare the vocabulary they were written with, and the checker compares only what is declared.* An
-   addition is then genuinely additive: an old golden keeps passing and says so; only the author who wants the new
-   thing checked re-records. The cost is two header lines and a rule in the checker, and the risk that a golden
-   silently does not check something new, which the checker mitigates with a warning (`WARN vocab`, section 6.9) and
-   `--update=vocab`.
+   addition is then additive: an old golden keeps passing with a warning. The cost is two header lines, a checker rule,
+   and the risk that a golden silently does not check something new.
 
-**Decision: option 2** (owner decision OD8 records the alternative). The table that follows uses it.
+**Decision: option 1** (owner decision OD8, which overrode the recommendation of option 2; the owner prefers strict,
+simple rules). The consequence is accepted knowingly: each addition after 0.1.0 is a refusal of every stored golden
+until restamped, so additions are deliberate and rare, and the full 0.1.0 vocabulary is frozen in one table
+(section 3.8) so that anything we expect to want is decided before the freeze. The table that follows uses it.
 
 | Change | `schema_version` | `semantics_version` | Notes |
 | --- | --- | --- | --- |
-| Add an optional cell or top-level field | no | no | Readers ignore unknown fields |
-| Add a new **name** to the golden vocabulary (a new mode token, a new attribute) | no | no | Goldens compare only what they declare. A golden that predates the name passes and gets a `WARN vocab` |
-| Add a new **value** of an existing declared attribute (a new underline style) | no | **yes** | A declared attribute now reports something different for input that produced the old value; the same rule as the next row |
-| The emulator starts reporting an **existing declared** token for input where it did not (it now sets `?1000` for a sequence it used to ignore) | no | **yes** | The same program produces a different declared result |
-| Remove or rename a field, token or attribute | **yes** | no | A declared name that no longer exists cannot be compared |
+| Add an optional field that goldens do **not** compare (a `producer` key, a new report field) | no | no | Readers ignore unknown fields |
+| Add an optional cell or header field that goldens compare (a cell attribute, `cursor.pending_wrap`) | no | **yes** | A stored golden now has something it did not record; the comparison result of an unchanged program can change |
+| Report a new **mode token** or a new **attribute name** | no | **yes** | Both reviews demonstrated the failure; the rule is one line: if it can change a comparison, it bumps |
+| Add a new **value** of an existing attribute (a new underline style) | no | **yes** | A reported attribute now says something different for input that produced the old value |
+| The emulator starts reporting an **existing** token for input where it did not (it now sets `?1000` for a sequence it used to ignore) | no | **yes** | The same program produces a different result |
+| Remove or rename a field, token or attribute | **yes** | no | A name that no longer exists cannot be compared |
 | Change a field's type or default | **yes** | no | |
 | Change what an existing value means (for example `cursor.row` becomes 1-based) | **yes** | no | |
 | An emulation fix that changes cells for existing input (TAB becoming a space, the ED 1 fix) | no | **yes** | The layout is unchanged; stored goldens may now differ |
@@ -298,88 +335,97 @@ so an old golden **fails** against a snapshot that reports the addition (demonst
 
 Every real change should land in a row of this table. If one does not, that is a defect in the table, and the table is
 amended in the same change (the review asked for counter-examples and found none that were unclassifiable once the
-vocabulary rule was added; a fix that changes only `wrapped_rows` is "an emulation fix that changes existing output",
-so it bumps semantics).
+rule "if it can change a comparison, it bumps `semantics_version`" was added; a fix that changes only `wrapped_rows` is
+"an emulation fix that changes existing output", so it bumps semantics).
 
 ### 4.2 The golden file's own numbers
 
 The first line of a golden is `vtee-golden N`: the version of the golden **grammar**. It is 1 for the grammar in this
-document. The draft in TinyFugue's `tests/screens-draft` is `vtee-golden 0`. The header also records the `schema`
-and `semantics` the golden was recorded under, and the vocabulary (`vocab modes ...`, `vocab attrs ...`, section 6.2).
+document. The draft in TinyFugue's `tests/screens-draft` is `vtee-golden 0` and, like every artefact recorded before
+0.1.0, is unsupported (section 4). The header also records the `schema` and `semantics` the golden was recorded under
+(section 6.2).
 
 ### 4.3 Reader rules
 
 1. A JSON reader ignores any field it does not know. A golden reader ignores `x-` header keys and treats any other
    unknown header key as an error (section 6.2).
-2. A snapshot or golden whose schema number is **higher** than the reader supports is refused, never partly read.
-3. A golden whose `schema` is **lower** than the reader's current one is read through the migration path while the
-   deprecation window lasts (section 5.3) and refused after it, with a pointer to `--update=migrate`.
-4. A golden whose `semantics` differs from the snapshot's is **compared anyway**: identical results pass with a
-   visible `WARN semantics`, different results are refused (exit 2) with the differences shown. Details and the two
-   flags that change this are in section 6.8.
-5. A schema 1 snapshot has no `semantics_version`. A golden migrated from schema 1 or from grammar 0 carries
-   `semantics unknown`, which behaves like a mismatch for every value.
-6. A golden that declares a vocabulary token the reader does not know (written by a newer `vtee`) is refused with the
-   name of the token: the reader cannot know what it meant.
-7. `producer` and `byte_offset` never take part in a comparison.
-8. A reader supports **every grammar number up to its own** (parsing an old grammar is cheap). A grammar number is
-   bumped only for a change old readers cannot understand, never to retire old goldens.
+2. A snapshot or golden whose schema number is **higher** than the reader supports is refused, never partly read. One
+   whose schema number is **lower** is refused as well, immediately, with exit 2 and a message that names both numbers
+   and points to `--update=migrate` or a re-record. The reader supports only the current schema (owner decision OD3:
+   there is no deprecation window and no second reader).
+3. A golden whose `semantics` differs from the snapshot's is **refused, with nothing compared** (exit 2). There is no
+   "compare anyway" mode and no flag to override the refusal (owner decision OD4). The message names both numbers and
+   points to `--update=restamp` and to the semantics changelog (section 4.4).
+4. A golden file produced by `--update=migrate` from an older schema carries the `semantics` number it was recorded
+   under (a layout migration does not change meaning), or the word `unknown` where that is not recoverable;
+   `unknown` behaves like a mismatch for every value, so the golden is refused until restamped or re-recorded.
+5. A snapshot that arrives without a `schema_version` or a `semantics_version` is refused (exit 65 for a snapshot
+   file): there is no unnumbered legacy form. A snapshot of the provisional pre-0.1.0 shape says `schema_version` 1 but
+   has no `semantics_version` and uses the old field shapes, so it fails the same check and is refused as malformed.
+6. `producer` and `byte_offset` never take part in a comparison.
+7. A reader supports **every grammar number up to its own** (parsing an old grammar is cheap, and the grammar number
+   says how to read a file, not what its screens mean; the schema and semantics numbers still have to match). A grammar
+   number is bumped only for a change old readers cannot understand, never to retire old goldens. This applies to
+   **released** grammar numbers (1 and later); the unreleased draft `vtee-golden 0` is not one and is rejected
+   (OD1). It is the one place where the rules are more permissive than the strict stance of rules 2 and 3; see the
+   open question Q1 in section 8.
 
 ### 4.4 The semantics changelog
 
 Every `semantics_version` bump is an entry in `docs/guide/snapshot-semantics.md`: the number, the release, the input
 that changes (the exact escape sequence or scalar), the old and the new cells, and which conformance cases changed, so
 that a consumer can search their raw output for it. Semantics 1 is the state of 0.1.0 and includes the fixes already
-made (TAB, named colours, wide continuation cells, underline styles) and the three known deviations of section 8 (OD6),
-each listed precisely.
+made (TAB, named colours, wide continuation cells, underline styles), the reported vocabulary of section 3.8, and the
+three known deviations of section 8 (OD6), each listed precisely.
 
 ## 5. The stability promise
 
 ### 5.1 Frozen at 0.1.0
 
-- The schema 2 field names, types, defaults and meanings of section 3.
+- The schema 1 field names, types, defaults and meanings of section 3, and the reported vocabulary of section 3.8.
 - The golden grammar of section 6: the file syntax, the header keys, the escape set (section 6.3 and appendix B), the
-  region and comparison rules, the regex dialect, the report shapes, the exit codes and the run command of 6.11 (`--expect`, `--update`).
-- The rules of section 4.1, including the vocabulary rule.
+  region and comparison rules, the regex dialect, the report shapes, the exit codes and the run command of 6.11
+  (`--expect`, `--update`).
+- The rules of section 4.1, including the rule that anything that can change a comparison bumps `semantics_version`.
 - The semantics of the frozen data of section 5.4 at semantics 1: the 80 escape-sequence cases, the width sample and
   the test vectors.
 
 ### 5.2 Allowed without a version bump
 
-Everything the first rows of section 4.1 permit: new optional JSON fields, new vocabulary names (modes, attributes),
-new `producer` keys, new report fields (readers of the JSON report ignore unknown fields), new
-`vtee` subcommands. New golden *sections* and new comparing directives need a new grammar number. Internal changes are
-unrestricted so long as the frozen data does not change.
+Only what no golden compares: new optional JSON fields that goldens ignore, new `producer` keys, new report fields
+(readers of the JSON report ignore unknown fields), new `vtee` subcommands and options that do not change a
+comparison. **New mode tokens, new attributes and new attribute values are not in this list**: they are
+`semantics_version` bumps (section 4.1). New golden *sections* and new comparing directives need a new grammar number.
+Internal changes are unrestricted so long as the frozen data does not change.
 
-### 5.3 Deprecation and tools
+### 5.3 Version mismatches, and the way forward
 
-- **Schema numbers.** When a new schema number ships, the previous one stays readable for at least **12 months** from
-  that release, and until the next major version if that is later. After the window readers refuse it and say which
-  release last supported it. The window is stated in time because two minor releases can be two weeks apart in 0.x.
-- **`--update=migrate` is kept for every released schema and grammar, with no end date.** A golden can always be moved
-  forward or re-recorded; a window only limits how long the *checker* reads the old form directly.
-- **Grammar numbers.** A reader supports all grammar numbers up to its own (section 4.3, rule 8).
-- `vtee --expect FILE --update=migrate` converts mechanically between layouts and **never invents facts**. Where a fact is
-  not recoverable it is written as unknown (table below), so the migrated golden is honest about what it no longer
-  verifies.
+There is no deprecation window and no second reader (owner decisions OD3 and OD4). A reader understands the current
+`schema_version` and `semantics_version` only; every other golden is **refused at once** (exit 2, nothing compared),
+and the refusal names the way forward:
 
-| Old form | Becomes | Note |
+| The golden says | The tool's number differs because | Way forward |
 | --- | --- | --- |
-| `{"Indexed":N}`, `{"Rgb":[r,g,b]}`, `"Default"` | `idx:N`, `rgb:#rrggbb`, `default` | exact |
-| shape `Block`, `Underline`, `Bar` | `block`, `underline`, `bar` | exact |
-| shape `Hidden` | `cursor.hidden` true and shape `block` | the old shape lost the real shape; `ignore cursor.shape` is added |
-| shape `HollowBlock` | `block` | `ignore cursor.shape` is added |
-| `underline: true` with `underline_style` | `underline=STYLE` | exact |
-| `underline: true` without `underline_style` | `underline=single` | the old boolean never said which |
-| `blink`, `hyperlink: null` | dropped | the former was always false, the latter a default |
-| rows soft-wrapped | **not recoverable** | `ignore wrapped` is added |
-| `semantics` | `semantics unknown` | not recoverable |
-| `vocab` | the vocabulary the old schema could report | so nothing new is compared |
-| a grammar 0 file (TinyFugue's flat draft: one screen, header and sections in one scope) | a grammar 1 composite with `[screen 1]` | exact; the draft's `modes-ignore` and `title-ignore` become `ignore modes ...` and `ignore title` |
+| `schema` lower than the tool's | the layout changed in a later release | `--update=migrate` (below), or re-record with `--update` |
+| `schema` higher than the tool's | the golden was written by a newer `vtee` | upgrade `vtee`; never partly read |
+| `semantics` different | what existing output means, or what is reported, changed | `--update=restamp` if nothing the golden compares would differ (it checks, and says if so), otherwise re-record with `--update`; the semantics changelog (4.4) says which inputs are affected |
+| `semantics unknown` | a migration could not recover the number | the same as a different number |
 
-- For a **semantics** difference there is no migration, because the meaning changed, not the layout. A check
-  compares anyway (section 6.8) and the changelog says which inputs are affected; a reviewer re-records with
-  `--update`, or confirms the difference does not matter with `--update=restamp`.
+- **`--update=restamp`** compares the golden with a fresh run under the current build. If every compared cell, header
+  field and assertion of every screen is identical it rewrites only the `semantics` line (and `x-producer`) and exits 0;
+  otherwise it writes nothing, prints the differences and exits 1. It is the safe answer to "an upgrade changed
+  nothing my golden checks", and the only override there is: no flag makes a check ignore a mismatch.
+- **`--update=migrate` is kept for every released schema and grammar, with no end date.** It converts a golden from an
+  older layout to the current one mechanically and **never invents facts**: where the old form cannot supply a fact it
+  adds the matching `ignore` (for example `ignore wrapped` when an older layout had no wrap flags) or writes
+  `semantics unknown`, so the migrated golden is honest about what it no longer verifies. Each schema or grammar bump
+  ships its own migration table in the user guide, tested by vectors. **There is no migration table today: 0.1.0 is the
+  first release, and artefacts recorded before it (the provisional snapshot shape, TinyFugue's `vtee-golden 0` draft)
+  are unsupported and are re-recorded** (owner decision OD1). `migrate` itself is not built for 0.1.0 (owner decision
+  OD7); it follows no later than the first schema or grammar bump.
+- **Grammar numbers.** A reader supports all grammar numbers up to its own (section 4.3, rule 7), flagged as an open
+  question in section 8.
+- A **semantics** difference is never a layout change, so `migrate` does not apply to it.
 
 ### 5.4 The frozen conformance data
 
@@ -461,7 +507,7 @@ FILE      =  FILE-HEADER  [ "[masks]" ... ]  SCREEN { SCREEN }
 SCREEN    =  "[screen N]"  SCREEN-HEADER  "[text]" ...  [ "[attrs]" ... ]  [ "[masks]" ... ]  [ "[assert]" ... ]
 ```
 
-- The **file header** (6.2) holds what is true of the whole run: the versions, the vocabulary, `ignore` directives that
+- The **file header** (6.2) holds what is true of the whole run: the versions, `ignore` directives that
   apply to every screen.
 - A `[masks]` section **before the first `[screen]`** is the **shared** mask list: it applies to every screen (6.5).
 - `[screen N]` starts a screen block. `N` is the screen's 1-based position and **must equal** the number of screen
@@ -479,8 +525,8 @@ SCREEN    =  "[screen N]"  SCREEN-HEADER  "[text]" ...  [ "[attrs]" ... ]  [ "[m
 layout, and the run-and-compare model needs several. Two shapes (flat for one screen, blocks for more) would mean two
 parsers, two canonical forms, and a conversion the day a second checkpoint is added to a script, and a conversion is
 a rewrite of a stored file. One shape costs one extra line (`[screen 1]`) and a small header split; because nothing
-has been released, nothing needs migrating, and no grammar number is spent later. Anything recorded in the flat layout
-of TinyFugue's draft (`vtee-golden 0`) is read by `--update=migrate` (5.3).
+has been released, nothing needs migrating, and no grammar number is spent later. The flat layout of TinyFugue's draft
+(`vtee-golden 0`) was never released and is unsupported (5.3); those goldens are re-recorded.
 
 ### 6.2 File header and screen header
 
@@ -490,10 +536,8 @@ header**:
 
 ```
 vtee-golden 1                      required, first line
-schema 2                             required: the snapshot schema the golden was recorded under
-semantics 1                          required: an integer, or the word unknown
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM      required: the mode tokens this golden knows about
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link   required: the attributes it knows about
+schema 1                             required: the snapshot schema the golden was recorded under
+semantics 1                          required: an integer, or the word unknown (a migration could not recover it)
 ignore modes ?1 ?1000                optional, repeatable; applies to every screen; see below
 ignore title
 x-producer vtee 0.1.0 alacritty_terminal 0.26.0     advisory
@@ -512,13 +556,11 @@ name "long-line"                     optional: a JSON string, the checkpoint's l
 ignore wrapped                       optional, repeatable; applies to this screen only
 ```
 
-- **`vocab`** is what makes additions additive (section 4.1). The writer records the full vocabulary of the tool that
-  wrote the golden, whether or not the screens use each token. The checker compares only declared tokens: `modes` are
-  compared after both sides are restricted to the declared mode tokens, and cell attributes after both sides are
-  restricted to the declared attributes (`fg` and `bg` are core and always compared). A token the snapshot reports that
-  the golden does not declare is ignored and produces `WARN vocab modes ?NNNN` in the report; it does not fail. A
-  `modes` line lists only tokens that are in `vocab modes` (a token outside it is an error, 6.13). The vocabulary is
-  per file, not per screen: all screens of a run were recorded by one tool.
+- **`schema` and `semantics`** are the two version numbers of section 4. A check requires both to equal the running
+  build's, before it compares anything (6.8); there is no vocabulary header, because a newly reported mode token or
+  attribute is itself a `semantics` bump (section 4.1). A `modes` token or an attribute that is not in the frozen
+  vocabulary of section 3.8 is an error in a golden (6.13). The numbers are per file, not per screen: all screens of a
+  run were recorded by one tool.
 - **`ignore`** names a part the check skips: `ignore title`, `ignore alt_screen`, `ignore wrapped`,
   `ignore cursor` (all of position, shape and hidden), `ignore cursor.position`, `ignore cursor.shape`,
   `ignore cursor.hidden`, `ignore modes TOKEN...` (the listed tokens are removed from both sides) and
@@ -588,12 +630,12 @@ Lists the cells whose attributes are not all default, as **runs**: `ROW: SPAN TO
 - A run is a maximal sequence of adjacent cells with identical non-empty attribute sets. Writers emit runs in row,
   then column order. A blank cell with an attribute (the 80 reverse cells of `top`'s header) is listed.
 - **Errors:** two runs that overlap; a run outside the screen; a run with no tokens or only default values; a token
-  repeated within a run; a token for an attribute the golden's `vocab attrs` does not declare.
+  repeated within a run; a token for an attribute that is not in the frozen vocabulary of section 3.8.
 
 ### 6.5 Regions and `[masks]`
 
 A mask relaxes the comparison for a region of a screen. Everything outside every mask is compared in full: text and
-attributes (restricted to the declared, un-ignored attributes).
+attributes (except those named by an `ignore attrs` line).
 
 ```
 mask REGION [text=ignore | text=/RE/] [attrs=ignore]
@@ -720,18 +762,19 @@ A run produces an ordered sequence of **actual screens** (snapshot objects) and 
 
 1. **Parse** the golden and validate it (section 6.13). A missing file is exit 66 (unless `--update` is creating it); a
    malformed one is exit 65. Errors stop here, before anything is run.
-2. **Versions and vocabulary**, decided from the **file header alone, before the program is started or the session is
-   touched** (so a refusal never costs a run).
-   - Grammar: a number above the reader's is refused (exit 2).
-   - `schema`: higher than the reader's is refused (exit 2); lower is read through the migration table (5.3) while the
-     deprecation window lasts, with a `WARN schema`, and refused after it with a pointer to `--update=migrate`.
-   - A declared `vocab` token the reader does not know is refused (exit 2), naming it. With `--accept-vocab` the unknown
-     tokens are dropped from the comparison instead, with a `WARN vocab` that names them, and the check continues: the
-     author knows the golden checks less than it declares.
-3. **Run** the source (6.11) and collect the actual screens. A snapshot with a *lower* schema number (an offline
-   `--snapshot` file) is read through the migration table with `WARN schema`; for it `wrapped_rows` and `semantics`
-   are unknown, so `wrapped` is not compared and the semantics rule below applies as for `unknown`. A higher number
-   is refused (exit 2).
+2. **Versions**, decided from the **file header alone, before the program is started or the session is touched** (so a
+   refusal never costs a run). Each refusal is exit 2 with nothing compared, and its message names both numbers and the
+   way forward (section 5.3):
+   - `grammar`: a number above the reader's is refused. Lower numbers are read (4.3, rule 7).
+   - `schema`: any number other than the build's own is refused (there is no deprecation window and no second reader,
+     OD3).
+   - `semantics`: any number other than the build's own `semantics_version`, and the word `unknown`, is refused
+     (OD4). There is no flag that overrides it.
+3. **Run** the source (6.11) and collect the actual screens. In forms (b), (c) and (d) the numbers come from the
+   snapshots themselves (a live session or a saved file may have been produced by another build): a snapshot whose
+   `schema_version` or `semantics_version` differs from the golden's is refused in the same way, as soon as the first
+   screen arrives; a snapshot with a missing number is malformed (exit 65). In form (a) the snapshots are the running
+   build's own, so step 2 already decided it.
 4. **Pair the screens by position:** actual screen *i* is compared with the golden's screen *i*. If the counts differ,
    the common prefix is paired and compared, and one `screens` mismatch (kind in 6.9) names the golden screens that got
    no output (`missing`) and the actual screens that have no golden (`extra`). Pairing is by position only: an inserted
@@ -742,14 +785,12 @@ A run produces an ordered sequence of **actual screens** (snapshot objects) and 
    1. **Size.** If it differs, report it and stop comparing the screen: the header fields of step 5.2 are still compared,
       but cells, masks and assertions (5.3 to 5.5) are **not** (the grids no longer line up, and stale-mask reports would
       be noise).
-   2. **Header:** cursor, `alt_screen`, `modes` (as sets, restricted to the declared vocabulary and minus `ignore modes`),
-      `title`, `wrapped`, each unless ignored (file-level and screen-level `ignore` are united, 6.2).
-   3. **Cells.** Every cell outside masks: text (`ch`) and the attribute set (restricted to declared, un-ignored
-      attributes).
+   2. **Header:** cursor, `alt_screen`, `modes` (as sets, minus `ignore modes`), `title`, `wrapped`, each unless
+      ignored (file-level and screen-level `ignore` are united, 6.2).
+   3. **Cells.** Every cell outside masks: text (`ch`) and the attribute set (minus `ignore attrs`).
    4. **Masks:** stale-mask checks and `text=/RE/` checks, shared masks first then the screen's own (6.5).
    5. **Assertions** of the screen.
 6. **Staleness of shared masks** is decided after all pairs have been compared (6.5).
-7. **Semantics** (below).
 
 `byte_offset`, `scrollback`, `producer` and `x-` keys never take part. Regions are validated against each **golden
 screen's** size when the golden is read, so a size mismatch is the only reason a region can fall outside the actual
@@ -757,21 +798,13 @@ screen. With `--fail-fast` the run stops at the first mismatch, refusal or run-l
 for `--connect`) is stopped, the remaining screens are reported as `skipped`, and the exit code is that of the first
 problem.
 
-**Semantics mismatch.** When the golden's `semantics` differs from the actual snapshots' (or is `unknown`), the checker
-still runs steps 3 to 6 and then decides. "No differences" means no mismatch in any screen:
-
-| Option | No differences found | Differences found |
-| --- | --- | --- |
-| default | `PASS`, exit 0, with `WARN semantics golden=A snapshot=B: no differences` | `REFUSED`, exit 2: the differences are listed, with a pointer to `docs/guide/snapshot-semantics.md` |
-| `--accept-semantics` | `PASS`, exit 0, with the same warning | `FAIL`, exit 1, an ordinary failure |
-| `--strict-semantics` | `REFUSED`, exit 2, nothing compared. In form (a) this is decided **before the program is started**, because the tool's own `semantics_version` is known; in the other forms, as soon as the first screen's value has been read | (not reached) |
-
-All screens of one run have the same semantics value (they come from one tool); an offline `--snapshot` input whose
-documents disagree is malformed (exit 65). Reason: one integer covers all emulation areas, so a strict refusal would
-turn every bump into a refusal of every golden, including ones that never touch the changed behaviour, and teach
-people to pass `--accept-semantics` blindly. Comparing anyway keeps the information (nothing differs) and the safety
-(different results are not presented as the program's fault). Repositories that want the strict behaviour for their
-own goldens use `--strict-semantics`.
+**Version mismatches have one outcome.** A check never partly compares, never "compares anyway" and never downgrades a
+refusal to a warning (owner decisions OD3 and OD4). Reason: every bump then means exactly one thing to a user, "this
+golden was recorded under another meaning", and the answer is always the same two commands, `--update=restamp` (cheap,
+scripted, and only succeeds when nothing the golden checks changed) or `--update` (re-record). The cost, accepted
+knowingly, is that every bump after 0.1.0 refuses every stored golden until it is restamped, including goldens of
+programs that never touch the change; that is why the reported vocabulary is frozen as one table (section 3.8) and why
+bumps are expected to be rare. A repository restamps all its goldens in one pass, one command per test.
 
 ### 6.9 The report
 
@@ -785,13 +818,13 @@ REFUSED NAME: REASON
 ```
 
 `K` is the number of screens in the golden. `N` counts blocks over the whole run (a run of identical cell differences is
-one block). Warnings, if any, follow
-immediately on lines beginning with `WARN `. Then the **run-level** blocks (kinds `screens` and `wait`), then, for each
+one block). **There are no warnings in grammar 1**: every condition passes, fails or refuses, so a `PASS` line is
+followed by nothing. Then the **run-level** blocks (kinds `screens` and `wait`), then, for each
 screen that has mismatches, a line `screen I` (or `screen I "NAME"` when the golden's block has a name) followed by that
 screen's blocks, indented two more spaces. Screens without mismatches are not listed. Each mismatch is a block whose
 first word names the kind. At most 20 blocks are shown (`--max-mismatches N`); the first line gives the true total and a
-last line says `showing 20 of 413`. For `REFUSED` caused by a semantics difference the blocks are shown after the first
-line, headed `differences (informational):`.
+last line says `showing 20 of 413`. A `REFUSED` run has no mismatch blocks: its first line gives the reason and the
+following lines the way forward (below).
 
 A mismatch block for each kind (the text forms are the specification; the exact column alignment is not significant):
 
@@ -826,29 +859,32 @@ blocks, then per screen size, name, cursor, modes, alt_screen, title, wrapped, t
 line` is the line of the *file*, which for a mask in the shared list is a line before the first `[screen]`.)
 
 A `text` block shows both rows with a caret line under the differing columns; a `text` block for a continuation cell
-shows `\.`. A pass, with warnings:
+shows `\.`. Refusals (exit 2; nothing was compared), each with its way forward:
 
 ```
-PASS flow.golden (3 screens)
-WARN semantics golden=1 snapshot=2: no differences
-WARN vocab modes ?1004: reported by this vtee, not declared by the golden (not compared)
+REFUSED flow.golden: semantics 1 in the golden, 2 in this vtee; nothing was compared
+  restamp (only if nothing the golden checks changed):  vtee --script flow.ndjson --expect flow.golden --update=restamp -- tf -n
+  or re-record with --update; what changed is listed in docs/guide/snapshot-semantics.md
+
+REFUSED flow.golden: schema 1 in the golden, 2 in this vtee; nothing was compared
+  migrate the file:  vtee --expect flow.golden --update=migrate      (or re-record with --update)
 ```
 
 `--format json`:
 
 ```
-{"golden":"flow.golden","result":"fail","grammar":1,"schema":2,"semantics":1,
- "snapshot":{"schema":2,"semantics":1},"screens_expected":3,"screens_actual":2,
+{"golden":"flow.golden","result":"fail","grammar":1,"schema":1,"semantics":1,
+ "snapshot":{"schema":1,"semantics":1},"screens_expected":3,"screens_actual":2,
  "total":17,"shown":17,                       (the example is abbreviated: the screen entries below list only some objects)
  "run":[{"kind":"screens","expected":3,"actual":2,"missing":[3],"extra":[]},
         {"kind":"wait","line":7,"text":"10/10mv>","timeout_ms":5000}],
  "screens":[{"index":1,"name":"startup","result":"pass"},
             {"index":2,"name":null,"result":"fail","mismatches":[ ...objects below... ]},
-            {"index":3,"name":"long-line","result":"skipped"}],
- "warnings":[{"code":"vocab","message":"modes ?1004: reported by this vtee, not declared by the golden"}]}
+            {"index":3,"name":"long-line","result":"skipped"}]}
 ```
 
-`result` is `pass`, `fail` or `refused` for the run; a refusal adds `"reason"`. `run` holds the run-level mismatch
+`result` is `pass`, `fail` or `refused` for the run; a refusal adds `"reason"` (a string, the text after
+`REFUSED NAME: `) and `"way_forward"` (an array of command strings). `run` holds the run-level mismatch
 objects; each entry of `screens` has `index` (1-based, the golden's), `name` (the golden block's, or `null`), `result`
 (`pass`, `fail`, `refused` or `skipped`: not compared because the run ended, `--fail-fast` stopped it, or no actual
 screen existed) and, for `fail`, `mismatches`. Every mismatch object has `kind`. Fields by kind (rows and columns
@@ -873,15 +909,15 @@ screen existed) and, for `fail`, `mismatches`. Every mismatch object has `kind`.
 A `mask` mismatch with `problem` `stale` for a *shared* mask is a run-level fact (it was judged over all screens): it is
 listed in `run`, not under a screen.
 
-Warning objects have `code` (`semantics`, `vocab`, `schema`) and `message`. The reports of `--update` runs are in 6.11.
+The reports of `--update` runs are in 6.11.
 
 ### 6.10 Exit codes of a run with `--expect`
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Pass (possibly with warnings); an update that succeeded, including one that changed nothing |
+| 0 | Pass; an update that succeeded, including one that changed nothing |
 | 1 | The output differs from the golden: any mismatch, including a `screens`, `name` or `wait` problem; or an `--update` that refused to write (a failed run, a restamp that would change a compared value) |
-| 2 | Refused: grammar, schema, vocabulary or semantics prevent or qualify a comparison (6.8). Deliberately not a sysexits code, so a script can tell "differs" and "cannot compare" apart from errors |
+| 2 | Refused: the grammar, schema or semantics number prevents a comparison (6.8); nothing was compared. Deliberately not a sysexits code, so a script can tell "differs" and "cannot compare" apart from errors |
 | 64 | Usage error: an illegal option combination (6.11), a missing value, a `--screen` that does not fit the run |
 | 65 | A golden, a snapshot input or a script is malformed (data error); the message says which, and for a snapshot the first line is `snapshot: ...`, for a script `script line N: ...` |
 | 66 | A file named on the command line does not exist or cannot be read (the golden without `--update`, the script, the snapshot file) |
@@ -894,10 +930,10 @@ reported before anything starts, with nothing run: **in `--expect` mode the whol
 the program is started** (today's `--script`, without `--expect`, executes the lines before a malformed one and then
 stops with 65, E28). An error *during* a run (71, 69, 74) aborts it and is the exit code; no comparison report is
 printed, only a message on standard error. A run that completes is judged by its comparison: **any refusal gives 2,
-else any mismatch or run-level problem gives 1, else 0.** A refusal found from the file header (grammar, schema,
-vocabulary) is decided before the run starts and the program is never started; so is `--strict-semantics` in form (a).
-In forms (b), (c) and (d) the semantics value is only known when the first screen arrives, so that refusal is decided
-then.
+else any mismatch or run-level problem gives 1, else 0.** A refusal from the file header (grammar, schema or
+semantics number against the build's own) is decided before the run starts and the program is never started (form
+(a)). In forms (b), (c) and (d) the snapshots' numbers come from a session or a file, so a mismatch there is decided
+when the first screen arrives.
 
 **Usage errors are 64, not 2.** clap's own default exit code for a usage error is 2. `src/main.rs` (lines 198 to 202,
 E25) maps every parse error to `exitcode::USAGE` before anything else, and the new options are options of the same
@@ -913,10 +949,15 @@ vtee --connect SOCK --expect GOLDEN [RUN-OPTIONS]                               
 vtee --snapshot FILE|- --expect GOLDEN [RUN-OPTIONS]                                         (d) offline: finished output
 vtee --expect GOLDEN --update=migrate [--format text|json]                                   rewrite an old golden in place
 
-RUN-OPTIONS  =  [--update[=MODE]] [--screen N] [--format text|json] [--portable] [--fail-fast]
-                [--strict-semantics | --accept-semantics] [--accept-vocab] [--max-mismatches N]
-MODE         =  record | restamp | vocab | migrate        (bare `--update` means `--update=record`)
+RUN-OPTIONS  =  [--update[=MODE]] [--screen N] [--format text|json] [--portable] [--fail-fast] [--max-mismatches N]
+MODE         =  record | restamp | migrate        (bare `--update` means `--update=record`)
 ```
+
+**What 0.1.0 ships** (owner decision OD7): `--expect` (check), `--update` and `--update=record`, `--update=restamp`,
+and the other options above. `--update=migrate` is specified here and ships **no later than the first schema or
+grammar bump** after 0.1.0, because there is nothing before 0.1.0 to migrate from (5.3); until then it is rejected with
+`vtee: --update=migrate is not available in this release` (exit 64). There are no `--strict-semantics`,
+`--accept-semantics` or `--accept-vocab` options (owner decisions OD4 and OD8): a version mismatch has no override.
 
 `SESSION-OPTIONS` are the existing options that shape the program's terminal in form (a): `--cols`, `--rows`, `--env`,
 `--log`. **With `--expect` the size defaults to 80x24**, not to the invoking terminal's size (without `--expect` a
@@ -956,14 +997,14 @@ The first clause of each message is normative, the rest is a hint:
 | `--script` with neither a program nor `--connect` | `vtee: --script needs a program to run or --connect SOCK` |
 | `--connect` with a program | `vtee: --connect talks to a running session; it cannot be combined with a program` |
 | `--snapshot` with `--connect`, `--script`, a program, `--cols`, `--rows`, `--env` or `--log` | `vtee: --snapshot reads finished output; it cannot be combined with --connect, --script, a program or session options` |
-| `--update`, `--screen`, `--format`, `--portable`, `--fail-fast`, `--strict-semantics`, `--accept-semantics`, `--accept-vocab` or `--max-mismatches` without `--expect` | `vtee: --OPTION needs --expect GOLDEN` |
+| `--update`, `--screen`, `--format`, `--portable`, `--fail-fast` or `--max-mismatches` without `--expect` | `vtee: --OPTION needs --expect GOLDEN` |
 | `--text` with `--expect` | `vtee: --text has no effect with --expect, which prints a report; use --format text or --format json` |
 | `--update=migrate` with a program, `--script`, `--connect`, `--snapshot`, `--screen`, `--portable` or a run option other than `--format` | `vtee: --update=migrate rewrites the file in place and runs nothing; give only --expect GOLDEN` |
-| `--portable` without `--update` (record or vocab) | `vtee: --portable applies when a golden is written; use it with --update` |
-| `--screen` with `--update=restamp` or `--update=vocab` | `vtee: --screen applies to checking and to --update (record)` |
+| `--portable` without `--update` (record), or with `--update=restamp` | `vtee: --portable applies when a golden is created; use it with --update` |
+| `--screen` with `--update=restamp` | `vtee: --screen applies to checking and to --update (record)` |
+| any `--update` while the `CI` environment variable is set and non-empty, unless `VTEE_ALLOW_UPDATE=1` | `vtee: --update is refused when CI is set (it would make a pipeline pass by rewriting its expectations); set VTEE_ALLOW_UPDATE=1 to allow it` (OD18) |
 | `--update --screen N` when GOLDEN does not exist | `vtee: --screen N updates one screen of an existing golden; GOLDEN does not exist` (detected after parsing, still exit 64) |
-| `--strict-semantics` with `--accept-semantics` | clap's own: `the argument '--strict-semantics' cannot be used with '--accept-semantics'` |
-| an unknown `--update` value | `vtee: unknown --update mode 'X'; expected record, restamp, vocab or migrate` |
+| an unknown `--update` value | `vtee: unknown --update mode 'X'; expected record, restamp or migrate` |
 | `--screen N` when the run produced more than one screen, or N is outside the golden | `vtee: --screen N selects one screen, but the run produced K` / `... the golden has K screens` (detected after the run, still exit 64) |
 
 **Check (the default).** `--expect GOLDEN` compares (6.8). A missing GOLDEN is exit 66 with `vtee: GOLDEN: no such
@@ -979,26 +1020,36 @@ comments, `ignore` lines, shared and per-screen `[masks]` and `[assert]` section
 order are **kept verbatim**; only the generated parts are rewritten. Screens are paired with the existing blocks by
 position. `x-producer` is rewritten only when something else in the generated part changes, so a re-record with a newer
 `vtee` that changes nothing produces an empty diff and the line names the `vtee` that last changed the golden, which
-is what an audit of a pin needs. The output of `--update` (standard output; `--format json` gives the same facts as an
-object with `result` and `screens`):
+is what an audit of a pin needs.
+
+**`--update` always prints what it changed** (owner decision OD18), on standard output; `--format json` gives the same
+facts as an object with `result` and `screens`. A reviewer sees in the log, and in the diff, exactly which expectations
+moved:
 
 ```
 CREATED NAME: 3 screens
-UPDATED NAME: 3 screens (1 new, 1 dropped: screen 4 had 2 masks, 1 assert)
+UPDATED NAME: 3 screens
+  screen 2: 14 cells changed (text 3, attrs 11), cursor moved
+  screen 3: new (no masks, no asserts: add them by hand)
+  screen 4: dropped (it had 2 masks and 1 assert, which are lost)
 UNCHANGED NAME: 3 screens
 ```
 
+**The CI guard** (OD18). A pipeline that runs `--update` rewrites its own expectations and then passes, so a stray flag
+would make every test pass forever. When the `CI` environment variable is set and non-empty, every `--update` mode
+(`record`, `restamp`, `migrate`) refuses with exit 64 and the message in the table above, unless
+`VTEE_ALLOW_UPDATE=1` is also set. The guard looks only at the environment, so a deliberate update job opts in
+explicitly. It applies before the program is started, so a refused update never costs a run.
+
 | Mode | What it does | Refuses (exit 1) when | Notes |
 | --- | --- | --- | --- |
-| `record` (bare `--update`) | Creates the golden if it is missing (no masks, no assertions: those are written by hand) or regenerates `[screen]` headers, `[text]` and `[attrs]` from the run. Keeps the file's declared vocabulary (a new file gets the current tool's). Screens beyond the existing blocks are added without masks; existing blocks with no output are **dropped** and listed in the message, so a lost checkpoint is visible | the run failed | `--portable` (6.14) applies when the file is created or its vocabulary is rewritten. With `--screen N`, only screen N is regenerated (the run must produce one screen); it cannot create a file |
-| `restamp` | Rewrites only the `semantics` line (and `x-producer`) | any compared cell, header field or assertion of any screen would differ (a full check with the semantics difference ignored runs first) | Confirms that a semantics bump changed nothing this golden checks. Prints `RESTAMPED NAME: semantics 1 -> 2`, or `NOT RESTAMPED NAME: 3 differences` followed by the check report |
-| `vocab` | As `record`, and replaces the declared vocabulary with the current tool's, which starts comparing the new tokens | the run failed | |
-| `migrate` | Rewrites a golden recorded under an older grammar or schema, in place (5.3). Needs no source: it runs nothing | (never: it does not compare) exit 2 if the file is *newer* than this tool | **Never invents facts**: unrecoverable ones are written as unknown (`ignore wrapped`, `semantics unknown`, a shape rule). Prints `MIGRATED NAME: grammar 0 -> 1, schema 1 -> 2` and lists the unknowns, or `UNCHANGED NAME` |
+| `record` (bare `--update`) | Creates the golden if it is missing (no masks, no assertions: those are written by hand) or regenerates `[screen]` headers, `[text]` and `[attrs]` from the run. Screens beyond the existing blocks are added without masks; existing blocks with no output are **dropped** and listed in the message, so a lost checkpoint is visible | the run failed | `--portable` (6.14) applies when the file is created. With `--screen N`, only screen N is regenerated (the run must produce one screen); it cannot create a file |
+| `restamp` | Rewrites only the `semantics` line (to the number the run's snapshots carry) and `x-producer` | any compared cell, header field or assertion of any screen would differ (a full check with the version numbers ignored runs first) | Confirms that a semantics bump changed nothing this golden checks. Prints `RESTAMPED NAME: semantics 1 -> 2`, or `NOT RESTAMPED NAME: 3 differences` followed by the check report. A golden with a different `schema` is not restamped: it needs `migrate` or a re-record |
+| `migrate` | Rewrites a golden recorded under an older grammar or schema, in place (5.3). Needs no source: it runs nothing. **Not in 0.1.0** (see above) | (never: it does not compare) exit 2 if the file is *newer* than this tool | **Never invents facts**: unrecoverable ones are written as unknown (an `ignore` for that part, or `semantics unknown`). Prints `MIGRATED NAME: schema N -> M` and lists the unknowns, or `UNCHANGED NAME` |
 
 *Why these value names.* `record` is what the default does, so a bare `--update` and `--update=record` mean the same
 and scripts can spell it out. `restamp` says it rewrites the stamp and nothing else; `semantics` would suggest it
-changes semantics. `vocab` reads as "update the vocabulary", which is what it adds to `record`; `refresh-vocab` (the
-earlier name) repeats itself. `migrate` is an `--update` mode and not an option of its own because it too rewrites the
+changes semantics. `migrate` is an `--update` mode and not an option of its own because it too rewrites the
 expected file in place and is bound to the same file argument; it is the one mode that takes no source, which the table
 of illegal combinations states. The values are part of the interface and are frozen at 0.1.0; adding a mode later is
 additive.
@@ -1047,17 +1098,19 @@ Two independent implementations must agree on every file. A reader **rejects** (
   its scope (two shared `[masks]`, two `[text]` in one screen);
 - a file with no `[screen]` block; a `[screen N]` whose `N` is not the number of screen blocks so far plus one; a
   `[text]`, `[attrs]` or `[assert]` before the first `[screen]`; the reserved sections `[exit]` and `[screen]` without a
-  number; a shared mask whose rows and columns fall outside any screen's size;
+  number; a first line `vtee-golden 0` (the unreleased draft layout, unsupported, OD1); a shared mask whose rows
+  and columns fall outside any screen's size;
 - a `[text]` with the wrong number of rows, a row label that is not its index, a row with no `|`, more cells than `cols`,
   a malformed or unknown backslash sequence, a surrogate or out-of-range `\u{H}`, `\.` at the start of a row or after
   `\.`, `\+` at the start of a row or after `\.`;
 - an `[attrs]` run that overlaps another, is outside the screen, has no tokens or only defaults, repeats a token, or
-  uses an attribute not in the declared vocabulary; any comment in `[text]` or `[attrs]`;
+  uses an attribute that is not in the frozen vocabulary of section 3.8; any comment in `[text]` or `[attrs]`;
 - a region outside its screen's size, `N > M` in a range, a mask with neither `text=` nor `attrs=ignore`, `text="EXACT"`
   on a multi-row region or with `find=`, an assert with no constraint, a regex outside the dialect (6.7), an invalid
   JSON string, a repeated token in one `mask` or `assert` line, `ignore modes` with no token;
-- a `modes` token that is not in `vocab modes`, or an `ignore` naming a mode or attribute that is not in the declared
-  vocabulary.
+- a `modes` token that is not in the frozen vocabulary of section 3.8, or an `ignore` naming a mode or attribute that
+  is not in it (a golden written by a newer build that reports more tokens already differs in `semantics` and is
+  refused at step 2 of 6.8, before this check matters).
 
 A reader **accepts and normalises**: CRLF; a missing final newline; blank lines anywhere; trailing whitespace on
 non-`[text]` lines; the sections or header lines in any order; `modes` tokens in any order or repeated (a set);
@@ -1073,20 +1126,33 @@ E15 to E17), and how a golden handles each:
 
 | Difference | Linux | Windows (ConPTY) | Handling |
 | --- | --- | --- | --- |
-| `?1`, `?1000`, `?1002`, `?7` | reported when set | never arrive (E15; `?1` and `?1006` from the project's earlier measurement; `?1003` and `?1005` are untested and assumed to behave the same) | declare only `?2004` in a portable golden, or `ignore modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006` |
+| `?1`, `?1000`, `?1002`, `?7` | reported when set | never arrive (E15; `?1` and `?1006` from the project's earlier measurement; `?1003` and `?1005` are untested and assumed to behave the same) | `ignore modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006` (the portable profile) |
 | `DECKPAM` (`ESC =`) | reported | never arrives (E15) | `ignore modes DECKPAM` |
 | `?2004`, `?25` | reported | arrive normally | portable |
-| `?1004`, `?9001` | not set unless the program does | injected by ConPTY at the start and removed at the end (E16) | `?1004` is not in the 0.1.0 vocabulary, and the portable vocabulary never declares it, so a portable golden never compares it |
+| `?1004`, `?9001` | not set unless the program does | injected by ConPTY at the start and removed at the end (E16) | neither is in the 0.1.0 reported vocabulary (section 3.8), so no golden ever sees them |
 | SGR 58 (underline colour) | colour kept | garbled into `dim`, or `blink` and `strike` (E17) | do not use SGR 58 in a portable golden; if a program emits it, goldens are per-platform |
 | SGR 4:N (curly, dotted ...) | kept | kept | portable |
 | `title` | `null` unless the program sets one | the host program's path unless set | `ignore title` |
 | `byte_offset` | differs wildly (E3) | | never stored |
 | Anything else | | | a real difference to investigate and report |
 
-`--update --portable` (record or vocab mode) writes the portable profile: `vocab modes ?2004`, the attribute vocabulary
-without `ulcolor`, and a file-level `ignore title`, which applies to every screen of the run. A golden recorded that way
-on one platform can pass on the other when the program's output is the same. The profile is part of the contract:
-adding a token to it is a semantics-visible change.
+`--update --portable` (record mode, when the file is created) writes the **portable profile** as file-level `ignore`
+lines, which apply to every screen of the run:
+
+```
+ignore modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 DECKPAM
+ignore attrs ulcolor
+ignore title
+```
+
+`ulcolor` is ignored because ConPTY garbles SGR 58 (E17), so underline colour is not portable; the *text* of the cells
+and every other attribute are still compared. A program that emits SGR 58 also gets a spurious `dim` or `strike` under
+ConPTY, which no `ignore` can separate from a real one, so goldens of such programs are per-platform. The mode tokens
+left compared are `?2004` only.
+A golden recorded that way on one platform can pass on the other when the program's output is the same. **The profile's
+list is frozen at 0.1.0 and is part of the contract**: adding an `ignore` to it is a change of what `--portable`
+writes, announced in the semantics changelog but not a version bump, because it only loosens goldens recorded
+afterwards and never changes how a stored one compares. Removing one is a semantics bump (owner decision OD10).
 
 ## 7. Worked examples
 
@@ -1127,10 +1193,8 @@ recording, so screen 3 has no `wrapped` line: it appears only where the snapshot
 
 ```text
 vtee-golden 1
-schema 2
+schema 1
 semantics 1
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 x-producer vtee 0.1.0 alacritty_terminal 0.26.0
 
 [masks]
@@ -1296,10 +1360,8 @@ because this golden has one screen; in a longer run the same masks would be shar
 
 ```text
 vtee-golden 1
-schema 2
+schema 1
 semantics 1
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 
 [screen 1]
 size 80x24
@@ -1391,10 +1453,8 @@ the first two carrying the ZWJ), a space, a private-use character, a space, a re
 
 ```text
 vtee-golden 1
-schema 2
+schema 1
 semantics 1
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 
 [screen 1]
 size 40x6
@@ -1427,16 +1487,16 @@ precomposed `é`.
 
 ### 7.4 A portable golden
 
-What `--update --portable` records for a program that printed `ok` and turned on bracketed paste. The vocabulary
-is the portable one (6.14): one mode token, no underline colour, and the title is ignored (a file-level `ignore`, so it
-applies to every screen the run has), so the same golden passes on Linux and under ConPTY.
+What `--update --portable` records for a program that printed `ok` and turned on bracketed paste. The file-level
+`ignore` lines are the portable profile (6.14, frozen at 0.1.0): the mode tokens ConPTY hides, the underline colour it
+garbles, and the title. They apply to every screen the run has, so the same golden passes on Linux and under ConPTY.
 
 ```text
 vtee-golden 1
-schema 2
+schema 1
 semantics 1
-vocab modes ?2004
-vocab attrs bold dim italic reverse strike conceal underline link
+ignore modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 DECKPAM
+ignore attrs ulcolor
 ignore title
 x-producer vtee 0.1.0 alacritty_terminal 0.26.0
 
@@ -1453,32 +1513,32 @@ title null
 2|
 ```
 
-### 7.5 What a semantics difference looks like
+### 7.5 What a version difference looks like
 
-A hypothetical future `semantics 2` that stops reporting tab-stop cells as spaces would show (a golden recorded under
-semantics 1 whose third screen contains a tab):
-
-```text
-REFUSED tf-edit.golden: semantics golden=1 snapshot=2, with 1 difference
-differences (informational):
-screen 3:
-  text      row 4 col 8   expected ' '   actual '\u{9}'
-see docs/guide/snapshot-semantics.md, entry 2
-```
-
-and if the same golden had no difference:
+A hypothetical future `semantics 2` that stops reporting tab-stop cells as spaces. A golden recorded under semantics 1
+is **refused**, whether or not its own screens contain a tab, and nothing is compared:
 
 ```text
-PASS tf-startup.golden (3 screens)
-WARN semantics golden=1 snapshot=2: no differences
+REFUSED tf-edit.golden: semantics 1 in the golden, 2 in this vtee; nothing was compared
+  restamp (only if nothing the golden checks changed):  vtee --script edit.ndjson --expect tf-edit.golden --update=restamp -- tf -n
+  or re-record with --update; what changed is listed in docs/guide/snapshot-semantics.md, entry 2
 ```
 
-The way to accept that nothing changed is `--update=restamp`, which rewrites only the `semantics` line and refuses if
-any compared value would differ:
+For a golden whose screens do not contain a tab, restamp succeeds and rewrites only the `semantics` line:
 
 ```text
 RESTAMPED tf-startup.golden: semantics 1 -> 2
 ```
+
+For one whose third screen does contain a tab, restamp refuses, writes nothing, and shows what would differ:
+
+```text
+NOT RESTAMPED tf-edit.golden: 1 difference
+screen 3:
+  text      row 4 col 8   expected ' '   actual '\u{9}'
+```
+
+That golden has to be re-recorded with `--update` (and the reviewer sees the same change in the diff).
 
 ## 8. Open questions, closed
 
@@ -1507,8 +1567,11 @@ reviews.
 | `byte_offset` in goldens? | Never | E3 |
 | Scrollback in goldens? | No | Not part of the screen; `scrollback_cells` reserved |
 | Both screen buffers? | `alt_screen` stays; `inactive` reserved | The library cannot read the inactive buffer without destroying it |
-| Versions of the golden grammar | `vtee-golden N`; a reader supports all N up to its own | Separates grammar from snapshot layout without retiring old files |
-| Is "add a token" free? | Yes, because goldens declare their vocabulary (OD8) | Review R1: otherwise every addition breaks stored goldens |
+| Versions of the golden grammar | `vtee-golden N`; a reader supports all released N up to its own (open question Q1) | Separates grammar from snapshot layout without retiring old files |
+| Is "add a token" free? | No: every newly reported mode token or attribute is a semantics bump (OD8) | Reviews TF1 and FA-A1 demonstrated that additions break stored goldens; the owner chose the one-sentence rule over declared vocabularies, and froze the 0.1.0 vocabulary in one table (3.8) |
+| What happens to a golden of an older or newer schema? | Refused at once (exit 2) with a pointer to `--update=migrate` or a re-record; no window, no second reader (OD3) | One reader and one rule |
+| What happens on a `semantics` mismatch? | Refused, nothing compared (exit 2); the remedy is `--update=restamp` or a re-record; no override flags (OD4) | One outcome for every bump |
+| What about snapshots and goldens recorded before 0.1.0? | Unsupported: no migration; they are re-recorded (OD1) | The provisional shape also says schema 1 and was never released |
 | Which new mode tokens now? | `?1002`, `?1003`, `?1005`; `?1004` and `?1007` reserved | `?1004` is injected by ConPTY (E16); `?1007` has no consumer (OD9) |
 | Underline field name | `underline` (a string), not `underline_style` | Failure mode for readers that skip the version check (3.2) |
 | Row-range regions: one rectangle or one span per row? | One span per row | A `text=/RE/` must match each row on its own (6.5) |
@@ -1529,87 +1592,111 @@ reviews.
 | How are run screens paired with golden screens? | By position; a `name` is compared only when both sides carry one | An inserted checkpoint should show as a diff; names are labels (6.8) |
 | Does the script change? | No. Only an optional `name` on `snapshot` and `optional` on `wait_for`, both ignored by servers | No script command carries comparison fields, so a raw server cannot silently skip a comparison (6.11) |
 | A `golden` subcommand family? | No: `--expect` and `--update[=MODE]` of the one run command | The model is `app + input + expected output`; "golden" is only the file kind (6.11, OD15 to OD17) |
+| A guard on `--update`? | Yes: it prints what it changed, and refuses in CI unless `VTEE_ALLOW_UPDATE=1` | A stray flag in a pipeline would make every test pass (6.11, OD18) |
 | Does a timed-out `wait_for` fail a script? | Yes, in every `--script` run; `"optional":true` opts out | E27: otherwise a script cannot fail a test (6.11, OD12) |
 | Default terminal size of an `--expect` run | 80x24 unless `--cols`/`--rows` | E31: a verdict must not depend on the invoking terminal (6.11) |
 | Is the child's exit status part of the output? | Not in 0.1.0; `[exit]` is a reserved section | A status is not a screen; the script can read it (6.11, OD14) |
 | Whole script validated before the run? | Yes, in `--expect` mode | A malformed line must not leave a half-run (E28, 6.10) |
 
-### OWNER DECISIONS
+### Decisions
 
-The reviewers' verdicts are in parentheses (TF = TinyFugue, FA = the Fable reviewer). OD1 to OD10 are from the earlier
-revisions, reworded for the run command; OD11 to OD17 were added when the owner chose the run-and-compare model.
+Recorded 2026-10-10. The owner answered each question separately, one at a time. Where the answer differs from the
+recommendation this document made, the decision is marked **overrode** and the consequence is stated in the reason
+column; the document was rewritten to follow the owner (the owner prefers strict, simple rules). The reviewers' verdicts
+on the original questions are in appendix C (TF = TinyFugue, FA = the Fable reviewer).
 
-| # | Decision | Recommendation | If you choose otherwise |
+| # | Question | Owner's choice | Reason and consequence |
 | --- | --- | --- | --- |
-| OD1 | **Schema number.** Call the frozen shape `schema_version` 2, leaving 1 as the provisional shape on `main` (TF agree, FA agree) | 2 | Keep 1: simpler number, but every artefact already recorded against the provisional shape (TinyFugue's, ours) becomes indistinguishable from the frozen one |
-| OD2 | **Sparse cells.** Omit defaults, as in 3.3, in the same change as the redesign (TF agree, FA agree) | Yes, now | Keep dense: simpler to read in JSON, but every added attribute grows every cell, the snapshot stays at 400 KB, and moving to sparse later is a breaking change |
-| OD3 | **Deprecation window.** For a superseded schema number: at least 12 months and until the next major, with `--update=migrate` kept forever; a reader supports all grammar numbers up to its own (TF: state it in time, FA: not for grammar) | As stated | Two minor releases (the first draft): in 0.x that can be two weeks; none at all (refuse immediately) makes every bump break every stored golden |
-| OD4 | **Semantics mismatch in a check.** Compare anyway: identical results pass with `WARN semantics`, different results are refused (exit 2) with the differences; `--strict-semantics` and `--accept-semantics` change this (TF and FA both proposed it) | As stated | Always refuse (the first draft): friendlier to describe, but one integer for all areas refuses every golden on every bump. Warn only: a golden can then fail for reasons that are not about the program |
-| OD5 | **Regex dialect** pinned to the RE2 common subset with ASCII classes and a stated rejection list (TF agree, FA agree) | Yes | A richer dialect (Python `re`) makes goldens depend on one language |
-| OD6 | **Known emulation deviations** (ED 1 on row 2, origin-mode reset, mode ?47): freeze them in semantics 1, list each precisely in the changelog, bump when upstream fixes them (TF agree: none touches tf; FA agree) | Freeze and document | Fix first by vendoring `alacritty_terminal`: a fork to maintain; goldens recorded before the fix would need `--update` only if they exercised those sequences |
-| OD7 | **What 0.1.0 contains.** The frozen formats and the run command (`--expect`, `--update` with the `record`, `restamp` and `vocab` modes, `--screen`, `--portable`, `--format json`, the four sources), plus the test vectors; `--update=migrate` follows no later than the first schema or grammar bump (TF and FA agree) | As stated | Formats only, with the command in 0.2: the formats would be frozen before the reference implementation validated them. Everything including `migrate`: more to build before a tag, for goldens that TinyFugue re-records anyway |
-| OD8 | **Vocabulary strategy.** Goldens declare the vocabulary they were written with, and the checker compares only that (4.1), against: every newly reported mode or attribute is a semantics bump | Declared vocabulary | Semantics bump for every addition: nothing to build in the header, but each new attribute refuses or warns on every stored golden |
-| OD9 | **Mode vocabulary at 0.1.0.** Add `?1002`, `?1003`, `?1005`; reserve `?1004` (ConPTY injects it) and `?1007` (no consumer) | As stated | Add all five of the first draft: `?1004` would be set on Windows and not on Linux for the same program, and every portable golden would need to ignore it |
-| OD10 | **A portable profile in 0.1.0** (`--update --portable`, 6.14) | Yes | Leave it to authors: every cross-platform golden needs a hand-written `ignore` list that is easy to get wrong (the first draft's list was incomplete: E15 to E17) |
-| OD11 | **Single-screen golden layout.** Always a composite: a one-screen golden is `[screen 1]` plus its blocks (6.1) | Always a composite | The flat layout of the first draft for one screen and blocks for several: two parsers and two canonical forms, and a rewrite of a stored file the day a script gains a second `snapshot`. Cheaper to read for one screen (one line shorter) |
-| OD12 | **A timed-out `wait_for` fails a `--script` run** (exit 1, a `wait` mismatch with `--expect`), in every script run, with `"optional":true` as the opt-out (6.11). A deliberate change to today's exit 0 (E27) | Yes, now, while nothing is released | Only with `--expect`: the behaviour of a plain script run stays as measured, and the rule differs by mode. Or no change: a script still cannot fail a test, and `--expect` would pass a run whose waits all timed out as long as the final screens matched |
-| OD13 | **Staleness of a shared `find=` mask.** Stale only if it matches in no screen of the run (6.5) | At least one screen | "In every screen": a clock mask of a tf run would have to be repeated in every screen that has a clock and left out of the startup screen, which defeats sharing. "In any one screen" would let a mask silently stop meaning anything after it was needed only in some screens |
-| OD14 | **The child's exit status as expected output.** An optional trailing `[exit]` section recording it. Reserve the name, define it later | Defer; reserve `[exit]` | Define it now: a status is the other half of many tests (a TUI that quits with 0 after `q`), but it is not a screen, needs its own comparison rules and report kind, and the script can already read it (`wait_exit`) |
-| OD15 | **Option names.** `--expect GOLDEN`, `--update[=MODE]`, `--screen N`, `--snapshot FILE\|-`, `--fail-fast`, `--format text\|json`, `--portable`, `--strict-semantics`, `--accept-semantics`, `--accept-vocab`, `--max-mismatches N` (6.11) | As stated | Names are cheap to change before 0.1.0 and expensive after; `--expect` and `--update` are the two the owner chose |
-| OD16 | **`--update` mode value names.** `record` (the bare default), `restamp`, `vocab`, `migrate` (6.11, with the reasons) | As stated | `refresh-vocab`/`semantics`/`new` are the alternatives considered; none is clearer |
-| OD17 | **`migrate` stays an `--update` mode**, the one mode that needs no source | Yes | A separate option (`--migrate FILE`): a second spelling of "rewrite the expected file in place". The cost of keeping it an `--update` mode is the one exception in the table of illegal combinations |
+| OD1 | Schema number of the frozen shape | **Keep it at `schema_version` 1.** *Overrode* the recommendation of 2 | Nothing has been released, so 1 simply means "the 0.1.0 shape". Consequence: snapshots recorded from `main` before 0.1.0 also say 1 but have the provisional layout, so they cannot be told apart by number; they are **unsupported** (no migration from them) and fail validation as malformed (exit 65). TinyFugue re-records anyway |
+| OD2 | Sparse cells | **Yes, now** | Real screens shrink 20 to 27 times; moving to sparse later would be a breaking change |
+| OD3 | How long an older schema stays readable | **No window.** *Overrode* the recommendation of 12 months and until the next major | One reader and one rule: an older (or newer) schema is refused at once, exit 2, with a pointer to `--update=migrate` or a re-record. `--update=migrate` is kept for every released schema, so "refused" always comes with a way forward. Contradicts TinyFugue's request for a stated period (TF OD3); their answer is that they re-record from a baseline |
+| OD4 | A `semantics_version` mismatch | **Always refuse**, exit 2, nothing compared. *Overrode* the recommendation "compare anyway" | `--accept-semantics`, `--strict-semantics` and the `WARN semantics` machinery are removed; the remedy is `--update=restamp` (compares internally, rewrites the number only if nothing the golden checks would differ) or `--update`. Consequence: every bump refuses every stored golden until restamped, including those that never touch the change; accepted, and the reason the reported vocabulary is frozen up front (3.8). Contradicts TF and FA, who both proposed compare-anyway |
+| OD5 | Regex dialect | **RE2 common subset**, ASCII classes, a rejection list, about 30 vectors | Portable across languages (E24) |
+| OD6 | The three known emulator deviations (ED 1 on row 2, origin-mode reset, mode ?47) | **Freeze and document** in semantics 1 | No fork of `alacritty_terminal`; each is listed precisely in the semantics changelog and fixed by a semantics bump when upstream fixes it. TinyFugue confirmed none touches tf |
+| OD7 | What 0.1.0 ships | **The formats, the test vectors, `--expect`, `--update` and `--update=restamp`**; `--update=migrate` follows no later than the first schema or grammar bump | The reference implementation validates the formats before the tag; there is nothing to migrate from yet |
+| OD8 | How new mode tokens and attributes are handled | **Every newly reported name is a semantics bump; no `vocab` header and no `--update=vocab`.** *Overrode* the recommendation of declared vocabularies | Simplest rule: one sentence, no extra header lines, no undeclared-token handling. Consequence: each addition after 0.1.0 refuses every stored golden until restamped (OD4), so the 0.1.0 vocabulary is frozen as one table (3.8) and additions are deliberate and rare |
+| OD9 | Mode vocabulary at 0.1.0 | **`?1`, `DECKPAM`, `?1000`, `?1002`, `?1003`, `?1005`, `?1006`, `?2004`**; `?1004` and `?1007` reserved | `?1004` is injected by ConPTY (E16); `?1007` has no consumer. Adding either later is a semantics bump. The code reports five of these today (checked against `src/snapshot.rs`) |
+| OD10 | `--portable` profile in 0.1.0 | **Yes**; its list is frozen | One flag records a golden that passes on Linux and under ConPTY for the known differences (6.14) |
+| OD11 | Layout of a one-screen golden | **Always the composite layout** | One grammar, one parser, no conversion when a script gains a second `snapshot` |
+| OD12 | A timed-out `wait_for` | **Fails every `--script` run** (exit 1, kind `wait`), unless the line has `"optional": true` | Scripts become able to fail a test (E27) |
+| OD13 | Staleness of a shared `find=` mask | **Stale only if it matches in no screen** | A shared clock mask must not fail on the screen that has no clock yet |
+| OD14 | The child's exit status as expected output | **Deferred; `[exit]` is reserved** | A status is not a screen; the script can read it with `wait_exit` |
+| OD15 | Option names | **Keep `--script`** (not renamed to `--in`); `--expect FILE`, `--update[=MODE]`, `--screen N`, `--snapshot FILE\|-`, `--connect`, `--format text\|json`, `--portable`, `--fail-fast` (and `--max-mismatches N`) | No rename of an existing flag; no aliases |
+| OD16 | `--update` mode values | **`record` (bare default), `restamp`, `migrate`**; no `vocab` | Follows OD8 |
+| OD17 | `migrate` as an `--update` mode | **Yes**, the one mode that needs no source | Everything that rewrites the expected file is an option of the one command |
+| OD18 | A guard on `--update` in CI | **Yes**: `--update` always prints what it changed, and refuses (exit 64) when `CI` is set and non-empty unless `VTEE_ALLOW_UPDATE=1` | A stray `--update` in a pipeline would make every test pass by rewriting its expectations |
+
+### New open question (the owner has not answered it)
+
+**Q1. Should a reader still read older *grammar* numbers?** Section 4.3 rule 7 keeps the earlier rule that a reader
+supports every grammar number up to its own, because parsing an old grammar is cheap and the grammar number says only
+how to read a file. That is more permissive than the owner's strict stance on schema (OD3) and semantics (OD4), which
+refuse an older number at once. The two are consistent in one respect, since a file read under an older grammar still
+has to match the build's `schema` and `semantics`, but they differ in spirit. Recommendation: keep the lenient rule for
+**released** grammar numbers (1 and later), because a grammar bump is for changes old readers cannot understand and never
+to retire files. The alternative is to refuse an older grammar with a pointer to `--update=migrate`, which costs a
+migration at every grammar bump. "Grammar 0" (TinyFugue's unreleased draft) is not a released grammar: it is
+unsupported (OD1), and the rule applies from grammar 1.
 
 ## 9. Required changes before 0.1.0
 
-Sizes are rough: S under a day, M a day or two, L several days. Dependencies are marked.
+Sizes are rough: S under a day, M a day or two, L several days. Dependencies are marked. This list follows the owner's
+decisions of 2026-10-10 (section 8): no vocabulary machinery, no compare-anyway path and no second reader make items 6
+and 7 smaller than in the previous revision, and the CI guard (OD18) is new.
 
-1. **Versions and producer.** `SCHEMA_VERSION = 2`, a new `SEMANTICS_VERSION = 1`, both first in the snapshot; the `producer`
-   object. **S** (do first; everything else assumes it)
-2. **Sparse cells and the new cell shape** (OD1, OD2; sections 3.2 to 3.5): colours as strings, `underline` as a style
+1. **Versions and producer.** `SCHEMA_VERSION = 1` (the frozen shape; OD1), a new `SEMANTICS_VERSION = 1`, both first
+   in the snapshot; the `producer` object; a snapshot without the two numbers is malformed. **S** (do first; everything
+   else assumes it)
+2. **Sparse cells and the new cell shape** (OD2; sections 3.2 to 3.5): colours as strings, `underline` as a style
    string (removing `underline_style` and the old boolean), `conceal` added, `blink` and null `hyperlink` removed,
    defaults omitted, cursor shapes lower-case and `row` unsigned, `lines` documented, the JSON writer escaping U+0085,
    U+2028 and U+2029 (3.7). `src/snapshot.rs`, `redraw_sequence`, serde, the differential harness's reader,
-   `docs/guide/protocol.md`, `examples/`, the text-mode printers. **L** (after 1)
+   `docs/guide/protocol.md`, `examples/`, the text-mode printers. **L** (after 1). Because the provisional shape on
+   `main` also says schema 1 (OD1), the reader must reject it as malformed with a message that says snapshots recorded
+   before 0.1.0 are unsupported.
 3. **`wrapped_rows`** from `WRAPLINE` (including the wide-character placeholder case, E20), and an opt-in `wait_for` mode
    that matches against logical (joined) lines using it. **M** (after 2; parallel with 4)
 4. **Modes:** a sorted set and the three new tokens (`?1002`, `?1003`, `?1005`), with the exclusivity rules of 3.6 and a
    test. **S** (parallel with 3)
 5. **Conformance data** (section 5.4): `tests/fixtures/conformance/expected/`, the exact-comparison test, the width
-   sample and the test that runs it through the emulator, the escape-set data, the CI guard, the `snapshot` commit
-   scope in commitlint and the release-plz changelog groups. **M** (after 2 and 4)
+   sample and the test that runs it through the emulator, the escape-set data, a test that fails if the reported
+   vocabulary of 3.8 changes without a `SEMANTICS_VERSION` change, the CI guard for the frozen files, the `snapshot`
+   commit scope in commitlint and the release-plz changelog groups. **M** (after 2 and 4)
 6. **The golden library:** a module that parses, writes, compares and reports **composite** goldens (screen blocks,
    shared and per-screen masks and ignores, position pairing, `name`), with the region evaluation of 6.5, the regex
-   dialect (an ASCII-rewriting layer over a regex engine plus the rejection parser of 6.7), the vocabulary handling of
-   4.1, the version logic and the semantics table of 6.8, and the reports of 6.9 (text and JSON, per-screen). **L**
-   (after 2; the largest item)
-7. **The run command** (replaces the four `golden` subcommands of the previous draft by one runner with modes):
-   `--expect` (check), `--update[=record|restamp|vocab]`, `--screen`, `--snapshot`, `--portable`, `--format`,
-   `--fail-fast`, `--max-mismatches`, `--strict-semantics`, `--accept-semantics`, `--accept-vocab`; the four sources
-   of 6.11, including the **new combination** `--connect` with `--script`; the table of illegal combinations with its
-   messages; whole-script validation before the program starts; the 80x24 default; headless behaviour; the exit codes
-   of 6.10 and a test that every bad option exits 64 and a refusal exits 2. **L** (after 6; it adds the script-runner
-   integration that the four small subcommands did not need, and is one command with five code paths instead of four
-   thin ones: sized up from M)
+   dialect (an ASCII-rewriting layer over a regex engine plus the rejection parser of 6.7), the strict version logic of
+   6.8 (grammar above refused, `schema` and `semantics` must equal the build's, `unknown` refused) and the reports of
+   6.9 (text and JSON, per-screen). There is no vocabulary handling, no compare-anyway path and no second schema reader.
+   **L** (after 2; the largest item)
+7. **The run command:** `--expect` (check), `--update` and `--update=record`, `--update=restamp`, `--screen`,
+   `--snapshot`, `--portable`, `--format`, `--fail-fast`, `--max-mismatches`; the four sources of 6.11, including the
+   **new combination** `--connect` with `--script`; the table of illegal combinations with its messages; the **CI guard
+   on `--update`** (OD18) and the change summary it prints; whole-script validation before the program starts; the 80x24
+   default; headless behaviour; the exit codes of 6.10 and a test that every bad option exits 64 and a refusal exits 2.
+   `--update=migrate` is rejected as "not available in this release". **L** (after 6; it replaces what was four
+   subcommands by one runner that integrates the script runner, with fewer code paths than before: no strict/accept/
+   vocab options)
 8. **A timed-out `wait_for` fails the run** (OD12): the runner change in `src/client.rs` (exit 1, the stderr message,
    the `optional` field, the `wait` mismatch kind), accepting `name` on `snapshot`, and the tests of every existing
    script test that relied on exit 0. **S** (with 7; it is the same code path)
-9. **Test vectors** (appendix A): about 40 region/mask/assert triples, about 20 composite and pairing vectors, about 25
-   command-line vectors, the 46 regex vectors, the round-trip files, and a runner test; confirm that a second
-   implementation (TinyFugue's checker) passes them. **M** (written alongside 6 and 7; the triples are the acceptance
-   test for them)
-10. **`--update=migrate`** for schema 1 snapshots and grammar 0 goldens (5.3). **M** (no later than the first schema or
-    grammar bump; may follow 0.1.0)
+9. **Test vectors** (appendix A): the region/mask/assert triples, the composite and pairing vectors, the command-line
+   vectors (including schema and semantics refusal, restamp success and refusal, the CI guard), the regex vectors, the
+   round-trip files, and a runner test; confirm that a second implementation (TinyFugue's checker) passes them. **M**
+   (written alongside 6 and 7; the triples are the acceptance test for them)
+10. **`--update=migrate`** (5.3). **M**, **not in 0.1.0** (OD7): it follows no later than the first schema or grammar
+    bump, with that bump's migration table and vectors. There is nothing to migrate from at 0.1.0.
 11. **Documentation:** the golden spec promoted to `docs/guide/golden-format.md`, the run command into
     `docs/guide/cli-reference.md` and `docs/guide/testing-tuis.md`, `docs/guide/snapshot-semantics.md` created with the
-    semantics 1 entry and the three known deviations, `protocol.md` and `versioning.md` updated, the platform table in
-    `windows.md`, `examples/`. **M** (after 7)
+    semantics 1 entry, the frozen vocabulary and the three known deviations, `protocol.md` and `versioning.md` updated,
+    the platform table in `windows.md`, `examples/`. **M** (after 7)
 12. **Platform CI:** a few repository goldens (one of them a multi-screen script run) checked on both Linux and Windows
     jobs, recorded with `--portable`. **S** (after 7)
-13. **Tell TinyFugue** the changes from their draft (below) before they record real goldens, and again when schema 2
-    lands on `main`. **S**
+13. **Tell TinyFugue** the changes from their draft (below), that their `vtee-golden 0` recordings and the
+    provisional snapshot shape are unsupported and are re-recorded, and the owner decisions that differ from their
+    review (OD3, OD4, OD8), before they record real goldens, and again when the shape lands on `main`. **S**
 
-The order is 1, 2, then 3 and 4 and 5 together, then 6, then 7, 8 and 9 together, then 11 and 12, with 10 free to
-follow. TinyFugue's recordings made under schema 1 are re-recorded after step 2 (they planned to re-record anyway).
+The order is 1, 2, then 3 and 4 and 5 together, then 6, then 7, 8 and 9 together, then 11 and 12, with 10 following the
+first bump. TinyFugue's recordings are re-recorded after step 2.
 
 ### Changes from TinyFugue's draft
 
@@ -1617,11 +1704,11 @@ follow. TinyFugue's recordings made under schema 1 are re-recorded after step 2 
 - `[text]` is cell-per-token with escapes (`\.`, `\u{H}`, `\+{H}`, `\\`); the draft joined the cells' `ch` values and had no
   rule for wide characters.
 - A golden holds one or more screens, always as `[screen N]` blocks: the draft's flat single-screen layout is now
-  `[screen 1]`. The header is split into a **file header** (versions, vocabulary, file-wide `ignore`) and a **screen
-  header** (`size`, `cursor`, `modes`, `alt_screen`, `title`, `wrapped`, `name`, screen `ignore`). A shared `[masks]`
-  section before the first screen applies to every screen.
-- Header: `semantics`, `vocab`, `wrapped`, `ignore`, `x-producer` added; `title` is `null` or a JSON string, and the
-  cursor line is `hidden=B`.
+  `[screen 1]`. The header is split into a **file header** (versions, file-wide `ignore`) and a **screen header**
+  (`size`, `cursor`, `modes`, `alt_screen`, `title`, `wrapped`, `name`, screen `ignore`). A shared `[masks]` section
+  before the first screen applies to every screen.
+- Header: `schema`, `semantics`, `wrapped`, `ignore`, `x-producer` added (there is no vocabulary header); `title` is
+  `null` or a JSON string, and the cursor line is `hidden=B`.
 - `modes-ignore` and `title-ignore` became `ignore modes ...` and `ignore title`; `ignore attrs` and the cursor forms
   are new.
 - Regex classes are ASCII-only, `$` anchors to the last visible character of the searched cells, and a rejection list
@@ -1630,20 +1717,23 @@ follow. TinyFugue's recordings made under schema 1 are re-recorded after step 2 
   assertion rules are the pseudocode of 6.5.
 - The tooling is one command, not a checker script: `vtee --script S --expect G -- APP` to check, `--update` to
   record, instead of a prototype `golden.py check`.
-- The grammar number is `vtee-golden 1`; the draft's `vtee-golden 0` is read by `--update=migrate`.
+- The grammar number is `vtee-golden 1`; the draft's `vtee-golden 0` was never released and is **unsupported**: it
+  is rejected, and those goldens are re-recorded (OD1).
 
 ## 10. Deferred, with the additive path reserved
 
-Each path below was checked against the rule "an existing reader and an existing golden keep working unchanged".
+Each path below was checked against the rule "an existing JSON reader keeps working unchanged"; the last column of the
+table says whether it is also free for stored goldens. **Anything a golden compares is a `semantics_version` bump when
+it is first reported** (4.1, OD8): the reserved names of 3.8 are not free for goldens.
 
 | Item | Reserved name or path | Why it is additive | Why deferred |
 | --- | --- | --- | --- |
 | The inactive screen buffer | top-level `inactive` object with the same shape as the snapshot | A new optional field; goldens do not read it | The emulator cannot read it without destroying it |
 | Cell-level scrollback | `scrollback_cells` | A new optional field | No consumer yet |
-| Hyperlink ids | cell `hyperlink_id` | An optional cell field; a golden that does not declare `link` ids ignores it | Rare |
-| Blink, overline | cell `blink`, `overline` | New names in the attribute vocabulary; goldens compare only declared attributes (4.1) | Emulator support |
-| Focus reporting, alternate scroll, autowrap and other output-affecting modes, kitty keyboard flags | more tokens in `modes` (`?1004`, `?1007`, `?7`, ...) | New names in the mode vocabulary (4.1); an old golden passes with a `WARN vocab` | No consumer; `?1004` is also injected by ConPTY |
-| `cursor.pending_wrap` | cursor field, written only when true | A new optional field; the golden *grammar* gains a header field behind a new grammar number, and old goldens keep being read as before | Invisible today; no consumer |
+| Hyperlink ids | cell `hyperlink_id` | An optional cell field that JSON readers ignore. **Not free for goldens**: if goldens compare it, reporting it is a semantics bump | Rare |
+| Blink, overline | cell `blink`, `overline` | New attribute names. **Not free for goldens**: a semantics bump when first reported (4.1) | Emulator support |
+| Focus reporting, alternate scroll, autowrap and other output-affecting modes, kitty keyboard flags | more tokens in `modes` (`?1004`, `?1007`, `?7`, ...) | New mode tokens. **Not free for goldens**: a semantics bump when first reported; stored goldens are refused until restamped (4.1, OD8) | No consumer; `?1004` is also injected by ConPTY |
+| `cursor.pending_wrap` | cursor field, written only when true | A new optional field that JSON readers ignore; the golden *grammar* gains a header field behind a new grammar number. **Not free for goldens**: a semantics bump when first reported | Invisible today; no consumer |
 | A more compact row encoding | a `snapshot` request parameter, `"encoding":"runs"`, that returns `row_runs` **instead of** `cells` only when asked | The default reply is unchanged. (The first draft listed `row_runs` as a field; replacing `cells` by default would have been a schema bump, so the *request* is the reserved path) | Sparse cells already give 20 to 30 times; add only if measured to matter |
 | `snapshot` command parameters (`scrollback`, `lines`, a cell region) | optional request fields | Absent means today's reply | Each is additive |
 | Grapheme clustering | a different width model, behind `semantics_version` | **Not additive**: it changes meaning, so it is a semantics bump by the table in 4.1 | Changes meaning |
@@ -1666,7 +1756,7 @@ tests/fixtures/golden-vectors/
   README.md                         how to run the vectors; the version of this document they belong to
   runs/<id>-<name>/
       golden.golden                 the golden under test (one or more screens)
-      run.ndjson                    the actual screens, one snapshot document per line (schema 2)
+      run.ndjson                    the actual screens, one snapshot document per line (schema 1)
       args                          the options after `--expect golden.golden --snapshot run.ndjson`, one per line (may be empty)
       expected.txt                  the exact text report
       expected.json                 the exact JSON report
@@ -1716,18 +1806,18 @@ About 40, each pinning one rule of sections 6.5 to 6.8. The `runs/` directories 
 | R24 | assert-link-and-not-link | `link="..."` and `!link` |
 | R25 | assert-ulcolor-without-underline | a colour on a cell with no underline |
 | R26 | header-ignore-cursor-position-only | `ignore cursor.position` keeps shape and hidden compared |
-| R27 | vocab-undeclared-token-warns | a mode the golden does not declare: PASS with `WARN vocab` |
+| R27 | schema-lower-refused | a golden with a lower `schema`: exit 2, nothing compared, the message points to `--update=migrate` |
 | R28 | wrapped-mismatch-and-ignore | `wrapped` differs, then `ignore wrapped` |
 | R29 | size-mismatch-skips-cells-masks-asserts | only the `size` block (and header blocks) |
-| R30 | semantics-no-differences-warns | PASS, exit 0, `WARN semantics` |
-| R31 | semantics-differences-refused | REFUSED, exit 2, differences listed |
-| R32 | semantics-strict-refuses | `--strict-semantics`, nothing compared |
-| R33 | semantics-accept-differences-fail | `--accept-semantics`, exit 1 |
+| R30 | semantics-mismatch-refused-though-screens-equal | a different `semantics` number with identical screens: still REFUSED, exit 2, nothing compared (OD4) |
+| R31 | semantics-mismatch-refused-with-differences | a different `semantics` number with differing screens: the same refusal, no differences listed |
+| R32 | semantics-unknown-refused | `semantics unknown`: REFUSED, exit 2 |
+| R33 | snapshot-semantics-differs-from-golden | form (d): the snapshots' number differs from the golden's: REFUSED as the first screen is read |
 | R34 | schema-higher-refused | exit 2 |
-| R35 | vocab-unknown-token-refused | a declared token the reader does not know: exit 2 |
+| R35 | provisional-shape-snapshot-malformed | a snapshot of the pre-0.1.0 layout (says schema 1, no `semantics_version`): exit 65, "recorded before 0.1.0" |
 | R36 | crlf-accepted | the same golden with CRLF line endings passes |
 | R37 | portable-golden-passes-both | a `--portable` golden against a Linux and a ConPTY-shaped screen |
-| R38 | vocab-unknown-token-accepted | the same golden with `--accept-vocab`: PASS with `WARN vocab` |
+| R38 | grammar-0-golden-rejected | a first line `vtee-golden 0` (the unreleased draft): exit 65, unsupported (OD1) |
 
 **Composite, pairing and run-level vectors.** About 25 more, in the same `runs/` layout:
 
@@ -1760,21 +1850,24 @@ About 40, each pinning one rule of sections 6.5 to 6.8. The `runs/` directories 
 | W05 | other-replies-are-not-screens | `wait_exit` and `exit_status` replies in `run.ndjson` do not become screens |
 
 **Command-line vectors** (`cli/`, no run): one per row of the table of illegal combinations in 6.11 (about 14), plus
-`--strict-semantics` with `--accept-semantics`, an unknown `--update` mode, `--expect` with a missing golden (exit 66,
-message with the `--update` hint), a malformed golden (65), a missing script (66), and a bad flag exits 64 not 2.
+the CI guard (`CI=true` refuses `--update` with exit 64; `CI=true VTEE_ALLOW_UPDATE=1` allows it; `CI` unset or empty
+needs nothing; a check is never guarded), `--update=migrate` rejected as not available in this release (64), an unknown
+`--update` mode, `--expect` with a missing golden (exit 66, message with the `--update` hint), a malformed golden
+(65), a missing script (66), and a bad flag exits 64 not 2.
 
 **Update vectors** (`update/`): `--update` creating a file (`CREATED`, no masks); re-recording a screen and keeping
 masks, assertions and comments verbatim; adding a screen; dropping a screen (the message lists what it had); an
 `UNCHANGED` re-record produces an empty diff including `x-producer`; `--update` refusing to write after a timed-out
-wait (exit 1, `not written`); `--update --screen 2` rewriting one block; `--update=restamp` succeeding and refusing;
-`--update=vocab` replacing the vocabulary; `--update=migrate` on a grammar-0 file and a schema-1 file, with the unknown
-facts written as unknown, and on an up-to-date file (`UNCHANGED`).
+wait (exit 1, `not written`); `--update --screen 2` rewriting one block; `--update=restamp` succeeding (only the
+`semantics` line changes) and refusing (writes nothing, shows the differences); the change summary lines of `UPDATED`
+(cells changed, new screen, dropped screen). `--update=migrate` has no vectors at 0.1.0 (OD7): its vectors arrive with
+the first schema or grammar bump.
 
 The `reject/` files cover each rule of 6.13: BOM, lone CR, NUL, bad first line, missing and duplicated keys (in the file
 header and in a screen header), a key in the wrong header, unknown and duplicated sections, no `[screen]`, a wrong screen
 number, a `[text]` before the first `[screen]`, `[exit]`, a shared `[masks]` after a screen, wrong row count, bad label,
 `\.` at the start of a row and after `\.`, `\+` at the start of a row and after `\.`, a bad `\u{}`, overlapping runs, an
-empty run, a repeated token, an undeclared attribute, a comment in `[text]`, a region outside the size, a mask with
+empty run, a repeated token, an attribute outside the frozen vocabulary, `vtee-golden 0`, a comment in `[text]`, a region outside the size, a mask with
 nothing to do, `text="EXACT"` on several rows and with `find=`, a regex outside the dialect, a bad JSON string, a
 repeated token in a `mask` line, an empty `ignore modes`.
 
@@ -1784,10 +1877,8 @@ A 6 by 2 screen whose row 0 reads `ab 12 ` with the digits bold. The golden (one
 
 ```text
 vtee-golden 1
-schema 2
+schema 1
 semantics 1
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 
 [screen 1]
 size 6x2
@@ -1807,7 +1898,7 @@ title null
 mask row=0 cols=3-4 text=/[0-9]+/
 ```
 
-The mask is on line 22 of the file. The run (source (d)) is the single document of `run.ndjson`.
+The mask is on line 20 of the file. The run (source (d)) is the single document of `run.ndjson`.
 
 **R-a (pass, exit 0).** The actual screen's row 0 is `ab 99 ` with the `99` bold. Cells 0, 1, 2 and 5 equal the golden's; cells
 3 and 4 are masked for text, the span text `99` matches `^(?:[0-9]+)$`, and the bold attribute equals the stored one.
@@ -1818,13 +1909,13 @@ Report: `PASS g.golden (1 screen)`.
 ```text
 FAIL g.golden: 1 mismatch in 1 of 1 screen
 screen 1:
-  mask       golden line 22   mask row=0 cols=3-4 text=/[0-9]+/   row 0 col 3-4   actual 'x7' does not match
+  mask       golden line 20   mask row=0 cols=3-4 text=/[0-9]+/   row 0 col 3-4   actual 'x7' does not match
 ```
 
 and the JSON report:
 
 ```json
-{"golden":"g.golden","result":"fail","grammar":1,"schema":2,"semantics":1,"snapshot":{"schema":2,"semantics":1},"screens_expected":1,"screens_actual":1,"total":1,"shown":1,"run":[],"screens":[{"index":1,"name":null,"result":"fail","mismatches":[{"kind":"mask","line":22,"mask":"mask row=0 cols=3-4 text=/[0-9]+/","problem":"text","row":0,"col_start":3,"col_end":4,"actual":"x7"}]}],"warnings":[]}
+{"golden":"g.golden","result":"fail","grammar":1,"schema":1,"semantics":1,"snapshot":{"schema":1,"semantics":1},"screens_expected":1,"screens_actual":1,"total":1,"shown":1,"run":[],"screens":[{"index":1,"name":null,"result":"fail","mismatches":[{"kind":"mask","line":20,"mask":"mask row=0 cols=3-4 text=/[0-9]+/","problem":"text","row":0,"col_start":3,"col_end":4,"actual":"x7"}]}]}
 ```
 
 ### A.3 Regex vectors
@@ -1916,30 +2007,30 @@ decision and the reason are in the table.
 
 | Finding | Disposition | Reason and where it landed |
 | --- | --- | --- |
-| TF1 / FA-A1: additive vocabulary is not free for goldens | **Accepted; fixed differently from TF's proposal** | Both demonstrated the break. TF suggested treating newly reported things as semantics bumps; FA suggested self-describing goldens. FA's was chosen (OD8): additions stay additive, `WARN vocab` keeps the gap visible. 4.1, 6.2, 6.8 |
+| TF1 / FA-A1: additive vocabulary is not free for goldens | **Accepted; resolved as TF proposed** | Both demonstrated the break. TF suggested treating newly reported things as semantics bumps; FA suggested self-describing goldens. The earlier revision chose FA's; **the owner overrode it (OD8)**: every newly reported name is a semantics bump, there is no `vocab` header, and the 0.1.0 vocabulary is frozen in one table. 3.8, 4.1 |
 | TF2: report only specified for text | **Accepted** | An example and a JSON field table per kind; exit 65 for a malformed snapshot; NAME defined. 6.9, 6.10 |
 | TF3: region and mask evaluation ambiguous (a to g) | **Accepted** | Pseudocode and fixed answers: (a) one span per row, (b) whole-row text trims, explicit `cols=` keeps, (c) `find=` with `cols=` searches only those cells, (d) stale = no span in the whole range, (e) every match, (f) forms and free token order, (g) a match inside appended scalars covers the whole cell. 6.5, 6.6; vectors R01 to R25 |
 | TF4: JSON string literals have no canonical encoding | **Accepted** | 6.12 |
 | TF5: canonical form implied, reader strictness unstated | **Accepted, two points changed** | Blank-line rule, optional `[attrs]`, hex rules, comment rules, `ignore` merging, update's treatment of header comments, a must-reject list. TF wanted `\u{41}` and an unsorted `modes` line rejected; they are **accepted** (FA wanted `\u{H}` accepted too) because the meaning is the same and it keeps extending the escape set a canonical-form change. 6.1, 6.2, 6.3, 6.13 |
 | TF6: `x-producer` contradicts the empty-diff promise | **Accepted** | `update` rewrites it only when something else changes. 6.11 |
 | TF7: CRLF on Windows | **Accepted** | Readers accept CRLF, reject a BOM (both reviewers wanted the BOM rejected); `.gitattributes` advice. 6.1 |
-| TF8: migration mapping unwritten and lossy | **Accepted** | Table; migrate does not invent facts. 5.3 |
+| TF8: migration mapping unwritten and lossy | **Accepted as a rule; the table is withdrawn for 0.1.0** | `migrate` never invents facts. There is no mapping table because nothing before 0.1.0 is supported (OD1) and `migrate` ships with the first bump (OD7). 5.3 |
 | TF9 / FA-A3: conformance set does not cover width tables | **Accepted** | A frozen width sample of 1,062 scalars and the rule for upgrades. E19, 5.4, appendix B |
 | TF10: regex dialect is prose only | **Accepted** | Exact construct list, rejection list, ASCII rewriting, 46 vectors. 6.7, appendix A.3, E24 |
 | TF11: exit code 2 may collide with clap | **Checked: no collision** | `src/main.rs` maps every clap error to 64. A test is required. E25, 6.10 |
 | TF12: size mismatch and masks | **Accepted** | Masks and assertions are skipped too. 6.8 |
-| TF13: `--accept-semantics` with no differences | **Accepted** | Prints `WARN semantics`. 6.8 |
+| TF13: `--accept-semantics` with no differences | **Withdrawn** | The flag no longer exists: a semantics mismatch is always refused (OD4). 6.8 |
 | TF14: escape set gaps | **Accepted** | Defined by category rule, frozen from Unicode 15.1. 6.3, appendix B, E26 |
 | TF15: minor items | **Accepted** | 0-based stated (6); "1 mismatch" wording (6.9); the header key is `schema`, the JSON field `schema_version` (4.3, 6.2); `ignore cursor` split into position, shape, hidden (6.2); `ulcolor` without `underline` is meaningful (3.2, 6.6) |
 | TF: wrapped_rows is also set by a wide char pushed to the next row | **Accepted** | 3.2, E20 |
 | TF: `\\.` and `\.` look alike | **No change** | Parsing is unambiguous (the grammar is by token). 6.3 |
 | TF: `idx:1` and `rgb:#cd0000` are different values | **Stated as intentional** | 3.2 |
-| TF OD3 (state the window in time) | **Accepted** | OD3 |
-| TF OD4 (compare anyway) | **Accepted** | OD4, 6.8 |
-| TF OD7 (formats, write, check, update in 0.1.0) | **Accepted** | OD7 |
+| TF OD3 (state the window in time) | **Rejected by the owner** | No window at all: an older schema is refused at once (OD3). 5.3 |
+| TF OD4 (compare anyway) | **Rejected by the owner** | A semantics mismatch is always refused, with no override flag (OD4). 6.8 |
+| TF OD7 (formats, write, check, update in 0.1.0) | **Accepted**, in the run-command form | `--expect` and `--update` with `record` and `restamp`; `migrate` follows (OD7) |
 | FA-A2: platform list in 6.12 is wrong | **Accepted and re-measured on Windows 11** | DECKPAM is also absorbed, ConPTY injects `?1004h`, SGR 58 is garbled. E15 to E17, 6.14, OD10 |
-| FA-A4: `golden migrate` cannot produce a valid grammar-1 file | **Accepted** | `ignore wrapped`, `semantics unknown`, a shape rule. 5.3 |
-| FA-A5: grammar bumps fall under the two-minor refusal | **Accepted** | Readers support all grammar numbers up to their own. 4.3, 5.3 |
+| FA-A4: `golden migrate` cannot produce a valid grammar-1 file | **Accepted as a rule; deferred with `migrate`** | `ignore` for unrecoverable facts, `semantics unknown`. There is nothing to migrate from at 0.1.0 (OD1, OD7). 5.3 |
+| FA-A5: grammar bumps fall under the two-minor refusal | **Accepted; the window itself is gone** | There is no deprecation window (OD3). Readers support all *released* grammar numbers up to their own; whether that should be stricter is open question Q1. 4.3, 5.3, 8 |
 | FA-B: blank cell definition | **Accepted** | `ch == " "` exactly (E21). 3.4 |
 | FA-B: a single index where a range is allowed | **Accepted** | 6.5 |
 | FA-B: `\u{H}` accepted for any scalar | **Accepted** (TF opposed) | See TF5. 6.3 |
@@ -1952,7 +2043,7 @@ decision and the reason are in the table.
 | FA-C: `pending_wrap` is invisible | **Reserved** | 3.2, section 10 |
 | FA-C: `row_runs` is not additive | **Accepted** | Reserved as a request parameter instead. Section 10 |
 | FA-C: `underline` changes type under the same name | **Decided: keep the name** | Failure modes for readers that skip the version check argue for it. 3.2 |
-| FA OD1 to OD7 | **Agreed**, with the changes to OD3, OD4, OD5 and OD7 above | Section 8 |
+| FA OD1 to OD7 | **Agreed in the earlier revision; the owner overrode OD1, OD3 and OD4** | Schema stays 1, no window, always refuse. Section 8 |
 | FA-E: not verified (`wrapped_rows` live, Linux ConPTY equivalent, Windows vim and less) | **Open** | `wrapped_rows` is inferred from the emulator source (E20) and is verified when item 3 of section 9 is built |
 
 ### The run-and-compare model (owner change after the reviews)
@@ -1969,8 +2060,8 @@ subcommand family. These are the changes and their reasons; the earlier rows abo
 | `vtee golden write -o G ...` | `vtee ... --expect G --update` (creates the file if it is missing) |
 | `vtee golden update G ...` | `vtee ... --expect G --update` (keeps masks, assertions, comments, `ignore`) |
 | `golden update --restamp` | `--update=restamp` |
-| `golden update --refresh-vocab` | `--update=vocab` |
-| `vtee golden migrate FILE...` | `vtee --expect FILE --update=migrate` |
+| `golden update --refresh-vocab` | withdrawn: there is no vocabulary header (OD8) |
+| `vtee golden migrate FILE...` | `vtee --expect FILE --update=migrate` (ships no later than the first bump, OD7) |
 | `golden write --portable` | `--update --portable` |
 
 | Change | Disposition | Reason and where it landed |
@@ -1982,7 +2073,21 @@ subcommand family. These are the changes and their reasons; the earlier rows abo
 | No golden fields in script commands | **Accepted (owner)** | An optional `name` on `snapshot` and `optional` on `wait_for` are ignored by servers. 6.11 |
 | A timed-out `wait_for` fails a script | **Decided**, owner decision | E27 shows a script cannot fail today. 6.11, OD12 |
 | The four sources, the legality table and its messages | **Decided** | 6.11 |
-| Update modes `record`, `restamp`, `vocab`, `migrate` | **Decided**, owner decision | 6.11, OD16, OD17 |
+| Update modes `record`, `restamp`, `migrate` (`vocab` was withdrawn with OD8) | **Decided**, owner decision | 6.11, OD16, OD17 |
 | Whole-script validation and the 80x24 default under `--expect` | **Decided** | E28 and E31. 6.10, 6.11 |
 | The child's exit status as expected output | **Deferred; name `[exit]` reserved** | 6.11, section 10, OD14 |
 | The earlier reviews' test-vector, regex, escape-set and report requirements | **Carried over unchanged** | Appendices A and B were extended, not replaced, for composites, pairing, the command line and update modes |
+
+### The owner's final decisions (2026-10-10) and what they changed
+
+The owner answered the ten format questions and the new run-command questions one at a time (section 8, "Decisions").
+Four answers differ from this document's earlier recommendations and change findings above:
+
+| Decision | Effect on the earlier findings |
+| --- | --- |
+| OD1: the frozen shape keeps schema 1 | The provisional-schema-1 migration table is gone. Snapshots and goldens recorded before 0.1.0, including TinyFugue's `vtee-golden 0` draft and the provisional JSON shape, are unsupported; the provisional shape is rejected as malformed because it lacks `semantics_version`. TF8, FA-A4 |
+| OD3: no deprecation window | The 12-month rule and the second schema reader are removed; `migrate` is the only way forward for an older schema, and it follows the first bump. TF OD3, FA-A5 |
+| OD4: a semantics mismatch is always refused | `--accept-semantics`, `--strict-semantics` and the `WARN semantics` path are removed. `--update=restamp` is the cheap, safe remedy. TF13, TF OD4, FA OD4 |
+| OD8: every newly reported name is a semantics bump | The `vocab` header, `WARN vocab`, `--accept-vocab` and `--update=vocab` are removed. The 0.1.0 reported vocabulary is frozen in 3.8, and the reserved names (`?1004`, `?1007`, `blink`, `overline`, `hyperlink_id`, `pending_wrap`, ...) arrive with a bump each. TF1, FA-A1 |
+
+The other decisions (OD2, OD5 to OD7, OD9 to OD18) follow the earlier recommendations.
