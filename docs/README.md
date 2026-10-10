@@ -35,6 +35,7 @@ TUI*, then the *JSON protocol* and the *Examples*.
 | [Testing](development/testing.md) | Know what each test suite covers and what it needs |
 | [Continuous integration](development/ci.md) | See what CI runs and what is still unproven |
 | [Releasing](releasing.md) | Understand how version numbers and releases follow from commit messages |
+| [Snapshot and golden contract](design/snapshot-and-golden-contract.md) | Read the proposed long-lived snapshot and golden-file formats, their versioning and the stability promise (a design, not yet implemented) |
 
 ## History and planning
 
