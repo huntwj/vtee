@@ -8,27 +8,37 @@ aiming at and `architecture.md` for how the done parts work.
 
 State as of 2026-10-09. The core feature set works on Linux and Windows. What is left before calling it a beta:
 
-- [ ] **First CI run.** `.github/workflows/ci.yml` has never run on real runners; expect runner-specific fixes
-  (ConPTY on `windows-latest`, tools the Windows tests look up). See `development/ci.md`.
+- [x] **First CI run.** `.github/workflows/ci.yml` ran on real runners on 2026-10-09 and all six jobs passed
+  (lint, MSRV, and the fast and pty jobs on `ubuntu-latest` and `windows-latest`). See `development/ci.md`.
 - [ ] **A license.** None is chosen yet.
-- [ ] **Release automation.** Versions follow commit messages; the automation is described in `releasing.md`
-  and needs its first release to prove it.
-- [ ] **Test gaps** (`development/testing.md`): the full snapshot attribute set, the `redraw_sequence` round trip,
-  `--log` through the CLI, the config-file path, terminal restore after a signal, and write-policy enforcement on
-  read-only sockets.
+- [ ] **Release automation.** Versions follow commit messages; the automation is described in `releasing.md`. Its
+  first run failed with "GitHub Actions is not permitted to create or approve pull requests", so the repository
+  setting listed in `releasing.md` must be turned on before the first release PR can open.
+- [ ] **A live read-only socket rejecting writes.** `Command::authorize` has a table test over every policy and
+  command, but no integration test sends `send` to a read-only session and checks the error. The other test gaps
+  listed earlier (snapshot attributes, the `redraw_sequence` round trip, `--log` through the CLI, the config file,
+  terminal restore after a signal) now have tests.
 - [ ] **Mouse and bracketed-paste input.** The modes are tracked in snapshots; there is no way to send mouse or
-  paste events.
-- [ ] **Underline styles.** Curly and double underline are reported as plain underline.
+  paste events. On Windows ConPTY hides the mouse modes from the emulator (`guide/windows.md`).
+- [x] **Underline styles.** Snapshot cells carry `underline_style` (single, double, curly, dotted, dashed) and
+  `underline_color`; `underline` stays as the on/off flag.
 - [ ] **Both screen buffers.** Only the active buffer is exposed. Blocked by `alacritty_terminal` (see
   `decisions.md`, 2026-10-07).
 - [ ] **Richer wait conditions.** `wait_for` is a substring match on one screen line; there is no regular
-  expression, region or "screen unchanged" condition.
-- [ ] **Masking volatile regions** (a clock) for golden comparisons. Left to the caller so far.
+  expression, region, or match across a wrapped line. `exit_status` and `wait_exit` exist for the process itself.
+  A "screen unchanged" wait was deliberately not built (requirement 4).
+- [ ] **Masking volatile regions** (a clock) for golden comparisons. Left to the caller so far; a golden-file format
+  with masks and attribute checks is proposed but not built.
 - [ ] **Windows terminal-restore watchdog.** Nothing restores the console if the holder is force-killed.
-- [ ] **Windows `attach` console flags.** `attach` does not set the console's virtual-terminal input and output
-  modes; special keys are untested through it.
-- [ ] **Known defects.** `--listen=<path>` sessions are invisible to `ls` and `kill`; bare `attach` picks the most
-  recently *started* session, not the most recently active; `attach` does not refuse a non-terminal.
+- [x] **Windows `attach` console flags.** `RawModeGuard` sets `ENABLE_VIRTUAL_TERMINAL_INPUT` and
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and restores the original modes on drop and from the console control
+  handler. The output half is untestable under ConPTY (it is already on); a legacy `conhost` window is untested.
+- [x] **Known defects.** `--listen=<path>` sessions are visible to `ls` and `kill`; bare `attach` picks the session
+  attached to most recently; `attach` refuses a non-terminal.
+- [x] **Snapshot schema version.** Snapshots start with `"schema_version":1`; the policy is in `guide/protocol.md`.
+- [x] **Differential emulator tests.** 80 escape-sequence cases are compared with `avt` and `vt100`
+  (`development/testing.md`). Three deviations inherited from `alacritty_terminal` are accepted for 0.1.0 and listed
+  in `guide/protocol.md` ("Known terminal-emulation differences").
 
 Done: spawn and bidirectional forwarding, snapshots, raw log and replay, the JSON socket with write policies,
 named sessions with `attach`/`ls`/`kill`, several clients at once, terminal restore after `SIGTERM` and `SIGKILL` on

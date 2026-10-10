@@ -151,6 +151,8 @@ and kitty do, where xterm truncates.
 
 ## Known gaps
 
-The main untested areas are listed in the [roadmap](../roadmap.md#beta-readiness): the `redraw_sequence` round
-trip, `--log` through the CLI, the config-file path, terminal restore after a signal, and write-policy enforcement
-for read-only sockets. The differential tests now cover the per-cell attributes of the snapshot.
+The main untested area is listed in the [roadmap](../roadmap.md#beta-readiness): a live read-only socket rejecting
+`send`, `send_key` and `resize` (the policy table in `command.rs` is unit-tested, the wiring in `sockets.rs` is
+not). Snapshot fields, the `redraw_sequence` round trip, `--log` through the CLI, the config-file path and terminal
+restore after a signal are covered, and the differential tests cover the per-cell attributes of the snapshot.
+Windows has no test for a force-killed holder restoring the console, because nothing does.
