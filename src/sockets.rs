@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use crate::net::{UnixListener, UnixStream};
+use crate::net::{UnixListener, UnixStream, bind_private, peer_is_trusted};
 use crate::tap::LockExt;
 use crate::{Command, CommandResult, HumanPriority, ServeOptions, Tap, WritePolicy, snapshot};
 
@@ -54,20 +54,25 @@ pub(crate) fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::
     accept_loop(tap, path, move |tap, stream| serve_tty_connection(tap, stream, policy))
 }
 
-/// Binds `path` (removing a stale socket first) and runs a thread per accepted connection, up
-/// to `MAX_CONNECTIONS`; excess connections are dropped.
+/// Binds `path` (removing a stale socket first) as a mode-0600 socket and runs a thread per
+/// accepted connection, up to `MAX_CONNECTIONS`; excess connections are dropped, and so is any
+/// connection from a process that is neither this user nor root (the checks tmux makes).
 fn accept_loop(
     tap: Arc<Tap>,
     path: &Path,
     handler: impl Fn(&Tap, UnixStream) + Send + Sync + 'static,
 ) -> io::Result<()> {
     let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
+    let listener: UnixListener = bind_private(path)?;
     let live = Arc::new(AtomicUsize::new(0));
     let handler = Arc::new(handler);
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
+            if !peer_is_trusted(&stream) {
+                ::log::debug!("refused a connection from another user");
+                continue;
+            }
             let Some(slot) = ConnectionSlot::try_acquire(&live) else { continue };
             let (tap, handler) = (tap.clone(), handler.clone());
             thread::spawn(move || {

@@ -96,6 +96,7 @@ The roadmap has the full list: [docs/roadmap.md](docs/roadmap.md).
 - User guide: [getting started](docs/guide/getting-started.md), [CLI reference](docs/guide/cli-reference.md),
   [sessions](docs/guide/sessions.md), [JSON protocol](docs/guide/protocol.md),
   [driving a session as an AI agent](docs/guide/agents.md), [Windows](docs/guide/windows.md),
+  [security](docs/guide/security.md) (and [SECURITY.md](SECURITY.md) for reporting),
   [troubleshooting](docs/guide/troubleshooting.md).
 - Development: [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
   [testing](docs/development/testing.md), [CI](docs/development/ci.md),

@@ -718,3 +718,45 @@ come from `alacritty_terminal` 0.26.0 itself.
   Each would need a change in or around `alacritty_terminal` (an upstream fix or a vendored patch). All three are rare
   in real programs, so they are accepted for 0.1.0 and listed under "Known terminal-emulation differences" in
   `docs/guide/protocol.md`. The harness pins them: fixing one makes the test fail until its adjudication is removed.
+
+## 2026-10-09: socket access control matches tmux, no further
+
+**Decision.** Match tmux's level of access control and harden past it later only if needed. Before this, only the
+session directory protected the sockets; the socket files were never `chmod`ed and nothing checked who connected, so
+an explicit `--listen=<path>` in a loose directory with a permissive umask was reachable by other users.
+
+**What tmux does** (read in tmux's master branch on 2026-10-09: `server.c`, `tmux.c`, `server-acl.c`):
+- `make_label` creates the socket directory with `mkdir(base, S_IRWXU)` and, for an existing one, rejects a directory
+  whose owner is not the current user or that has group/other permission bits set, after `realpath`. vtee already
+  did this for its session directory.
+- `server_create_socket` sets a restrictive umask around `bind()`: `0600` for a non-default socket (`-S`) and `0640`
+  for the default one.
+- `server_accept` calls `server_acl_join`, which reads the peer's uid and admits only the server's own uid and root
+  unless `server-access` added others (optionally read-only). Everyone else gets "access not allowed".
+- Nothing separates processes of the same user: any of them can attach and send keys.
+
+**What vtee now does.**
+- Every socket is bound under umask `0177`, so mode `0600` even when the process umask is `000` and for explicit
+  `--listen` paths. The umask is changed under a lock and restored straight after `bind`, so there is no window with
+  looser permissions. (`tests/security.rs` checks the mode under umask 000.)
+- Linux, macOS and the BSDs: the peer uid is read on accept (`SO_PEERCRED` or `getpeereid`) and the connection is
+  closed unless it is the effective uid or 0. Unreadable credentials are refused. Other Unixes fall back to the
+  directory and file modes. (`tests/security.rs`: a client running as uid 54321 against a socket deliberately opened
+  to mode `0666` is closed while the owner is still served; it needs root and is skipped otherwise, and fails instead
+  of skipping when `VTEE_REQUIRE_TOOLS=1`.)
+- Not copied: `server-access`, the per-user allow list with read-only flags. It exists to share a session between
+  users, which vtee does not offer.
+- The write policies stay cooperative safety rails between processes of one user, as in tmux. See
+  `docs/guide/security.md`.
+
+**Windows.** AF_UNIX peers can be identified: `WSAIoctl(SIO_AF_UNIX_GETPEERPID)` on the accepted socket's raw handle
+returns the client's pid, which `OpenProcess`/`OpenProcessToken`/`GetTokenInformation(TokenUser)` turn into a user
+SID. The accept loop refuses a SID that is neither this user's nor SYSTEM (`S-1-5-18`, the stand-in for root).
+- Measured on Windows 11 (build 26300) through the `uds_windows` sockets: status 0 and the correct pid.
+  `SIO_AF_UNIX_GETPEERPID` is `0x58000100`, matching `windows-sys`. The ioctl leaves the returned byte count at 0 even
+  on success, so the code relies on the status and a non-zero pid, not on the count (a first version that required
+  4 bytes wrongly reported the ioctl as unsupported).
+- If the ioctl is unavailable the code allows the connection and relies on the per-user profile directory, since
+  refusing would break every connection on such a system. A peer whose process or token cannot be opened is refused.
+- Not testable here: a connection from a second user account, and from a process running elevated as the same user
+  (expected to be allowed; unverified). The decision itself (same SID or SYSTEM) is unit-tested with byte-string SIDs.
