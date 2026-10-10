@@ -4,3 +4,4 @@
 //! (section 6); this module is its reference implementation.
 
 pub mod escape;
+pub mod pattern;
