@@ -58,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
         timeout-minutes: 15
-      - run: cargo test --locked --lib --bins --test cli --test replay --test differential
+      - run: cargo test --locked --lib --bins --test cli --test replay --test differential --test conformance --test golden_vectors --test expect --test goldens
         timeout-minutes: 15
       # `lint` does this on Linux; rustdoc output and warnings differ per platform (cfg-gated items).
       - if: matrix.os == 'windows-latest'
