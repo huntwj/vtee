@@ -82,6 +82,5 @@ documented in [docs/releasing.md](../releasing.md).
 
 ## Not covered yet
 
-Nothing checks supply-chain advisories (`cargo audit` would be the useful one; the vendored `portable-pty` is
-invisible to it). macOS is not built. The `msrv` job checks the library and tests build; it does not run them on
+Nothing checks supply-chain advisories (`cargo audit` would be the useful one). macOS is not built. The `msrv` job checks the library and tests build; it does not run them on
 the old toolchain.

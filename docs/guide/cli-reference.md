@@ -196,7 +196,6 @@ valid JSON, or an unknown command) makes `--connect` exit 65. See [error message
 | `LOCALAPPDATA` (Windows) | Parent of the session directory `vtee`. |
 | `XDG_CONFIG_HOME` (Linux) | Where the config file is looked for (`vtee/default-config.toml`). Falls back to `~/.config`. |
 | `APPDATA` (Windows) | Config file at `%APPDATA%\vtee\config\default-config.toml`. |
-| `VTEE_NEW_PROCESS_GROUP` (Windows) | Set to `1` to start the program in a new process group. Disables Ctrl-C for it. See [Windows](windows.md#ctrl-c). |
 
 ## Diagnostic log
 

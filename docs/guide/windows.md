@@ -76,18 +76,10 @@ Ctrl-C in an interactive session is delivered to the program. Two things have to
 `vtee` resets the process-wide setting that makes a child ignore Ctrl-C (a child inherits it from any ancestor
 started in a new process group), and it does not start the program in a new process group.
 
-A startup crash on some machines, `STATUS_CONTROL_C_EXIT` within milliseconds of spawning
-(upstream wezterm issue 7025), was originally avoided by starting the child in a new process group. That
-workaround is now off by default because it also disables Ctrl-C for the program, and the crash did not reproduce
-without it. If you do see that crash, set the variable to turn the workaround back on:
-
-```
-set VTEE_NEW_PROCESS_GROUP=1
-vtee.exe -- <program>
-```
-
-With it set, Ctrl-C no longer reaches the program in that session. Any value except `0` and the empty
-string turns the workaround on; leaving the variable unset, empty, or setting it to `0`, leaves it off.
+A startup crash on some machines, `STATUS_CONTROL_C_EXIT` within milliseconds of spawning (upstream wezterm issue
+7025), once led to starting the child in a new process group, which also disables Ctrl-C. The crash came from the
+unanswered startup query (see [Terminal queries](#terminal-queries)), not from the process group, so `vtee` no
+longer does that and there is no setting for it.
 
 ## Resize
 

@@ -819,3 +819,20 @@ combining "tee" and "tty" were avoided for that reason, and the README now lists
 history was rewritten the same day, so every commit, message and file name uses `vtee` and this entry is the only
 place that keeps the old name. **Not changed:** the local checkout folder name and third-party names. The GitHub
 repository still has to be renamed by the owner.
+
+## 2026-10-10: the vendored `portable-pty` patch is dropped
+
+The 2026-10-08 and 2026-10-09 entries describe a local copy of `portable-pty` 0.9.0 that added
+`CREATE_NEW_PROCESS_GROUP` to its `CreateProcessW` call, kept as `vendor/portable-pty/` and wired in through
+`[patch.crates-io]`. This entry removes it, along with the `VTEE_NEW_PROCESS_GROUP` opt-in.
+
+**Finding:** with `VTEE_NEW_PROCESS_GROUP` unset, the patched `CreateProcessW` call passes exactly the flags upstream
+does. The Windows startup fixes were vtee's own code: answering ConPTY's cursor-position query, and `Tap::spawn`
+restoring default Ctrl-C handling. The flag only ever mattered while the query went unanswered.
+
+**Evidence:** stock upstream `portable-pty` 0.9.0 from crates.io, with the patch removed, gave 0 failures in 350
+spawns (200 from Git Bash, 100 from Windows PowerShell 5.1, 50 with no console, each exiting 0 with the child's
+output present) and three consecutive clean runs of all the Windows test suites.
+
+**Consequence:** the escape hatch is gone, and the vendored crate no longer blocks publishing to crates.io, which
+does not allow `[patch]` entries to carry the build. Earlier entries are kept as history.

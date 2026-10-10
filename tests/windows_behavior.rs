@@ -309,12 +309,10 @@ fn resizing_the_outer_terminal_reaches_the_child() {
 
 // ---- (2) signals and termination --------------------------------------------------------------
 
-/// A Ctrl-C typed into the terminal interrupts the child, as under any other terminal. Two
-/// things used to prevent it: the child inherited an "ignore CTRL+C" attribute from whatever
-/// launched `vtee` (this test runner's own ancestry has it), and the vendored `portable-pty`
-/// patch created it with `CREATE_NEW_PROCESS_GROUP`, which Windows documents as disabling CTRL+C
-/// for the group. The CLI now restores the default at startup, and that flag is opt-in
-/// (`VTEE_NEW_PROCESS_GROUP=1`, `docs/decisions.md`, 2026-10-09).
+/// A Ctrl-C typed into the terminal interrupts the child, as under any other terminal. The
+/// child used to inherit an "ignore CTRL+C" attribute from whatever launched `vtee` (this test
+/// runner's own ancestry has it); the CLI now restores the default at startup
+/// (`docs/decisions.md`, 2026-10-09 and 2026-10-10).
 #[test]
 fn ctrl_c_ends_a_long_running_child_and_leaves_no_orphan() {
     let _guard = serial();
@@ -328,33 +326,6 @@ fn ctrl_c_ends_a_long_running_child_and_leaves_no_orphan() {
     kill_pids(&still_running);
     assert!(code.is_some(), "vtee didn't exit within 10s of Ctrl-C; output:\n{}", term.text());
     assert!(still_running.is_empty(), "Ctrl-C left ping.exe running: {still_running:?}");
-}
-
-/// The opt-in escape hatch for machines that hit wezterm#7025 still spawns and runs normally.
-#[test]
-fn the_new_process_group_opt_in_still_runs_children() {
-    let _guard = serial();
-    let script = unique_path("optin", "ndjson");
-    std::fs::write(
-        &script,
-        format!(
-            "{}
-",
-            wait_for_line("optin-works", 15000)
-        ),
-    )
-    .unwrap();
-    let output = assert_cmd::Command::cargo_bin("vtee")
-        .unwrap()
-        .env("VTEE_NEW_PROCESS_GROUP", "1")
-        .arg("--script")
-        .arg(&script)
-        .args(["--", "cmd", "/c", "echo", "optin-works"])
-        .timeout(Duration::from_secs(45))
-        .output()
-        .unwrap();
-    let _ = std::fs::remove_file(&script);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"matched\":true"), "{output:?}");
 }
 
 /// Documented outcome of force-killing the holder (the Windows analogue of the `SIGKILL` gap in

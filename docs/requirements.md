@@ -67,8 +67,7 @@ status to track per-requirement rather than as one blob.
    anything forwarded (the emulator reads a copy, never the original bytes). Terminal restoration now survives
    `SIGTERM` and `SIGKILL` too, not just normal exit and panic unwind (`architecture.md`), verified on a real pty.
 8. **Linux now, Windows later** (ConPTY).
-   **Met on both.** Linux was first. On Windows, a patch to `portable-pty` (`vendor/portable-pty/`,
-   `decisions.md`) fixed the original startup crash. The later intermittent hang turned out to be ours: ConPTY's
+   **Met on both.** Linux was first. On Windows, the original startup crash and the later intermittent hang were both ours, not `portable-pty`'s (`decisions.md`): ConPTY's
    startup cursor query went unanswered (a stdin read begun in cooked mode, or nobody to answer in
    `--script`/`--headless`). Raw mode now comes before the spawn and the tap answers the child's terminal queries
    when no human terminal can. Resize (console-size polling) and Ctrl-C work, and named sessions, `attach`, `ls`,
