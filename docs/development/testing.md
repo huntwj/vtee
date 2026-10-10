@@ -18,6 +18,7 @@ Counts and timings are from a run on 2026-10-09 and will drift. Windows timings 
 | `tests/windows_sessions.rs` | Windows | 18 | about 21 s | Sessions, `ls`, `kill`, duplicate names, both sockets, two clients, stale-file cleanup, and that the child does not inherit socket handles |
 | `tests/differential.rs` | both (4 resize cases Unix-only) | 1 test over 80 cases | under 1 s | Runs each escape-sequence case through vtee's emulator and compares every cell with two independent emulators; see [Differential emulator tests](#differential-emulator-tests) |
 | `tests/conformance.rs` | both (4 resize cases Unix-only) | 6, plus the ignored `bless` step on Unix | about 3 s | Whether vtee's own output moved: its snapshot for each of the 80 cases, the width sample, the reported vocabulary, the manifest that guards the files and the semantics changelog; see [Conformance tests](#conformance-tests) |
+| `tests/golden_vectors/` | both | 6, plus the ignored `bless` step | under 1 s | The golden library against the frozen test vectors: 66 checks with their exact reports, 77 malformed goldens, the canonical round trips, the regex dialect and the escape set, and the manifest that guards them; see [Golden vectors](#golden-vectors) |
 | `tests/windows_console.rs` | Windows | 2 | under 1 s | The console VT flags `RawModeGuard` sets and restores, and that an Up-arrow reaches the program as `ESC [ A` |
 
 The CLI tests run the real binary through `assert_cmd` and check what a user sees (exit code, output, files), not
@@ -169,6 +170,18 @@ cargo test --test conformance -- --ignored bless
 `bless` rewrites the expected files, the vocabulary and the manifest. It refuses to change a file the manifest records
 while `SEMANTICS_VERSION` is unchanged, so the bump cannot be skipped by regenerating. Review the diff of the fixtures
 like any other: it is the change in meaning you are about to ship. Commit it with the `snapshot` scope.
+
+## Golden vectors
+
+`src/golden/` reads, writes, compares and reports goldens ([design](../design/snapshot-and-golden-contract.md), section 6). `tests/fixtures/golden-vectors/` holds the reference data a second implementation of the checker passes to prove it agrees: checks with their exact text and JSON reports and exit codes (`runs/`), malformed goldens (`reject/`), canonical goldens that must read and write back unchanged (`roundtrip/`), the regex dialect (`regex/vectors.tsv`) and the escape set. Its `README.md` explains the layout.
+
+The files are generated from `tests/golden_vectors/defs.rs` and `more.rs`, and each definition states the verdict it must produce, so regenerating cannot record a wrong answer unnoticed:
+
+```
+cargo test --test golden_vectors -- --ignored bless
+```
+
+Like the conformance files they are frozen: `MANIFEST` records a hash of each and the `SEMANTICS_VERSION` they were written under, and `bless` refuses to change a recorded file while that number is unchanged. Adding a vector is not a change; changing one is a semantics bump.
 
 ## Reading a failure
 

@@ -851,3 +851,44 @@ The `release` job now has `id-token: write`, and `release-plz.toml` no longer se
 **Evidence:** release-plz 0.3.171 `update` on a clone computes `0.0.1 -> 0.1.0` with and without `git_only`; without it
 the registry's `vtee 0.0.1` is found. **Not tested:** the OIDC exchange and `release-plz release`; the first real run
 is the `0.1.0` release merge. See `docs/releasing.md`.
+
+## 2026-10-10: the golden library is built; where the design left a choice
+
+`src/golden/` implements design section 6 except the run command: reading and validating goldens (`Golden::parse`),
+the canonical writer and recording from snapshots (`Golden::to_text`, `Golden::record`, the `--portable` profile),
+comparison (pairing, masks, assertions, `--screen`, `--fail-fast`), the version logic (`Golden::check_build`, refusals
+with their way forward), the regex dialect, and the text and JSON reports (`check_saved`, `check_run`). The reference
+data is in `tests/fixtures/golden-vectors/` (66 checks, 77 malformed goldens, 4 canonical goldens, 46 regex vectors).
+The `cli/` and `update/` vectors, `--expect`, `--update`, the timed-out `wait_for` rule and `--input-policy` are not built.
+
+Where the design is silent or two of its sentences disagree, the conservative reading was taken:
+
+- **Blocks.** A `text` block is a contiguous run of differing cells in one row; an `attrs` block is a contiguous run of
+  cells with the same expected and actual attribute sets (the design's "a run of identical cell differences is one block").
+  Within a screen the report lists `name`, `size`, `cursor`, `modes`, `alt_screen`, `title`, `wrapped`, then, row by row,
+  `text` before `attrs`, then masks, then assertions. The design's example puts `name` before `size` and its prose after
+  it; the example was followed.
+- **Pattern delimiters.** A pattern ends at the first `/` that is not escaped, reading backslash pairs, so `\\/` ends
+  one. The design says "not preceded by a backslash", which would make a pattern ending in a literal backslash impossible.
+- **Dialect edges.** A bare `]` or `}` is a literal; a `{` that does not start `{m}`, `{m,}` or `{m,n}` is rejected (Rust's
+  `regex` and Python disagree about it); a `-` in the middle of a class must be escaped; an anchor cannot be repeated;
+  counts are at most 1000 (RE2's limit). Every literal is passed to the `regex` crate as `\x{H}`, so no engine escape rule
+  can leak into the dialect. `regex` becomes a direct dependency (it was already in the lock file).
+- **Saved output.** A reply may carry the `name` of the script's `snapshot` and, on a `wait_for`, `line`, `text`,
+  `timeout_ms` and `"optional":true`: the runner echoes them so a saved run checks the same as a live one. Without `line`
+  the input line number stands in for the script line.
+- **`--screen N`.** The report still says `K screens` for the golden's count and lists only the selected screen.
+- **Assertion reports.** For a `text` problem `failing_cells` counts failing spans and `col` is the first failing span's
+  first column; for an `attr` problem `expected` and `actual` are the violated conditions (`fg=idx:1`, `!bold`) and the
+  cell's values for them.
+- **`--fail-fast`.** Problems are ordered as the run met them: screen *i* when it is produced, a `wait_for` after the
+  screens before it, a wrong screen count at the end, shared masks last. Only the first is kept; later screens are skipped.
+- **Shared `find=` masks.** Staleness is judged over the screens that were compared (a size mismatch compares no cells);
+  if none was, nothing is judged.
+- **Reading.** Only `size` and `[screen N]` reject leading zeros. A second `[masks]` after a screen is that screen's
+  duplicate. A golden's cursor and `wrapped` rows must lie inside its screen, and its size is 1x1 to 1000x1000. A header
+  comment is rewritten after the `ignore` lines and before the `x-` lines.
+- **A refusal for a lower schema points at `--update=migrate`**, as the design says, although `migrate` is not available in
+  0.1.0; the line also offers a re-record. Revisit when the runner is built.
+- **The escape set** moved from `docs/design/` to `tests/fixtures/golden-vectors/escapes/escape-set.txt`, where the design's
+  vector layout puts it, and is compiled into the library.
