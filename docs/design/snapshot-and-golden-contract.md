@@ -1,9 +1,15 @@
 # Snapshot and golden contract (design)
 
-Status: **proposed, revised after two independent reviews, for owner decision before 0.1.0.** First written and
-revised 2026-10-10. When accepted, the normative parts (sections 3 to 6) move to the user guide and this page stays
-as the record of why. Nothing here is implemented yet except where a section says "today". The reviews and what was
-done with each finding are in appendix C.
+Status: **proposed, revised after two independent reviews and after the owner chose the run-and-compare test model,
+for owner decision before 0.1.0.** First written and revised 2026-10-10. When accepted, the normative parts (sections 3
+to 6) move to the user guide and this page stays as the record of why. Nothing here is implemented yet except where a
+section says "today". The reviews and what was done with each finding are in appendix C.
+
+**The test model.** A test is an app, an input and an expected output: `vtee --script flow.ndjson --expect
+flow.golden -- APP`. The script is the existing NDJSON script; each `snapshot` in it is a checkpoint; the screens a run
+produces, in order, are its output; a **golden** is the file holding the expected output (one or more screens). Check,
+record, restamp, re-vocabulary and migrate are all options of that one command (`--expect`, `--update[=MODE]`, 6.11).
+There is no `golden` subcommand: "golden" names the file kind and its extension.
 
 The snapshot JSON and the golden file format are a long-lived contract. A stored golden outlives any one `vtee`
 version (the TinyFugue project will use goldens for years, across Windows and Linux, to check a faithful port of tf), so
@@ -39,7 +45,7 @@ contract.
 | --- | --- |
 | Stored goldens (TinyFugue and others) | The golden grammar, `schema_version`, `semantics_version`, the declared vocabulary, and the meaning of every cell |
 | AI agents reading snapshots | Field names, types and defaults; `lines` as a convenient view |
-| Procedural tests in any language | The same, plus the exit codes of `vtee golden check` and its JSON report |
+| Procedural tests in any language | The same, plus the exit codes of an `--expect` run and its JSON report |
 | `vtee`'s own conformance set | The meaning of cells for the 80 escape-sequence cases and the width sample (section 5.4) |
 
 ## 2. What was measured
@@ -47,7 +53,8 @@ contract.
 These are the facts the decisions below rest on. Each was run on `main` (built natively on Windows 11 build 26300, and in
 the `vtee-test` Docker image for Linux) unless it cites TinyFugue's recorded screens
 (`tests/screens-draft/recorded/`, read-only) or an independent review. E1 to E14 are from the first draft and were
-reproduced by the reviewers; E15 to E26 were added in the revision.
+reproduced by the reviewers; E15 to E26 were added in the revision after the reviews, and E27 to E31 in the revision
+for the run-and-compare model.
 
 | # | Observation | How it was obtained |
 | --- | --- | --- |
@@ -75,8 +82,14 @@ reproduced by the reviewers; E15 to E26 were added in the revision.
 | E22 | `lines[r]` can have **more** scalars than `cols` (three `é` on a 3-column screen give 6 scalars), as well as fewer (a wide character adds a cell but one scalar). | Probe, Linux |
 | E23 | **NDJSON line splitting trap.** `serde_json` writes U+2028 and U+2029 (and U+0085) unescaped. Python's `str.splitlines()` splits on them, so a snapshot line containing one of them breaks a reader that is not splitting on LF alone. Found while building the width sample. | `JSONDecodeError: Unterminated string` from `width.py` |
 | E24 | **Regex engines differ.** Rust `regex` 1.x: `\d` matches U+0663, `\w` matches `é`, `\s` matches NBSP; `(?-u).` does not compile ("pattern can match invalid UTF-8"); `\b`, `(?i)`, `\x41`, `\p{L}` compile; look-around and back-references do not; `$` does not match before a trailing newline. Python 3.13 `re`: `\d`, `\w`, `\s` are Unicode by default, ASCII with `re.ASCII`; `$` also matches before a trailing newline; `finditer('a*','baa')` yields `(0,0)`, `(1,3)`, `(3,3)`. | Two scratch programs run in Docker |
-| E25 | **Usage errors exit 64.** `src/main.rs` lines 198 to 202 map every clap parse error to `exitcode::USAGE` (64); clap's own default of 2 is never used. A new `golden` subcommand goes through the same parser, so exit 2 is free for "refused". | Source |
+| E25 | **Usage errors exit 64.** `src/main.rs` lines 198 to 202 map every clap parse error to `exitcode::USAGE` (64); clap's own default of 2 is never used. The new `--expect` and `--update` options go through the same parser, so exit 2 is free for "refused". | Source |
 | E26 | **Unicode data for the escape set.** Python 3.13.5's `unicodedata` is Unicode 15.1.0. The categories of section 6.3 produce 876 ranges covering 966,490 scalars (almost all of them unassigned). | `escset.py` (scratch), output in appendix B |
+| E27 | **Today's `--script` cannot fail a test.** A `wait_for` that times out prints its reply with `"matched":false` and the run still exits **0**, on Linux and on Windows. A program that cannot be started exits **71** (`failed to spawn ...`); a missing script file exits **66** (`failed to open script ...`). | Added in the run-and-compare revision: `vtee --script ok.ndjson --cols 20 --rows 3 -- sh -c 'echo hello; sleep 2'` with a `wait_for` for text that never appears, in Docker; the same on Windows 11; `-- /no/such/prog`; `--script /no/such.ndjson` |
+| E28 | **A malformed script line stops the run late.** With `{"cmd":"snapshot"}`, `not json`, `{"cmd":"snapshot"}`, the first line runs and prints its reply, then the run stops with `vtee: bad command on script line 2: expected ident at line 1 column 2` and exit **65** (Linux and Windows). | Same runs |
+| E29 | **A program that exits early does not stop the script.** With `-- sh -c 'exit 7'` and a script of `wait_for "zzz"` then `snapshot`, the `wait_for` times out (`matched:false`), the `snapshot` still returns the final (blank) screen, and `vtee` exits **0**: the child's status is not propagated in script mode. `wait_exit` after `sh -c 'exit 3'` replies `{"cmd":"wait_exit","running":false,"code":3,"timed_out":false}`. | Same runs, Docker |
+| E30 | **What `--script` prints.** In JSON mode one line per reply: `{"cmd":"snapshot","snapshot":{...}}`, `{"cmd":"wait_for","matched":true,"snapshot":{...}}`, `{"cmd":"wait_exit",...}`; `send` prints nothing. With `--text` each result is `--- snapshot (byte_offset=N) ---` followed by the screen rows. Results go to standard output; errors to standard error. | Same runs |
+| E31 | **The terminal size default depends on the terminal.** `--cols`/`--rows` default to the invoking terminal's size, else 80x24, and apply to `--script` too; so a script run's output can depend on where it was run. | `vtee --help` text (not measured separately) |
+| E32 | **`--connect` silently ignores a program and `--script`.** `vtee --connect /tmp/none.sock --script ok.ndjson` and `vtee --connect /tmp/none.sock -- cmd` both go straight to connecting (and fail to connect); neither the script nor the program is looked at, and the parser reports no conflict. A script without a program says `vtee: a command is required`. | Same binary, Windows 11 |
 
 ## 3. The snapshot schema, decided
 
@@ -147,7 +160,7 @@ Today's shape is `schema_version` 1 on `main`. The right-hand column is the deci
 | `alt_screen` | boolean | Cannot express both buffers | Keep. It means "the active screen is the alternate one". The inactive buffer is reserved as `inactive` (section 10). |
 | `title` | string or null | ConPTY sets one where Linux does not (E4) | Keep. From OSC 0 and 2 only; `null` when never set or reset. Platform difference is handled by the golden directive `ignore title`. |
 | `scrollback` | strings, oldest first, text only | Large (up to 10,000 rows by the emulator's default); not part of the screen | Keep as informational, bounded by the emulator's history. Not compared by goldens. Cell-level history is reserved as `scrollback_cells`. |
-| `producer` | absent | Debugging needs to know the build; but it must not become part of the contract | **New**: `{"vtee": "...", "emulator": "..."}`. Informational only: no reader may depend on it and `golden check` never fails on it. |
+| `producer` | absent | Debugging needs to know the build; but it must not become part of the contract | **New**: `{"vtee": "...", "emulator": "..."}`. Informational only: no reader may depend on it and a check never fails on it. |
 
 ### 3.3 Sparse cells
 
@@ -246,13 +259,13 @@ Two numbers describe a snapshot, and a third describes what a golden declares it
 | the golden's declared **vocabulary** | **What the golden checks**: the mode tokens and cell attributes it was written knowing about | A newer `vtee` can report more; the golden does not change, and does not fail (4.1) |
 
 Schema 2 and semantics 1 are the values at the 0.1.0 freeze. Schema 1 is the provisional shape that exists on `main`
-today; it was never released, and it is readable only by `golden migrate` (section 5.3). The number is bumped to 2 so
+today; it was never released, and it is readable only through `--update=migrate` (section 5.3). The number is bumped to 2 so
 that anything recorded against the provisional shape, including TinyFugue's recordings, is identifiable.
 
 ### 4.1 What bumps what
 
 The first draft said that adding a mode token or an attribute needs no bump because old goldens "simply do not contain
-it". Both reviews showed that this is false: `golden check` compares `modes` as a set and cells as full attribute sets,
+it". Both reviews showed that this is false: a check run compares `modes` as a set and cells as full attribute sets,
 so an old golden **fails** against a snapshot that reports the addition (demonstrated: expected `?1 DECKPAM`, actual
 `?1 ?1004 DECKPAM`, exit 1, even with `ignore modes ?1 ?1000 ?1006`). Two repairs were considered.
 
@@ -263,7 +276,7 @@ so an old golden **fails** against a snapshot that reports the addition (demonst
    addition is then genuinely additive: an old golden keeps passing and says so; only the author who wants the new
    thing checked re-records. The cost is two header lines and a rule in the checker, and the risk that a golden
    silently does not check something new, which the checker mitigates with a warning (`WARN vocab`, section 6.9) and
-   `golden update --refresh-vocab`.
+   `--update=vocab`.
 
 **Decision: option 2** (owner decision OD8 records the alternative). The table that follows uses it.
 
@@ -300,7 +313,7 @@ and `semantics` the golden was recorded under, and the vocabulary (`vocab modes 
    unknown header key as an error (section 6.2).
 2. A snapshot or golden whose schema number is **higher** than the reader supports is refused, never partly read.
 3. A golden whose `schema` is **lower** than the reader's current one is read through the migration path while the
-   deprecation window lasts (section 5.3) and refused after it, with a pointer to `golden migrate`.
+   deprecation window lasts (section 5.3) and refused after it, with a pointer to `--update=migrate`.
 4. A golden whose `semantics` differs from the snapshot's is **compared anyway**: identical results pass with a
    visible `WARN semantics`, different results are refused (exit 2) with the differences shown. Details and the two
    flags that change this are in section 6.8.
@@ -326,7 +339,7 @@ each listed precisely.
 
 - The schema 2 field names, types, defaults and meanings of section 3.
 - The golden grammar of section 6: the file syntax, the header keys, the escape set (section 6.3 and appendix B), the
-  region and comparison rules, the regex dialect, the report shapes and the exit codes of `vtee golden check`.
+  region and comparison rules, the regex dialect, the report shapes, the exit codes and the run command of 6.11 (`--expect`, `--update`).
 - The rules of section 4.1, including the vocabulary rule.
 - The semantics of the frozen data of section 5.4 at semantics 1: the 80 escape-sequence cases, the width sample and
   the test vectors.
@@ -343,10 +356,10 @@ unrestricted so long as the frozen data does not change.
 - **Schema numbers.** When a new schema number ships, the previous one stays readable for at least **12 months** from
   that release, and until the next major version if that is later. After the window readers refuse it and say which
   release last supported it. The window is stated in time because two minor releases can be two weeks apart in 0.x.
-- **`golden migrate` is kept for every released schema and grammar, with no end date.** A golden can always be moved
+- **`--update=migrate` is kept for every released schema and grammar, with no end date.** A golden can always be moved
   forward or re-recorded; a window only limits how long the *checker* reads the old form directly.
 - **Grammar numbers.** A reader supports all grammar numbers up to its own (section 4.3, rule 8).
-- `vtee golden migrate FILE...` converts mechanically between layouts and **never invents facts**. Where a fact is
+- `vtee --expect FILE --update=migrate` converts mechanically between layouts and **never invents facts**. Where a fact is
   not recoverable it is written as unknown (table below), so the migrated golden is honest about what it no longer
   verifies.
 
@@ -362,10 +375,11 @@ unrestricted so long as the frozen data does not change.
 | rows soft-wrapped | **not recoverable** | `ignore wrapped` is added |
 | `semantics` | `semantics unknown` | not recoverable |
 | `vocab` | the vocabulary the old schema could report | so nothing new is compared |
+| a grammar 0 file (TinyFugue's flat draft: one screen, header and sections in one scope) | a grammar 1 composite with `[screen 1]` | exact; the draft's `modes-ignore` and `title-ignore` become `ignore modes ...` and `ignore title` |
 
-- For a **semantics** difference there is no migration, because the meaning changed, not the layout. `golden check`
+- For a **semantics** difference there is no migration, because the meaning changed, not the layout. A check
   compares anyway (section 6.8) and the changelog says which inputs are affected; a reviewer re-records with
-  `golden update`, or confirms the difference does not matter with `golden update --restamp`.
+  `--update`, or confirms the difference does not matter with `--update=restamp`.
 
 ### 5.4 The frozen conformance data
 
@@ -384,7 +398,7 @@ Four sets of files are reference data. They are what makes "a stored golden stil
 3. **The escape set** (appendix B): the exact scalar ranges a writer escapes in a golden. It is data, not a function of
    the tool's own Unicode tables.
 4. **The test vectors** (appendix A): golden, snapshot, expected verdict and report triples; regex vectors; round-trip
-   files. They let a second implementation of `golden check` in another language prove it agrees.
+   files. They let a second implementation of the checker, in another language, prove it agrees.
 
 **The frozen data is the contract:** behaviour that no case exercises is not promised. When a consumer finds output that
 matters and is not covered, we add a case (which is not a bump) and from then on the output is frozen. The rules:
@@ -404,11 +418,22 @@ matters and is not covered, we add a case (which is not a bump) and from then on
 The differential oracles and `adjudications.json` stay as they are: they answer "is vtee right?", while the
 conformance files answer "did vtee change?".
 
-## 6. The golden file format, version 1
+## 6. The golden file format and the run command, version 1
 
-A golden is a text file describing one screen, with the volatile parts declared. It is **normative** for the
-`vtee-golden 1` grammar. Words in capitals in a grammar line are placeholders; `[x]` is optional. All row and column
-indices are **0-based**, like `cursor.row` and `cursor.col` in the snapshot.
+A golden is a text file holding the **expected output of a run**: the screens that a test script snapshots, in order,
+with the volatile parts declared. A test is three things, `app + input + expected output`:
+
+```
+vtee --script flow.ndjson --expect flow.golden -- tf          check (the default)
+vtee --script flow.ndjson --expect flow.golden --update -- tf  record, or re-record
+```
+
+The script is the existing NDJSON script and is not changed: each `snapshot` command in it is a checkpoint, and the
+screens the run produces, in order, are its output. There is no `golden` command: "golden" names the file kind and its
+extension, and everything that creates, updates, checks or migrates one is an option of the single run command
+(6.11). This section is **normative** for the `vtee-golden 1` grammar and the run command. Words in capitals in a
+grammar line are placeholders; `[x]` is optional. All row and column indices are **0-based**, like `cursor.row` and
+`cursor.col` in the snapshot; screens are numbered from **1**, in the order the run produced them.
 
 ### 6.1 File syntax
 
@@ -417,60 +442,99 @@ indices are **0-based**, like `cursor.row` and `cursor.col` in the snapshot.
   git's `autocrlf` and Windows editors change line endings silently and outside the author's control, and a carriage
   return cannot otherwise appear in a line (a CR in cell text is written `\u{d}`, in a JSON string `\r`). A CR anywhere
   else, a NUL byte, or invalid UTF-8 is an error. Repositories should still say `*.golden text eol=lf` in
-  `.gitattributes`; `golden update` writes LF and so shows the change.
+  `.gitattributes`; `--update` writes LF and so shows the change.
 - **Readers reject a leading byte order mark** with a message that names it and says to remove it. Unlike a line
   ending, a BOM is added only by a deliberate save in an editor, `vtee` never writes one, and accepting it would let
   two files that differ in their first bytes mean the same thing.
-- Line oriented. A line `[name]` starts a section. Lines before the first section are the **header**.
-- A line whose first character is `#` is a comment. Comments are allowed in the header, in `[masks]` and in
+- Line oriented. A line `[name]` starts a section. Lines before the first section are the **file header**.
+- A line whose first character is `#` is a comment. Comments are allowed in both headers, in `[masks]` and in
   `[assert]`; they are not allowed in `[text]` or `[attrs]`, whose content is regenerated (an error there).
 - Blank lines are ignored everywhere. They cannot be mistaken for rows, because a `[text]` row always contains `|`.
   Writers emit exactly one blank line before each section.
-- Sections, in the writer's order: `[text]` (required), `[attrs]`, `[masks]`, `[assert]` (each optional). A writer omits
-  `[attrs]` when no cell has a non-default attribute; a reader treats an absent or empty `[attrs]` the same. A reader
-  accepts the sections in any order; a section appearing twice or an unknown section name is an error.
 - Trailing whitespace on header, `[attrs]`, `[masks]` and `[assert]` lines is ignored by readers and never written.
   In `[text]` a literal space is a blank cell (6.3).
 
-### 6.2 Header
+**The shape of a file.** A golden always has this shape, even when it holds one screen:
 
-One `key value` pair per line. The first line must be `vtee-golden N`; the other lines may come in any order
-(duplicates are an error except for `ignore` and `x-` keys). The writer's order:
+```
+FILE      =  FILE-HEADER  [ "[masks]" ... ]  SCREEN { SCREEN }
+SCREEN    =  "[screen N]"  SCREEN-HEADER  "[text]" ...  [ "[attrs]" ... ]  [ "[masks]" ... ]  [ "[assert]" ... ]
+```
+
+- The **file header** (6.2) holds what is true of the whole run: the versions, the vocabulary, `ignore` directives that
+  apply to every screen.
+- A `[masks]` section **before the first `[screen]`** is the **shared** mask list: it applies to every screen (6.5).
+- `[screen N]` starts a screen block. `N` is the screen's 1-based position and **must equal** the number of screen
+  blocks so far plus one, like a row label (a reader checks it; it makes a reordered or half-merged file an error and a
+  diff readable). A file has at least one screen block.
+- A screen block has its own **screen header** (the lines up to its first section), then `[text]` (required), and
+  `[attrs]`, `[masks]`, `[assert]` (each optional, each at most once per screen, in any order). A writer omits `[attrs]`
+  when no cell of the screen has a non-default attribute; a reader treats an absent and an empty `[attrs]` the same.
+  The sections after a `[screen N]` line belong to that screen until the next `[screen]` line.
+- **Errors:** a section outside this shape (a `[text]`, `[attrs]` or `[assert]` before the first `[screen]`; two shared
+  `[masks]`; two of the same section in a screen), an unknown section name, a screen header key in the file header or
+  a file header key in a screen header, and the **reserved** section names `[exit]` and `[screen]` without a number.
+
+*Why a one-screen golden is a composite of one.* The first draft of this section described one screen with a flat
+layout, and the run-and-compare model needs several. Two shapes (flat for one screen, blocks for more) would mean two
+parsers, two canonical forms, and a conversion the day a second checkpoint is added to a script, and a conversion is
+a rewrite of a stored file. One shape costs one extra line (`[screen 1]`) and a small header split; because nothing
+has been released, nothing needs migrating, and no grammar number is spent later. Anything recorded in the flat layout
+of TinyFugue's draft (`vtee-golden 0`) is read by `--update=migrate` (5.3).
+
+### 6.2 File header and screen header
+
+One `key value` pair per line. The first line of the file must be `vtee-golden N`; the other lines of each header may
+come in any order (duplicates are an error except for `ignore` and `x-` keys). The writer's order, for the **file
+header**:
 
 ```
 vtee-golden 1                      required, first line
 schema 2                             required: the snapshot schema the golden was recorded under
 semantics 1                          required: an integer, or the word unknown
+vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM      required: the mode tokens this golden knows about
+vocab attrs bold dim italic reverse strike conceal underline ulcolor link   required: the attributes it knows about
+ignore modes ?1 ?1000                optional, repeatable; applies to every screen; see below
+ignore title
+x-producer vtee 0.1.0 alacritty_terminal 0.26.0     advisory
+```
+
+and for each **screen header** (the lines after `[screen N]`):
+
+```
 size 80x24                           required: columns x rows
 cursor row=22 col=19 shape=block hidden=false      required
 modes ?1 DECKPAM                     required: zero or more tokens, space separated (a bare `modes` for none)
 alt_screen true                      required: true or false
 title null                           required: null or a JSON string literal, "my title"
-wrapped 3 4                          optional: row indices that soft-wrap (omitted when none)
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM      required: the mode tokens this golden knows about
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link   required: the attributes it knows about
-ignore modes ?1 ?1000                optional, repeatable; see below
-ignore title
-x-producer vtee 0.1.0 alacritty_terminal 0.26.0     advisory
+wrapped 22                           optional: row indices that soft-wrap (omitted when none)
+name "long-line"                     optional: a JSON string, the checkpoint's label (6.8)
+ignore wrapped                       optional, repeatable; applies to this screen only
 ```
 
 - **`vocab`** is what makes additions additive (section 4.1). The writer records the full vocabulary of the tool that
-  wrote the golden, whether or not the screen uses each token. The checker compares only declared tokens: `modes` are
+  wrote the golden, whether or not the screens use each token. The checker compares only declared tokens: `modes` are
   compared after both sides are restricted to the declared mode tokens, and cell attributes after both sides are
   restricted to the declared attributes (`fg` and `bg` are core and always compared). A token the snapshot reports that
-  the golden does not declare is ignored and produces `WARN vocab modes ?NNNN` in the report; it does not fail. The
-  `modes` line of the header lists only tokens that are in `vocab modes` (a token outside it is an error, 6.13).
+  the golden does not declare is ignored and produces `WARN vocab modes ?NNNN` in the report; it does not fail. A
+  `modes` line lists only tokens that are in `vocab modes` (a token outside it is an error, 6.13). The vocabulary is
+  per file, not per screen: all screens of a run were recorded by one tool.
 - **`ignore`** names a part the check skips: `ignore title`, `ignore alt_screen`, `ignore wrapped`,
   `ignore cursor` (all of position, shape and hidden), `ignore cursor.position`, `ignore cursor.shape`,
   `ignore cursor.hidden`, `ignore modes TOKEN...` (the listed tokens are removed from both sides) and
   `ignore attrs NAME...` (the listed attributes, including `fg` and `bg`, are removed from every cell comparison; the
   cell *text* is still compared). Several `ignore` lines for the same part are merged. `ignore modes` without a token
-  is an error.
-- A key beginning with `x-` is informational and ignored. **Any other unknown key is an error**, so a golden written by
-  a newer tool that adds a directive changing comparison can never be silently misread.
+  is an error. **Scope:** an `ignore` in the file header applies to every screen; an `ignore` in a screen header applies
+  to that screen; a screen ignores the **union** of both. There is no way to cancel a file-level `ignore` in one
+  screen; an `ignore` that only some screens need belongs in those screens' headers.
+- A key beginning with `x-` is informational and ignored, in either header. **Any other unknown key is an error**, so a
+  golden written by a newer tool that adds a directive changing comparison can never be silently misread. A key in
+  the wrong header (`size` in the file header, `schema` in a screen header) is an error.
 - `byte_offset` and `scrollback` are never stored.
 - `wrapped` lists the rows whose last cell wraps into the next row (`wrapped_rows` in the snapshot). Order is not
   significant to a reader; writers sort ascending.
+- `name` is a label for the checkpoint, written when the script gave the `snapshot` command a `name`. Names are not
+  required to be unique. They are compared only when both sides have one (6.8).
 - `title` uses the JSON string syntax of section 6.12.
 - `cursor` always carries all four fields. `size` is `WxH` in decimal with no leading zeros.
 
@@ -528,8 +592,8 @@ Lists the cells whose attributes are not all default, as **runs**: `ROW: SPAN TO
 
 ### 6.5 Regions and `[masks]`
 
-A mask relaxes the comparison for a region. Everything outside every mask is compared in full: text and attributes
-(restricted to the declared, un-ignored attributes).
+A mask relaxes the comparison for a region of a screen. Everything outside every mask is compared in full: text and
+attributes (restricted to the declared, un-ignored attributes).
 
 ```
 mask REGION [text=ignore | text=/RE/] [attrs=ignore]
@@ -540,9 +604,18 @@ COLS    =  cols=N | cols=N-M
 
 Tokens after the keyword (`mask` or `assert`) may appear in any order, and each may appear once. A mask must say at
 least one of `text=` or `attrs=ignore`. `row=` and `rows=` are the same. `N <= M`. All indices must lie inside the
-golden's `size` (checked when the golden is read: an error, exit 65, otherwise).
+screen's `size` (checked when the golden is read: an error, exit 65, otherwise).
 
-**Evaluation.** The definitions are normative; the pseudocode is the intended algorithm.
+**Scope: shared and per-screen masks.** A `[masks]` section before the first `[screen]` is **shared** and applies to
+every screen; a `[masks]` section inside a screen block applies to that screen. A screen is masked by the **union** of
+both lists, and where regions overlap a part is skipped if any covering mask skips it (below). There is no negation: a
+per-screen mask cannot cancel a shared one, because that would make the effect of a line depend on where in the file
+it sits. A mask that only some screens need belongs in those screens. A shared mask whose region is given by rows and
+columns must lie inside the size of **every** screen (an error otherwise); a shared mask that must follow a layout
+that differs per screen uses `find=`.
+
+**Evaluation.** The definitions are normative; the pseudocode is the intended algorithm. It runs once per mask per
+screen.
 
 ```
 cell(r, c)        the cell at row r, column c of the ACTUAL screen
@@ -577,13 +650,22 @@ span_text(span)   = row_text(r) if span.whole_row else text(span)      # a whole
   whole of RE, that is `^(?:RE)$`, for **every** span. A failure is a `mask` mismatch.
 - `attrs=ignore`: the cells of every span are not compared for attributes.
 - **Stale masks.** A mask is stale, and reported as a failure, when its region is a `find=` that yields **no span at
-  all** in its whole row range (not "no span in some row": a figure may be missing from one row of `rows=2-4`). A
-  region written with rows and columns cannot be stale; a `text=/RE/` that does not match is reported as a mismatch.
+  all**. Staleness is judged over the mask's range of rows (not "no span in some row": a figure may be missing from one
+  row of `rows=2-4`), and, for a **shared** mask, over **all screens** of the run (below). A region written with rows and
+  columns cannot be stale; a `text=/RE/` that does not match is reported as a mismatch.
+- **A shared `find=` mask is stale only if it yields no span in any screen.** The alternative, "in every screen", would
+  force the clock mask of a tf run into the screens that have a clock and out of the startup screen that does not yet
+  (and so defeat sharing). The cheaper rule is safe because a mask that finds nothing in a particular screen simply
+  masks nothing there: if the thing it was meant to hide is missing or has moved, the stored text no longer equals the
+  actual text and the ordinary comparison reports it. Only a mask that matches in *no* screen has become meaningless,
+  and that is the case worth failing. A per-screen `find=` mask is stale when it yields no span in its own screen.
 - Where regions overlap, a part is skipped if any covering mask skips it.
 
 ### 6.6 `[assert]`
 
-Sparse assertions on the **actual** screen, independent of `[text]` and `[attrs]`:
+Sparse assertions on the **actual** screen paired with this screen block, independent of `[text]` and `[attrs]`. There
+is no shared `[assert]` (a section of that name before the first `[screen]` is an error in grammar 1; a shared
+assertion list is a reserved, additive path, section 10):
 
 ```
 assert REGION [text="EXACT" | text=/RE/] [ATTR ...]
@@ -633,42 +715,63 @@ explicitly, because engines disagree about what follows an empty match (E24: Pyt
 
 ### 6.8 Comparison
 
-`golden check` performs, in this order:
+A run produces an ordered sequence of **actual screens** (snapshot objects) and possibly **run-level problems** (a
+`wait_for` that timed out, 6.11). `--expect` compares them with the golden's screens. In this order:
 
-1. **Parse** the golden and validate it (section 6.13). Errors stop here (exit 65).
-2. **Versions and vocabulary.**
+1. **Parse** the golden and validate it (section 6.13). A missing file is exit 66 (unless `--update` is creating it); a
+   malformed one is exit 65. Errors stop here, before anything is run.
+2. **Versions and vocabulary**, decided from the **file header alone, before the program is started or the session is
+   touched** (so a refusal never costs a run).
    - Grammar: a number above the reader's is refused (exit 2).
    - `schema`: higher than the reader's is refused (exit 2); lower is read through the migration table (5.3) while the
-     deprecation window lasts, with a `WARN schema`, and refused after it with a pointer to `golden migrate`.
-   - A declared `vocab` token the reader does not know is refused (exit 2), naming it.
-   - `semantics`: see below.
-3. **Size.** If it differs, report it and stop comparing the screen: the header fields of step 4 are still compared,
-   but cells, masks and assertions (steps 5 to 7) are **not** (the grids no longer line up, and stale-mask reports would
-   be noise).
-4. **Header:** cursor, `alt_screen`, `modes` (as sets, restricted to the declared vocabulary and minus `ignore modes`),
-   `title`, `wrapped`, each unless ignored.
-5. **Cells.** Every cell outside masks: text (`ch`) and the attribute set (restricted to declared, un-ignored
-   attributes).
-6. **Masks:** stale-mask checks and `text=/RE/` checks.
-7. **Assertions.**
+     deprecation window lasts, with a `WARN schema`, and refused after it with a pointer to `--update=migrate`.
+   - A declared `vocab` token the reader does not know is refused (exit 2), naming it. With `--accept-vocab` the unknown
+     tokens are dropped from the comparison instead, with a `WARN vocab` that names them, and the check continues: the
+     author knows the golden checks less than it declares.
+3. **Run** the source (6.11) and collect the actual screens. A snapshot with a *lower* schema number (an offline
+   `--snapshot` file) is read through the migration table with `WARN schema`; for it `wrapped_rows` and `semantics`
+   are unknown, so `wrapped` is not compared and the semantics rule below applies as for `unknown`. A higher number
+   is refused (exit 2).
+4. **Pair the screens by position:** actual screen *i* is compared with the golden's screen *i*. If the counts differ,
+   the common prefix is paired and compared, and one `screens` mismatch (kind in 6.9) names the golden screens that got
+   no output (`missing`) and the actual screens that have no golden (`extra`). Pairing is by position only: an inserted
+   checkpoint shifts everything after it, which is exactly what a diff of the golden should show. If **both** sides carry
+   a `name` for a pair (the script's `snapshot` gave one and the golden block has one) and the names differ, one `name`
+   mismatch is reported for that pair and the comparison of the pair still runs.
+5. **Each pair**, in order:
+   1. **Size.** If it differs, report it and stop comparing the screen: the header fields of step 5.2 are still compared,
+      but cells, masks and assertions (5.3 to 5.5) are **not** (the grids no longer line up, and stale-mask reports would
+      be noise).
+   2. **Header:** cursor, `alt_screen`, `modes` (as sets, restricted to the declared vocabulary and minus `ignore modes`),
+      `title`, `wrapped`, each unless ignored (file-level and screen-level `ignore` are united, 6.2).
+   3. **Cells.** Every cell outside masks: text (`ch`) and the attribute set (restricted to declared, un-ignored
+      attributes).
+   4. **Masks:** stale-mask checks and `text=/RE/` checks, shared masks first then the screen's own (6.5).
+   5. **Assertions** of the screen.
+6. **Staleness of shared masks** is decided after all pairs have been compared (6.5).
+7. **Semantics** (below).
 
-`byte_offset`, `scrollback`, `producer` and `x-` keys never take part. Regions are validated against the **golden's**
-size when it is read, so a size mismatch is the only reason a region can fall outside the actual screen.
+`byte_offset`, `scrollback`, `producer` and `x-` keys never take part. Regions are validated against each **golden
+screen's** size when the golden is read, so a size mismatch is the only reason a region can fall outside the actual
+screen. With `--fail-fast` the run stops at the first mismatch, refusal or run-level problem: the program (or nothing,
+for `--connect`) is stopped, the remaining screens are reported as `skipped`, and the exit code is that of the first
+problem.
 
-**Semantics mismatch.** When the golden's `semantics` differs from the snapshot's (or is `unknown`), the checker still
-runs steps 3 to 7 and then decides:
+**Semantics mismatch.** When the golden's `semantics` differs from the actual snapshots' (or is `unknown`), the checker
+still runs steps 3 to 6 and then decides. "No differences" means no mismatch in any screen:
 
 | Option | No differences found | Differences found |
 | --- | --- | --- |
 | default | `PASS`, exit 0, with `WARN semantics golden=A snapshot=B: no differences` | `REFUSED`, exit 2: the differences are listed, with a pointer to `docs/guide/snapshot-semantics.md` |
 | `--accept-semantics` | `PASS`, exit 0, with the same warning | `FAIL`, exit 1, an ordinary failure |
-| `--strict-semantics` | `REFUSED`, exit 2, nothing compared | (not reached) |
+| `--strict-semantics` | `REFUSED`, exit 2, nothing compared. In form (a) this is decided **before the program is started**, because the tool's own `semantics_version` is known; in the other forms, as soon as the first screen's value has been read | (not reached) |
 
-Reason: one integer covers all emulation areas, so a strict refusal would turn every bump into a refusal of every
-golden, including ones that never touch the changed behaviour, and teach people to pass `--accept-semantics`
-blindly. Comparing anyway keeps the information (nothing differs) and the safety (different results are not
-presented as the program's fault). Repositories that want the strict behaviour for their own goldens use
-`--strict-semantics`.
+All screens of one run have the same semantics value (they come from one tool); an offline `--snapshot` input whose
+documents disagree is malformed (exit 65). Reason: one integer covers all emulation areas, so a strict refusal would
+turn every bump into a refusal of every golden, including ones that never touch the changed behaviour, and teach
+people to pass `--accept-semantics` blindly. Comparing anyway keeps the information (nothing differs) and the safety
+(different results are not presented as the program's fault). Repositories that want the strict behaviour for their
+own goldens use `--strict-semantics`.
 
 ### 6.9 The report
 
@@ -676,20 +779,28 @@ Plain text on standard output by default; `--format json` writes one JSON object
 golden's path, with its extension (`tf-session.golden`). The first line is exactly one of:
 
 ```
-PASS NAME
-FAIL NAME: 1 mismatch            ("1 mismatch" or "N mismatches")
+PASS NAME (K screens)                  ("1 screen" or "K screens")
+FAIL NAME: 4 mismatches in 2 of 3 screens        ("1 mismatch" or "N mismatches"; "of 1 screen" when K is 1)
 REFUSED NAME: REASON
 ```
 
-`N` counts blocks (a run of identical cell differences is one block). Warnings, if any, follow on lines beginning with
-`WARN `. Each mismatch is a block whose first word names the kind. At most 20 blocks are shown (`--max-mismatches N`);
-the first line gives the true total and a last line says `showing 20 of 413`. For `REFUSED` caused by a semantics
-difference the blocks are shown after the first line, headed `differences (informational):`.
+`K` is the number of screens in the golden. `N` counts blocks over the whole run (a run of identical cell differences is
+one block). Warnings, if any, follow
+immediately on lines beginning with `WARN `. Then the **run-level** blocks (kinds `screens` and `wait`), then, for each
+screen that has mismatches, a line `screen I` (or `screen I "NAME"` when the golden's block has a name) followed by that
+screen's blocks, indented two more spaces. Screens without mismatches are not listed. Each mismatch is a block whose
+first word names the kind. At most 20 blocks are shown (`--max-mismatches N`); the first line gives the true total and a
+last line says `showing 20 of 413`. For `REFUSED` caused by a semantics difference the blocks are shown after the first
+line, headed `differences (informational):`.
 
 A mismatch block for each kind (the text forms are the specification; the exact column alignment is not significant):
 
 ```
-FAIL tf-session.golden: 14 mismatches
+FAIL flow.golden: 17 mismatches in 2 of 3 screens
+  screens    expected 3   actual 2   missing 3
+  wait       script line 7   wait_for "10/10mv>" timed out after 5000 ms
+screen 1 "startup":
+  name       expected "startup"   actual "login"
   size       expected 80x24   actual 100x30   (cells, masks and assertions not compared)
   cursor     position   expected row=22 col=19   actual row=22 col=20
   cursor     shape      expected block           actual bar
@@ -702,6 +813,7 @@ FAIL tf-session.golden: 14 mismatches
              20| _________(unnamed1)_____...____03:18   (expected)
              20| _________(unnamed1)_____...____03:19   (actual)
                                                    ^
+screen 2:
   attrs      row 16 col 0-13 (14 cells)   expected fg=idx:2 bold   actual fg=idx:2
   mask       golden line 37   mask find=/\d\d:\d\d$/ text=/\d\d:\d\d/   matched nothing (stale)
   mask       golden line 38   mask row=20 cols=75-79 text=/\d\d:\d\d/   row 20 col 75-79 actual '_____' does not match
@@ -709,14 +821,15 @@ FAIL tf-session.golden: 14 mismatches
   assert     golden line 49   assert row=30 text="x"   matched nothing
 ```
 
-(The example lists more kinds than a real report would show at once; it is in the order a report prints them: size,
-cursor, modes, alt_screen, title, wrapped, then cells, masks and assertions.)
+(The example lists more kinds than a real report would show at once; it is in the order a report prints them: run-level
+blocks, then per screen size, name, cursor, modes, alt_screen, title, wrapped, then cells, masks and assertions. `golden
+line` is the line of the *file*, which for a mask in the shared list is a line before the first `[screen]`.)
 
 A `text` block shows both rows with a caret line under the differing columns; a `text` block for a continuation cell
-shows `\.`. A warning:
+shows `\.`. A pass, with warnings:
 
 ```
-PASS tf-session.golden
+PASS flow.golden (3 screens)
 WARN semantics golden=1 snapshot=2: no differences
 WARN vocab modes ?1004: reported by this vtee, not declared by the golden (not compared)
 ```
@@ -724,17 +837,28 @@ WARN vocab modes ?1004: reported by this vtee, not declared by the golden (not c
 `--format json`:
 
 ```
-{"golden":"tf-session.golden","result":"fail","grammar":1,"schema":2,"semantics":1,
- "snapshot":{"schema":2,"semantics":1},"total":2,"shown":2,
- "mismatches":[ ...objects below... ],
+{"golden":"flow.golden","result":"fail","grammar":1,"schema":2,"semantics":1,
+ "snapshot":{"schema":2,"semantics":1},"screens_expected":3,"screens_actual":2,
+ "total":17,"shown":17,                       (the example is abbreviated: the screen entries below list only some objects)
+ "run":[{"kind":"screens","expected":3,"actual":2,"missing":[3],"extra":[]},
+        {"kind":"wait","line":7,"text":"10/10mv>","timeout_ms":5000}],
+ "screens":[{"index":1,"name":"startup","result":"pass"},
+            {"index":2,"name":null,"result":"fail","mismatches":[ ...objects below... ]},
+            {"index":3,"name":"long-line","result":"skipped"}],
  "warnings":[{"code":"vocab","message":"modes ?1004: reported by this vtee, not declared by the golden"}]}
 ```
 
-`result` is `pass`, `fail` or `refused`; a refusal adds `"reason"`. Every mismatch object has `kind`. Fields by kind
-(rows and columns 0-based, `col_start` and `col_end` inclusive; unknown fields must be ignored by readers):
+`result` is `pass`, `fail` or `refused` for the run; a refusal adds `"reason"`. `run` holds the run-level mismatch
+objects; each entry of `screens` has `index` (1-based, the golden's), `name` (the golden block's, or `null`), `result`
+(`pass`, `fail`, `refused` or `skipped`: not compared because the run ended, `--fail-fast` stopped it, or no actual
+screen existed) and, for `fail`, `mismatches`. Every mismatch object has `kind`. Fields by kind (rows and columns
+0-based, `col_start` and `col_end` inclusive; unknown fields must be ignored by readers):
 
 | kind | Fields |
 | --- | --- |
+| `screens` (run) | `expected` and `actual` (screen counts), `missing` (1-based golden screens with no output), `extra` (1-based actual screens with no golden) |
+| `wait` (run) | `line` (script line number), `text`, `timeout_ms` |
+| `name` | `expected` and `actual` (strings) |
 | `size` | `expected` and `actual`, each `{"cols":N,"rows":N}` |
 | `text` | `row`, `col_start`, `col_end`, `expected` and `actual` (the cell text of the span, strings), `expected_row` and `actual_row` (the whole row text) |
 | `attrs` | `row`, `col_start`, `col_end`, `cells` (count), `expected` and `actual` (arrays of attribute tokens as in `[attrs]`) |
@@ -743,52 +867,169 @@ WARN vocab modes ?1004: reported by this vtee, not declared by the golden (not c
 | `alt_screen` | `expected` and `actual` (booleans) |
 | `title` | `expected` and `actual` (string or null) |
 | `wrapped` | `expected`, `actual`, `missing`, `extra` (arrays of row indices) |
-| `mask` | `line` (golden line number), `mask` (the line text), `problem` (`stale` or `text`), and for `text`: `row`, `col_start`, `col_end`, `actual` |
+| `mask` | `line` (golden file line number), `mask` (the line text), `problem` (`stale` or `text`), and for `text`: `row`, `col_start`, `col_end`, `actual` |
 | `assert` | `line`, `assert` (the line text), `problem` (`no_match`, `text` or `attr`), and for `text` and `attr`: `row`, `col` (first failing cell), `expected`, `actual`, `failing_cells` (count) |
 
-Warning objects have `code` (`semantics`, `vocab`, `schema`) and `message`.
+A `mask` mismatch with `problem` `stale` for a *shared* mask is a run-level fact (it was judged over all screens): it is
+listed in `run`, not under a screen.
 
-### 6.10 Exit codes of `vtee golden`
+Warning objects have `code` (`semantics`, `vocab`, `schema`) and `message`. The reports of `--update` runs are in 6.11.
+
+### 6.10 Exit codes of a run with `--expect`
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Pass (possibly with warnings) |
-| 1 | The screen differs from the golden |
+| 0 | Pass (possibly with warnings); an update that succeeded, including one that changed nothing |
+| 1 | The output differs from the golden: any mismatch, including a `screens`, `name` or `wait` problem; or an `--update` that refused to write (a failed run, a restamp that would change a compared value) |
 | 2 | Refused: grammar, schema, vocabulary or semantics prevent or qualify a comparison (6.8). Deliberately not a sysexits code, so a script can tell "differs" and "cannot compare" apart from errors |
-| 64 | Usage error |
-| 65 | A golden or a snapshot is malformed (data error); the message says which, and for a snapshot the first line is `snapshot: ...` |
-| 66 | A file named on the command line does not exist or cannot be read |
+| 64 | Usage error: an illegal option combination (6.11), a missing value, a `--screen` that does not fit the run |
+| 65 | A golden, a snapshot input or a script is malformed (data error); the message says which, and for a snapshot the first line is `snapshot: ...`, for a script `script line N: ...` |
+| 66 | A file named on the command line does not exist or cannot be read (the golden without `--update`, the script, the snapshot file) |
 | 69 | The session cannot be reached (`--connect`) |
-| 74 | Another I/O error |
+| 71 | The program could not be started (what `vtee --script` already returns today, E27) |
+| 74 | Another I/O error, including a golden that cannot be written |
+
+**How the code of a run is chosen.** Errors that prevent a run (64, 65, 66 for a golden, script or snapshot file) are
+reported before anything starts, with nothing run: **in `--expect` mode the whole script is parsed and validated before
+the program is started** (today's `--script`, without `--expect`, executes the lines before a malformed one and then
+stops with 65, E28). An error *during* a run (71, 69, 74) aborts it and is the exit code; no comparison report is
+printed, only a message on standard error. A run that completes is judged by its comparison: **any refusal gives 2,
+else any mismatch or run-level problem gives 1, else 0.** A refusal found from the file header (grammar, schema,
+vocabulary) is decided before the run starts and the program is never started; so is `--strict-semantics` in form (a).
+In forms (b), (c) and (d) the semantics value is only known when the first screen arrives, so that refusal is decided
+then.
 
 **Usage errors are 64, not 2.** clap's own default exit code for a usage error is 2. `src/main.rs` (lines 198 to 202,
-E25) maps every parse error to `exitcode::USAGE` before anything else, and `golden` is a subcommand of the same parser,
-so the mapping covers it; the implementation must keep a test that a bad `golden` flag exits 64 and that a refusal
-exits 2.
+E25) maps every parse error to `exitcode::USAGE` before anything else, and the new options are options of the same
+parser, so the mapping covers them; the implementation must keep a test that a bad `--expect` option exits 64 and
+that a refusal exits 2.
 
-### 6.11 Recording, updating, migrating
+### 6.11 The run command
 
-- `vtee golden write -o NAME.golden (--connect SOCKET | --snapshot FILE | -) [--portable]` records the header,
-  `[text]` and `[attrs]` from a snapshot. It writes no `[masks]` or `[assert]`: those are written by hand.
-  `--portable` declares the cross-platform profile of section 6.14 (a reduced `vocab`, `ignore title`).
-- `vtee golden update NAME.golden (--connect SOCKET | --snapshot FILE | -) [--refresh-vocab]` regenerates the header,
-  `[text]` and `[attrs]` and **keeps** header comments and `ignore` lines (placed after the generated header lines, in
-  their original order), `[masks]` and `[assert]` verbatim, including comments. `--refresh-vocab` replaces the declared
-  vocabulary with the current tool's, which starts comparing the new tokens.
-- `vtee golden update --restamp NAME.golden (--connect ... | --snapshot ...)` rewrites only the `semantics` line (and
-  `x-producer`), and **refuses with exit 1 if any compared cell, header field or assertion would differ**: it confirms
-  that a semantics bump changed nothing this golden checks.
-- `vtee golden migrate FILE...` rewrites a golden recorded under an older grammar or schema (section 5.3).
-- Every command is deterministic, and `write(parse(g)) == g` byte for byte for a canonical file. **`x-producer` is
-  rewritten by `update` only when something else in the generated part changes**, so a re-record with a newer
-  `vtee` that changes nothing produces an empty diff. It therefore names the `vtee` that last changed the golden,
-  which is what an audit of a pin needs; it is not "the latest check".
+```
+vtee [SESSION-OPTIONS] --script FILE --expect GOLDEN [RUN-OPTIONS] -- PROGRAM [ARGS]...     (a) spawn and run
+vtee --connect SOCK --script FILE --expect GOLDEN [RUN-OPTIONS]                              (b) run against a live session
+vtee --connect SOCK --expect GOLDEN [RUN-OPTIONS]                                            (c) the live session's screen now
+vtee --snapshot FILE|- --expect GOLDEN [RUN-OPTIONS]                                         (d) offline: finished output
+vtee --expect GOLDEN --update=migrate [--format text|json]                                   rewrite an old golden in place
+
+RUN-OPTIONS  =  [--update[=MODE]] [--screen N] [--format text|json] [--portable] [--fail-fast]
+                [--strict-semantics | --accept-semantics] [--accept-vocab] [--max-mismatches N]
+MODE         =  record | restamp | vocab | migrate        (bare `--update` means `--update=record`)
+```
+
+`SESSION-OPTIONS` are the existing options that shape the program's terminal in form (a): `--cols`, `--rows`, `--env`,
+`--log`. **With `--expect` the size defaults to 80x24**, not to the invoking terminal's size (without `--expect` a
+script run still uses the terminal's size when there is one, which makes a result depend on where it ran; the help text
+says so today: "Default: this terminal's width, else 80"). A run with `--expect` is **headless in the sense of
+`--headless`**: it reads no standard input and does not write the program's output to the terminal. In form (a) the
+run inherits every conflict `--script` already has with the interactive-session options (`--listen`, `--name`,
+`--writable`, `--headless`, `--attach-if-exists` and the others are errors, exactly as they are today); the legality
+table below lists only what `--expect` adds.
+
+**The sources of the output.**
+
+| | Form | Screens produced | The program or session afterwards |
+| --- | --- | --- | --- |
+| (a) | a program after `--` and `--script FILE` | one per `snapshot` command executed in the script | stopped when the script ends, as `--script` does today |
+| (b) | `--connect SOCK` and `--script FILE` | the same, against a live session | left running |
+| (c) | `--connect SOCK` alone | exactly one: the session's current screen | left running |
+| (d) | `--snapshot FILE`, or `-` for standard input | one per JSON document in the input (below) | none: no program is involved |
+
+Form (b) is **new**: today `--connect` ignores `--script` without a word (E32), so the combination is not a
+compatible extension of anything that worked; with this document both `--connect` with `--script` and `--connect` with a
+program become well defined (the first runs the script, the second is an error), with or without `--expect`.
+
+The input of (d) is NDJSON: each line is either a bare snapshot object, or a reply line `{"cmd":"snapshot","snapshot":{...}}`
+as `vtee --script` prints it, so the output of an earlier script run can be saved and checked offline. A reply with
+another `cmd` (`wait_for`, `exit_status`, ...) is not a screen; a `wait_for` reply with `"matched":false` is a `wait`
+problem, as in a live run (so the same run gives the same verdict live and offline). Lines that are neither are
+exit 65.
+
+**Illegal combinations** (exit 64; clap conflicts where clap can express them, otherwise a check made after parsing).
+The first clause of each message is normative, the rest is a hint:
+
+| Combination | Message |
+| --- | --- |
+| `--expect` with no source (no program, no `--connect`, no `--snapshot`) and not `--update=migrate` | `vtee: --expect needs a source of screens: a program after --, --connect SOCK or --snapshot FILE` |
+| a program with no `--script` (and no `--snapshot`/`--connect`) | `vtee: a program needs --script FILE to say what to type; to look at it by hand use --connect` |
+| `--script` with neither a program nor `--connect` | `vtee: --script needs a program to run or --connect SOCK` |
+| `--connect` with a program | `vtee: --connect talks to a running session; it cannot be combined with a program` |
+| `--snapshot` with `--connect`, `--script`, a program, `--cols`, `--rows`, `--env` or `--log` | `vtee: --snapshot reads finished output; it cannot be combined with --connect, --script, a program or session options` |
+| `--update`, `--screen`, `--format`, `--portable`, `--fail-fast`, `--strict-semantics`, `--accept-semantics`, `--accept-vocab` or `--max-mismatches` without `--expect` | `vtee: --OPTION needs --expect GOLDEN` |
+| `--text` with `--expect` | `vtee: --text has no effect with --expect, which prints a report; use --format text or --format json` |
+| `--update=migrate` with a program, `--script`, `--connect`, `--snapshot`, `--screen`, `--portable` or a run option other than `--format` | `vtee: --update=migrate rewrites the file in place and runs nothing; give only --expect GOLDEN` |
+| `--portable` without `--update` (record or vocab) | `vtee: --portable applies when a golden is written; use it with --update` |
+| `--screen` with `--update=restamp` or `--update=vocab` | `vtee: --screen applies to checking and to --update (record)` |
+| `--update --screen N` when GOLDEN does not exist | `vtee: --screen N updates one screen of an existing golden; GOLDEN does not exist` (detected after parsing, still exit 64) |
+| `--strict-semantics` with `--accept-semantics` | clap's own: `the argument '--strict-semantics' cannot be used with '--accept-semantics'` |
+| an unknown `--update` value | `vtee: unknown --update mode 'X'; expected record, restamp, vocab or migrate` |
+| `--screen N` when the run produced more than one screen, or N is outside the golden | `vtee: --screen N selects one screen, but the run produced K` / `... the golden has K screens` (detected after the run, still exit 64) |
+
+**Check (the default).** `--expect GOLDEN` compares (6.8). A missing GOLDEN is exit 66 with `vtee: GOLDEN: no such
+file (give --update to record it)`. Nothing is written. A one-screen run (form (c), or (d) with one document) is paired
+with a one-screen golden; to compare it with one screen of a composite, `--screen N` pairs it with golden screen N and
+reports only that screen's mismatches. (Without `--screen`, a one-screen run against a composite shows a `screens`
+mismatch whose message adds the hint `use --screen N to compare one screen`.)
+
+**Update.** `--update[=MODE]` rewrites the expected file from the run. Common rules: it runs the source exactly as
+a check does, **and writes only if the run succeeded**: a timed-out `wait_for` or an aborted run is exit 1 (or the
+error's code) with `not written`, because recording a broken run would bake the failure into the golden. Header
+comments, `ignore` lines, shared and per-screen `[masks]` and `[assert]` sections, their comments, and each block's
+order are **kept verbatim**; only the generated parts are rewritten. Screens are paired with the existing blocks by
+position. `x-producer` is rewritten only when something else in the generated part changes, so a re-record with a newer
+`vtee` that changes nothing produces an empty diff and the line names the `vtee` that last changed the golden, which
+is what an audit of a pin needs. The output of `--update` (standard output; `--format json` gives the same facts as an
+object with `result` and `screens`):
+
+```
+CREATED NAME: 3 screens
+UPDATED NAME: 3 screens (1 new, 1 dropped: screen 4 had 2 masks, 1 assert)
+UNCHANGED NAME: 3 screens
+```
+
+| Mode | What it does | Refuses (exit 1) when | Notes |
+| --- | --- | --- | --- |
+| `record` (bare `--update`) | Creates the golden if it is missing (no masks, no assertions: those are written by hand) or regenerates `[screen]` headers, `[text]` and `[attrs]` from the run. Keeps the file's declared vocabulary (a new file gets the current tool's). Screens beyond the existing blocks are added without masks; existing blocks with no output are **dropped** and listed in the message, so a lost checkpoint is visible | the run failed | `--portable` (6.14) applies when the file is created or its vocabulary is rewritten. With `--screen N`, only screen N is regenerated (the run must produce one screen); it cannot create a file |
+| `restamp` | Rewrites only the `semantics` line (and `x-producer`) | any compared cell, header field or assertion of any screen would differ (a full check with the semantics difference ignored runs first) | Confirms that a semantics bump changed nothing this golden checks. Prints `RESTAMPED NAME: semantics 1 -> 2`, or `NOT RESTAMPED NAME: 3 differences` followed by the check report |
+| `vocab` | As `record`, and replaces the declared vocabulary with the current tool's, which starts comparing the new tokens | the run failed | |
+| `migrate` | Rewrites a golden recorded under an older grammar or schema, in place (5.3). Needs no source: it runs nothing | (never: it does not compare) exit 2 if the file is *newer* than this tool | **Never invents facts**: unrecoverable ones are written as unknown (`ignore wrapped`, `semantics unknown`, a shape rule). Prints `MIGRATED NAME: grammar 0 -> 1, schema 1 -> 2` and lists the unknowns, or `UNCHANGED NAME` |
+
+*Why these value names.* `record` is what the default does, so a bare `--update` and `--update=record` mean the same
+and scripts can spell it out. `restamp` says it rewrites the stamp and nothing else; `semantics` would suggest it
+changes semantics. `vocab` reads as "update the vocabulary", which is what it adds to `record`; `refresh-vocab` (the
+earlier name) repeats itself. `migrate` is an `--update` mode and not an option of its own because it too rewrites the
+expected file in place and is bound to the same file argument; it is the one mode that takes no source, which the table
+of illegal combinations states. The values are part of the interface and are frozen at 0.1.0; adding a mode later is
+additive.
+
+**A timed-out `wait_for` fails the run.** In every `vtee --script` run, with or without `--expect`, a `wait_for` that
+times out makes the run fail. Without `--expect` the output is unchanged (the reply with `"matched":false` is still
+printed, as in E27) but the exit code is **1** and standard error gets `vtee: script line N: wait_for "TEXT" timed out
+after T ms`. With `--expect` it is a run-level `wait` mismatch (6.9), exit 1. The script **continues** after a
+timed-out wait (later lines may still be informative) unless `--fail-fast` is given. A `wait_for` that is allowed to
+time out says so, in the script: `{"cmd":"wait_for","text":"...","timeout_ms":500,"optional":true}`. `optional` is a
+runner-side field that servers ignore, which is safe because it has no effect on what the server does. `--connect` read
+from standard input (no `--script`) is not a script and is unchanged. This is a deliberate behaviour change of `--script`
+(it exited 0 on a timed-out wait, E27); it is acceptable only because nothing is released (owner decision OD12).
+
+**Names.** A script's `snapshot` command may carry an optional string `name` (`{"cmd":"snapshot","name":"connected"}`).
+Servers ignore it; the runner attaches it to the screen. A name is a label, not an address (pairing is by position),
+and the golden block records it as `name "connected"`. A name that is present on both sides and differs is a `name`
+mismatch. A script without names works unchanged.
+
+**Reserved, not defined in grammar 1.** An `[exit]` section would record the program's exit status as part of the
+expected output (the script can already ask for it with `wait_exit`, but a status is not a screen, so it is not part of
+the output today). The name is reserved: a grammar-1 reader rejects `[exit]` as a reserved section (6.1), and a later
+grammar number defines it (section 10).
 
 ### 6.12 Determinism rules for writers
 
-Header lines in the order of section 6.2. `[attrs]` runs in row, then column order, tokens in the order of section 6.4.
-Every row of `[text]` present, with no trailing blank cells. No line anywhere ends in whitespace. One newline at the end.
-Nothing in the file depends on the Unicode version of the tool that wrote it.
+The order of a file is: the file header (lines in the order of section 6.2), the shared `[masks]` if any, then the
+screens in numeric order, each with its screen header (the order of 6.2), `[text]`, `[attrs]` (when needed), `[masks]`
+and `[assert]` (when present). Exactly one blank line before every section. `[attrs]` runs in row, then column order,
+tokens in the order of section 6.4. Every row of `[text]` present, with no trailing blank cells. No line anywhere ends
+in whitespace. One newline at the end. Nothing in the file depends on the Unicode version of the tool that wrote it.
 
 **JSON string literals** (the header `title`, `link="URI"`, `text="EXACT"`) have one canonical encoding: UTF-8; escape only
 `"` as `\"` and `\` as `\\`; the short escapes `\n`, `\r`, `\t`; every other scalar in the escape set of 6.3 (this includes
@@ -800,14 +1041,19 @@ U+FFFF; everything else raw; a solidus `/` is never escaped. Readers accept any 
 Two independent implementations must agree on every file. A reader **rejects** (exit 65, naming the line):
 
 - an invalid UTF-8 sequence, a NUL, a lone CR, a leading BOM;
-- a first line that is not `vtee-golden N`, a missing required header key, a duplicated key (other than `ignore` and
-  `x-`), an unknown key that does not begin with `x-`, an unknown section, a duplicated section;
+- a first line that is not `vtee-golden N`, a missing required header key (in the file header or in a screen
+  header), a duplicated key (other than `ignore` and `x-`), an unknown key that does not begin with `x-`, a key in the
+  wrong header (`size` in the file header, `schema` in a screen header), an unknown section, a section duplicated within
+  its scope (two shared `[masks]`, two `[text]` in one screen);
+- a file with no `[screen]` block; a `[screen N]` whose `N` is not the number of screen blocks so far plus one; a
+  `[text]`, `[attrs]` or `[assert]` before the first `[screen]`; the reserved sections `[exit]` and `[screen]` without a
+  number; a shared mask whose rows and columns fall outside any screen's size;
 - a `[text]` with the wrong number of rows, a row label that is not its index, a row with no `|`, more cells than `cols`,
   a malformed or unknown backslash sequence, a surrogate or out-of-range `\u{H}`, `\.` at the start of a row or after
   `\.`, `\+` at the start of a row or after `\.`;
 - an `[attrs]` run that overlaps another, is outside the screen, has no tokens or only defaults, repeats a token, or
   uses an attribute not in the declared vocabulary; any comment in `[text]` or `[attrs]`;
-- a region outside the golden's size, `N > M` in a range, a mask with neither `text=` nor `attrs=ignore`, `text="EXACT"`
+- a region outside its screen's size, `N > M` in a range, a mask with neither `text=` nor `attrs=ignore`, `text="EXACT"`
   on a multi-row region or with `find=`, an assert with no constraint, a regex outside the dialect (6.7), an invalid
   JSON string, a repeated token in one `mask` or `assert` line, `ignore modes` with no token;
 - a `modes` token that is not in `vocab modes`, or an `ignore` naming a mode or attribute that is not in the declared
@@ -816,8 +1062,9 @@ Two independent implementations must agree on every file. A reader **rejects** (
 A reader **accepts and normalises**: CRLF; a missing final newline; blank lines anywhere; trailing whitespace on
 non-`[text]` lines; the sections or header lines in any order; `modes` tokens in any order or repeated (a set);
 `wrapped` in any order; tokens of an `[attrs]` run in any order; region tokens of a mask or assert in any order; `\u{H}`
-for a scalar outside the escape set, in either case with leading zeros; trailing literal spaces in a `[text]` row. Only
-`golden update` and `golden write` normalise a file on disk; `golden check` never writes.
+for a scalar outside the escape set, in either case with leading zeros; trailing literal spaces in a `[text]` row; the
+sections of one screen in any order. Screen blocks themselves must be in numeric order. Only a run with `--update`
+normalises a file on disk; a check never writes.
 
 ### 6.14 Portability across platforms
 
@@ -836,34 +1083,106 @@ E15 to E17), and how a golden handles each:
 | `byte_offset` | differs wildly (E3) | | never stored |
 | Anything else | | | a real difference to investigate and report |
 
-`golden write --portable` records the portable profile: `vocab modes ?2004`, the attribute vocabulary without `ulcolor`,
-and `ignore title`. A golden recorded that way on one platform can pass on the other when the program's output is the
-same. The profile is part of the contract: adding a token to it is a semantics-visible change.
+`--update --portable` (record or vocab mode) writes the portable profile: `vocab modes ?2004`, the attribute vocabulary
+without `ulcolor`, and a file-level `ignore title`, which applies to every screen of the run. A golden recorded that way
+on one platform can pass on the other when the program's output is the same. The profile is part of the contract:
+adding a token to it is a semantics-visible change.
 
 ## 7. Worked examples
 
-The examples below were produced by running real snapshots through converters that implement this document's first
-draft, then parsing the result back and comparing it to the snapshot (E14); the revision added the `vocab` header lines,
-one whole-row assertion in 7.1, `cols=47` in 7.2 and a scalar-sequence assertion in 7.3, and kept the rest. The golden grammar here was independently implemented from the text by two reviewers, who
-reproduced examples 7.1 and 7.2 byte for byte.
+The screens below were produced by running real snapshots through converters that implement this document's grammar,
+then parsing the result back and comparing it to the snapshot (E14). The first draft's examples (one screen each, flat
+layout) were independently implemented from the text by two reviewers, who reproduced them byte for byte; the revision
+for the run-and-compare model re-laid them out as composites, using TinyFugue's recordings (`tests/screens-draft/`)
+for the content, and the commands and reports were checked against the behaviour of today's `--script` (E27 to E30).
 
-### 7.1 A tf screen
+### 7.1 A tf session: three screens in one golden
 
-Recorded by TinyFugue from tf running under `vtee` at 80x24 (their `tf-session` screen). Row 20 is tf's status row,
-with a clock at its right end; the mask lets the clock vary and still compares the attributes of those cells.
+TinyFugue starts `tf`, connects to a fake server and types a long line. The script has three `snapshot` commands, so a
+run produces three screens, and the golden holds all three. The script, `flow.ndjson`:
+
+```text
+{"cmd":"wait_for","text":"Loading commands from","timeout_ms":5000}
+{"cmd":"snapshot","name":"startup"}
+{"cmd":"send","text":"/connect 127.0.0.1 4000\r"}
+{"cmd":"wait_for","text":"10/10mv>","timeout_ms":5000}
+{"cmd":"snapshot","name":"connected"}
+{"cmd":"send","text":"this is a long line that I am typing at the prompt and it should run past the end of the eighty column screen so that the input line wraps"}
+{"cmd":"wait_for","text":"input line wraps","timeout_ms":3000}
+{"cmd":"snapshot","name":"long-line"}
+```
+
+Recording and checking it:
+
+```text
+vtee --script flow.ndjson --expect flow.golden --update -- tf -n     # prints: CREATED flow.golden: 3 screens
+vtee --script flow.ndjson --expect flow.golden -- tf -n              # prints: PASS flow.golden (3 screens), exit 0
+```
+
+The recorded golden follows. Row 20 is tf's status row with a clock at its right end; one **shared** mask lets the clock
+vary on every screen and still compares the attributes of those cells. The startup screen has two lines that change with
+the build, not with the program under test, so it masks them itself. Screen 2 carries assertions about colours. (`name`
+is the label the script gave each `snapshot`; whether tf's long line is a terminal soft wrap is not established by the
+recording, so screen 3 has no `wrapped` line: it appears only where the snapshot reports it.)
 
 ```text
 vtee-golden 1
 schema 2
 semantics 1
+vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
+vocab attrs bold dim italic reverse strike conceal underline ulcolor link
+x-producer vtee 0.1.0 alacritty_terminal 0.26.0
+
+[masks]
+# The clock at the right end of tf's status row, on every screen: any HH:MM. Its attributes are still compared.
+mask row=20 cols=75-79 text=/\d\d:\d\d/
+
+[screen 1]
+size 80x24
+cursor row=21 col=0 shape=block hidden=false
+modes ?1 DECKPAM
+alt_screen true
+title null
+name "startup"
+
+[text]
+ 0|
+ 1|
+ 2|
+ 3|
+ 4|
+ 5|
+ 6|TinyFugue version development
+ 7|Copyright (C) 1993, 1994, 1995, 1996, 1997, 1998, 1999, 2002, 2003, 2004,
+ 8|    2005, 2006-2007 Ken Keys (kenkeys@users.sourceforge.net)
+ 9|Type `/help copyright' for more information.
+10|Ingwar Swenson (ingwar@ingwar.eu.org) +ansi_log +log_timestamp +lua +gmcp
+11|    +ATCP +GMCP +option102
+12|Using PCRE version 10.42 2022-12-11
+13|Type `/help', `/help topics', or `/help intro' for help.
+14|Type `/quit' to quit tf.
+15|
+16|% LC_CTYPE category set to "en_US.UTF-8" locale.
+17|% LC_TIME category set to "en_US.UTF-8" locale.
+18|% Warning: Can't figure out name of mail file.
+19|% Loading commands from /usr/local/share/tf-development-lib/stdlib.tf.
+20|_________(no world)________________________________________________________03:18
+21|
+22|
+23|
+
+[masks]
+# These two lines change with the build, not with the program under test.
+mask row=12 text=ignore
+mask row=19 text=/% Loading commands from \S+/
+
+[screen 2]
 size 80x24
 cursor row=22 col=19 shape=block hidden=false
 modes ?1 DECKPAM
 alt_screen true
 title null
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
-x-producer vtee 0.1.0 alacritty_terminal 0.26.0
+name "connected"
 
 [text]
  0|
@@ -897,38 +1216,97 @@ x-producer vtee 0.1.0 alacritty_terminal 0.26.0
 19: 0-7 fg=idx:1 bold
 22: 0-17 fg=idx:3
 
-[masks]
-# The clock at the right end of tf's status row: any HH:MM. Its attributes are still compared.
-mask row=20 cols=75-79 text=/\d\d:\d\d/
-
 [assert]
 assert row=16 cols=0-13 text="A Quiet Meadow" fg=idx:2 bold
 assert find=/goblin/ fg=idx:1 bold
 assert row=17 cols=0-41 fg=idx:6 !bold
 assert row=16 text="A Quiet Meadow"
+
+[screen 3]
+size 80x24
+cursor row=23 col=78 shape=block hidden=false
+modes ?1 DECKPAM
+alt_screen true
+title null
+name "long-line"
+
+[text]
+ 0|
+ 1|
+ 2|
+ 3|
+ 4|
+ 5|
+ 6|
+ 7|
+ 8|
+ 9|
+10|
+11|
+12|
+13|
+14|% Trying to connect to (unnamed1): 127.0.0.1 4000.
+15|% Connected to (unnamed1).
+16|A Quiet Meadow
+17|Tall grass sways here. A path leads north.
+18|Exits: [north, east]
+19|A goblin snarls at you.
+20|_________(unnamed1)________________________________________________________03:18
+21|/connect 127.0.0.1 4000
+22|<42/100hp 10/10mv> this is a long line that I am typing at the prompt and it sh
+23|ould run past the end of the eighty column screen so that the input line wraps
+
+[attrs]
+16: 0-13 fg=idx:2 bold
+17: 0-41 fg=idx:6
+19: 0-7 fg=idx:1 bold
+22: 0-17 fg=idx:3
 ```
 
-The last assertion has no `cols=`: a whole-row region compares the row text with trailing blanks removed (6.5), so the
-natural form passes on an 80-column screen. Assertions are checked against the actual screen, whatever is stored in
-`[text]`, so they are written against the row numbers of the screen being tested.
+Read against 6.5 and 6.8: the shared `mask row=20 cols=75-79` (line 10) is applied to all three screens, in addition to
+the two masks of screen 1 (lines 48 and 49) which apply to screen 1 only. The last assertion of screen 2 (line 95) has
+no `cols=`: a whole-row region compares the row text with trailing blanks removed (6.5), so the natural form passes on
+an 80-column screen. Assertions are checked against the actual screen, whatever is stored in `[text]`.
+
+If the goblin line lost its colour and bold in a later run, the report is:
+
+```text
+FAIL flow.golden: 2 mismatches in 1 of 3 screens
+screen 2 "connected":
+  attrs      row 19 col 0-7 (8 cells)   expected fg=idx:1 bold   actual fg=idx:3
+  assert     golden line 93   assert find=/goblin/ fg=idx:1 bold   row 19 col 2   actual fg=idx:3   (first failing cell of 6)
+```
+
+(exit code 1). Screens 1 and 3 passed and are not listed. If the run had produced only two screens, for example because
+the second `wait_for` timed out and the script was edited to stop there, the first lines would instead be:
+
+```text
+FAIL flow.golden: 1 mismatch in 0 of 3 screens
+  screens    expected 3   actual 2   missing 3
+```
 
 ### 7.2 A `top` screen with masks
 
 `top` refreshes itself, so about a tenth of its cells are volatile. The masks name them by the columns of the header
 row and let figures vary within their own pattern; the assertions keep what matters regardless of the figures. The
-bold attribute of row 7 and 8 is masked because a running task is bold and a sleeping one is not.
+bold attribute of row 7 and 8 is masked because a running task is bold and a sleeping one is not. The script,
+`top.ndjson`, waits for the header and takes one snapshot, and the command is
+`vtee --script top.ndjson --expect top.golden --env TERM=xterm-256color -- top`. The masks are inside the screen block
+because this golden has one screen; in a longer run the same masks would be shared if every screen were a `top` screen.
 
 ```text
 vtee-golden 1
 schema 2
 semantics 1
+vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
+vocab attrs bold dim italic reverse strike conceal underline ulcolor link
+
+[screen 1]
 size 80x24
 cursor row=9 col=0 shape=block hidden=true
 modes ?1 DECKPAM
 alt_screen false
 title null
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 
 [text]
  0|top - 03:18:50 up 26 min,  0 user,  load average: 0.43, 0.26, 0.20
@@ -1015,13 +1393,15 @@ the first two carrying the ZWJ), a space, a private-use character, a space, a re
 vtee-golden 1
 schema 2
 semantics 1
+vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
+vocab attrs bold dim italic reverse strike conceal underline ulcolor link
+
+[screen 1]
 size 40x6
 cursor row=2 col=0 shape=block hidden=false
 modes
 alt_screen false
 title null
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 
 [text]
 0|C:\\dir  你\.好\.X
@@ -1047,23 +1427,25 @@ precomposed `é`.
 
 ### 7.4 A portable golden
 
-What `golden write --portable` records for a program that printed `ok` and turned on bracketed paste. The vocabulary
-is the portable one (6.14): one mode token, no underline colour, and the title is ignored, so the same golden passes
-on Linux and under ConPTY.
+What `--update --portable` records for a program that printed `ok` and turned on bracketed paste. The vocabulary
+is the portable one (6.14): one mode token, no underline colour, and the title is ignored (a file-level `ignore`, so it
+applies to every screen the run has), so the same golden passes on Linux and under ConPTY.
 
 ```text
 vtee-golden 1
 schema 2
 semantics 1
+vocab modes ?2004
+vocab attrs bold dim italic reverse strike conceal underline link
+ignore title
+x-producer vtee 0.1.0 alacritty_terminal 0.26.0
+
+[screen 1]
 size 40x3
 cursor row=1 col=0 shape=block hidden=false
 modes ?2004
 alt_screen false
 title null
-vocab modes ?2004
-vocab attrs bold dim italic reverse strike conceal underline link
-ignore title
-x-producer vtee 0.1.0 alacritty_terminal 0.26.0
 
 [text]
 0|ok
@@ -1074,11 +1456,12 @@ x-producer vtee 0.1.0 alacritty_terminal 0.26.0
 ### 7.5 What a semantics difference looks like
 
 A hypothetical future `semantics 2` that stops reporting tab-stop cells as spaces would show (a golden recorded under
-semantics 1 whose screen contains a tab):
+semantics 1 whose third screen contains a tab):
 
 ```text
 REFUSED tf-edit.golden: semantics golden=1 snapshot=2, with 1 difference
 differences (informational):
+screen 3:
   text      row 4 col 8   expected ' '   actual '\u{9}'
 see docs/guide/snapshot-semantics.md, entry 2
 ```
@@ -1086,8 +1469,15 @@ see docs/guide/snapshot-semantics.md, entry 2
 and if the same golden had no difference:
 
 ```text
-PASS tf-startup.golden
+PASS tf-startup.golden (3 screens)
 WARN semantics golden=1 snapshot=2: no differences
+```
+
+The way to accept that nothing changed is `--update=restamp`, which rewrites only the `semantics` line and refuses if
+any compared value would differ:
+
+```text
+RESTAMPED tf-startup.golden: semantics 1 -> 2
 ```
 
 ## 8. Open questions, closed
@@ -1132,23 +1522,42 @@ reviews.
 | Escape set | By category rule, frozen as data from Unicode 15.1 | Does not depend on the writing tool's Unicode tables (6.3) |
 | Regex `$` and classes | ASCII only, search leftmost-first, rejection list | Same meaning in every language (6.7, E24) |
 | `row_runs` | Not additive as a replacement of `cells`; reserved as a request parameter instead | Section 10 |
+| One screen or several per golden? | Several: a golden holds one or more screens, always as `[screen N]` blocks | The test model produces an ordered sequence of screens; one grammar and one canonical form (6.1) |
+| A one-screen golden: flat layout or a composite of one? | A composite of one | Least risk of a later breaking change; nothing to convert when a script gains a second checkpoint (6.1, OD11) |
+| Shared and per-screen masks and ignores | Shared `[masks]` and file-level `ignore` apply to every screen, per-screen ones to that screen; the union applies; no negation | A clock mask is written once; the effect of a line does not depend on where it sits (6.2, 6.5) |
+| Staleness of a shared `find=` mask | Stale only if it matches in no screen | A mask that finds nothing in one screen masks nothing there, and the ordinary comparison reports the difference (6.5, OD13) |
+| How are run screens paired with golden screens? | By position; a `name` is compared only when both sides carry one | An inserted checkpoint should show as a diff; names are labels (6.8) |
+| Does the script change? | No. Only an optional `name` on `snapshot` and `optional` on `wait_for`, both ignored by servers | No script command carries comparison fields, so a raw server cannot silently skip a comparison (6.11) |
+| A `golden` subcommand family? | No: `--expect` and `--update[=MODE]` of the one run command | The model is `app + input + expected output`; "golden" is only the file kind (6.11, OD15 to OD17) |
+| Does a timed-out `wait_for` fail a script? | Yes, in every `--script` run; `"optional":true` opts out | E27: otherwise a script cannot fail a test (6.11, OD12) |
+| Default terminal size of an `--expect` run | 80x24 unless `--cols`/`--rows` | E31: a verdict must not depend on the invoking terminal (6.11) |
+| Is the child's exit status part of the output? | Not in 0.1.0; `[exit]` is a reserved section | A status is not a screen; the script can read it (6.11, OD14) |
+| Whole script validated before the run? | Yes, in `--expect` mode | A malformed line must not leave a half-run (E28, 6.10) |
 
 ### OWNER DECISIONS
 
-The reviewers' verdicts are in parentheses (TF = TinyFugue, FA = the Fable reviewer).
+The reviewers' verdicts are in parentheses (TF = TinyFugue, FA = the Fable reviewer). OD1 to OD10 are from the earlier
+revisions, reworded for the run command; OD11 to OD17 were added when the owner chose the run-and-compare model.
 
 | # | Decision | Recommendation | If you choose otherwise |
 | --- | --- | --- | --- |
 | OD1 | **Schema number.** Call the frozen shape `schema_version` 2, leaving 1 as the provisional shape on `main` (TF agree, FA agree) | 2 | Keep 1: simpler number, but every artefact already recorded against the provisional shape (TinyFugue's, ours) becomes indistinguishable from the frozen one |
 | OD2 | **Sparse cells.** Omit defaults, as in 3.3, in the same change as the redesign (TF agree, FA agree) | Yes, now | Keep dense: simpler to read in JSON, but every added attribute grows every cell, the snapshot stays at 400 KB, and moving to sparse later is a breaking change |
-| OD3 | **Deprecation window.** For a superseded schema number: at least 12 months and until the next major, with `golden migrate` kept forever; a reader supports all grammar numbers up to its own (TF: state it in time, FA: not for grammar) | As stated | Two minor releases (the first draft): in 0.x that can be two weeks; none at all (refuse immediately) makes every bump break every stored golden |
-| OD4 | **Semantics mismatch in `golden check`.** Compare anyway: identical results pass with `WARN semantics`, different results are refused (exit 2) with the differences; `--strict-semantics` and `--accept-semantics` change this (TF and FA both proposed it) | As stated | Always refuse (the first draft): friendlier to describe, but one integer for all areas refuses every golden on every bump. Warn only: a golden can then fail for reasons that are not about the program |
+| OD3 | **Deprecation window.** For a superseded schema number: at least 12 months and until the next major, with `--update=migrate` kept forever; a reader supports all grammar numbers up to its own (TF: state it in time, FA: not for grammar) | As stated | Two minor releases (the first draft): in 0.x that can be two weeks; none at all (refuse immediately) makes every bump break every stored golden |
+| OD4 | **Semantics mismatch in a check.** Compare anyway: identical results pass with `WARN semantics`, different results are refused (exit 2) with the differences; `--strict-semantics` and `--accept-semantics` change this (TF and FA both proposed it) | As stated | Always refuse (the first draft): friendlier to describe, but one integer for all areas refuses every golden on every bump. Warn only: a golden can then fail for reasons that are not about the program |
 | OD5 | **Regex dialect** pinned to the RE2 common subset with ASCII classes and a stated rejection list (TF agree, FA agree) | Yes | A richer dialect (Python `re`) makes goldens depend on one language |
-| OD6 | **Known emulation deviations** (ED 1 on row 2, origin-mode reset, mode ?47): freeze them in semantics 1, list each precisely in the changelog, bump when upstream fixes them (TF agree: none touches tf; FA agree) | Freeze and document | Fix first by vendoring `alacritty_terminal`: a fork to maintain; goldens recorded before the fix would need `golden update` only if they exercised those sequences |
-| OD7 | **What 0.1.0 contains.** The frozen formats and `vtee golden write`, `check` and `update` (with `--restamp`, `--refresh-vocab`, `--portable`, `--format json`), plus the test vectors; `migrate` follows no later than the first schema or grammar bump (TF and FA agree) | As stated | Formats only, with the commands in 0.2: the formats would be frozen before the reference implementation validated them. Everything including `migrate`: more to build before a tag, for goldens that TinyFugue re-records anyway |
+| OD6 | **Known emulation deviations** (ED 1 on row 2, origin-mode reset, mode ?47): freeze them in semantics 1, list each precisely in the changelog, bump when upstream fixes them (TF agree: none touches tf; FA agree) | Freeze and document | Fix first by vendoring `alacritty_terminal`: a fork to maintain; goldens recorded before the fix would need `--update` only if they exercised those sequences |
+| OD7 | **What 0.1.0 contains.** The frozen formats and the run command (`--expect`, `--update` with the `record`, `restamp` and `vocab` modes, `--screen`, `--portable`, `--format json`, the four sources), plus the test vectors; `--update=migrate` follows no later than the first schema or grammar bump (TF and FA agree) | As stated | Formats only, with the command in 0.2: the formats would be frozen before the reference implementation validated them. Everything including `migrate`: more to build before a tag, for goldens that TinyFugue re-records anyway |
 | OD8 | **Vocabulary strategy.** Goldens declare the vocabulary they were written with, and the checker compares only that (4.1), against: every newly reported mode or attribute is a semantics bump | Declared vocabulary | Semantics bump for every addition: nothing to build in the header, but each new attribute refuses or warns on every stored golden |
 | OD9 | **Mode vocabulary at 0.1.0.** Add `?1002`, `?1003`, `?1005`; reserve `?1004` (ConPTY injects it) and `?1007` (no consumer) | As stated | Add all five of the first draft: `?1004` would be set on Windows and not on Linux for the same program, and every portable golden would need to ignore it |
-| OD10 | **A portable profile in 0.1.0** (`golden write --portable`, 6.14) | Yes | Leave it to authors: every cross-platform golden needs a hand-written `ignore` list that is easy to get wrong (the first draft's list was incomplete: E15 to E17) |
+| OD10 | **A portable profile in 0.1.0** (`--update --portable`, 6.14) | Yes | Leave it to authors: every cross-platform golden needs a hand-written `ignore` list that is easy to get wrong (the first draft's list was incomplete: E15 to E17) |
+| OD11 | **Single-screen golden layout.** Always a composite: a one-screen golden is `[screen 1]` plus its blocks (6.1) | Always a composite | The flat layout of the first draft for one screen and blocks for several: two parsers and two canonical forms, and a rewrite of a stored file the day a script gains a second `snapshot`. Cheaper to read for one screen (one line shorter) |
+| OD12 | **A timed-out `wait_for` fails a `--script` run** (exit 1, a `wait` mismatch with `--expect`), in every script run, with `"optional":true` as the opt-out (6.11). A deliberate change to today's exit 0 (E27) | Yes, now, while nothing is released | Only with `--expect`: the behaviour of a plain script run stays as measured, and the rule differs by mode. Or no change: a script still cannot fail a test, and `--expect` would pass a run whose waits all timed out as long as the final screens matched |
+| OD13 | **Staleness of a shared `find=` mask.** Stale only if it matches in no screen of the run (6.5) | At least one screen | "In every screen": a clock mask of a tf run would have to be repeated in every screen that has a clock and left out of the startup screen, which defeats sharing. "In any one screen" would let a mask silently stop meaning anything after it was needed only in some screens |
+| OD14 | **The child's exit status as expected output.** An optional trailing `[exit]` section recording it. Reserve the name, define it later | Defer; reserve `[exit]` | Define it now: a status is the other half of many tests (a TUI that quits with 0 after `q`), but it is not a screen, needs its own comparison rules and report kind, and the script can already read it (`wait_exit`) |
+| OD15 | **Option names.** `--expect GOLDEN`, `--update[=MODE]`, `--screen N`, `--snapshot FILE\|-`, `--fail-fast`, `--format text\|json`, `--portable`, `--strict-semantics`, `--accept-semantics`, `--accept-vocab`, `--max-mismatches N` (6.11) | As stated | Names are cheap to change before 0.1.0 and expensive after; `--expect` and `--update` are the two the owner chose |
+| OD16 | **`--update` mode value names.** `record` (the bare default), `restamp`, `vocab`, `migrate` (6.11, with the reasons) | As stated | `refresh-vocab`/`semantics`/`new` are the alternatives considered; none is clearer |
+| OD17 | **`migrate` stays an `--update` mode**, the one mode that needs no source | Yes | A separate option (`--migrate FILE`): a second spelling of "rewrite the expected file in place". The cost of keeping it an `--update` mode is the one exception in the table of illegal combinations |
 
 ## 9. Required changes before 0.1.0
 
@@ -1168,33 +1577,49 @@ Sizes are rough: S under a day, M a day or two, L several days. Dependencies are
 5. **Conformance data** (section 5.4): `tests/fixtures/conformance/expected/`, the exact-comparison test, the width
    sample and the test that runs it through the emulator, the escape-set data, the CI guard, the `snapshot` commit
    scope in commitlint and the release-plz changelog groups. **M** (after 2 and 4)
-6. **The golden library:** a module that parses, writes, compares and reports, with the region evaluation of 6.5, the
-   regex dialect (an ASCII-rewriting layer over a regex engine plus the rejection parser of 6.7), the vocabulary
-   handling of 4.1 and the version logic of 6.8. **L** (after 2; the largest item)
-7. **`vtee golden write|check|update`** with `--restamp`, `--refresh-vocab`, `--portable`, `--format json`,
-   `--max-mismatches`, `--strict-semantics`, `--accept-semantics`, the exit codes of 6.10 and a test that a bad flag
-   exits 64 and a refusal exits 2. **M** (after 6)
-8. **Test vectors** (appendix A): about 40 golden/snapshot/verdict triples, the 46 regex vectors, the round-trip files,
-   and a runner test; confirm that a second implementation (TinyFugue's checker) passes them. **M** (written alongside
-   6; the triples are the acceptance test for it)
-9. **`golden migrate`** for schema 1 snapshots and grammar 0 goldens (5.3). **M** (no later than the first schema or
-   grammar bump; may follow 0.1.0)
-10. **Documentation:** the golden spec promoted to `docs/guide/golden-format.md`, `docs/guide/snapshot-semantics.md`
-    created with the semantics 1 entry and the three known deviations, `protocol.md` and `versioning.md` updated, the
-    platform table in `windows.md`, a testing page section. **M** (after 7)
-11. **Platform CI:** a few repository goldens checked on both Linux and Windows jobs, recorded with `--portable`. **S**
-    (after 7)
-12. **Tell TinyFugue** the changes from their draft (below) before they record real goldens, and again when schema 2
+6. **The golden library:** a module that parses, writes, compares and reports **composite** goldens (screen blocks,
+   shared and per-screen masks and ignores, position pairing, `name`), with the region evaluation of 6.5, the regex
+   dialect (an ASCII-rewriting layer over a regex engine plus the rejection parser of 6.7), the vocabulary handling of
+   4.1, the version logic and the semantics table of 6.8, and the reports of 6.9 (text and JSON, per-screen). **L**
+   (after 2; the largest item)
+7. **The run command** (replaces the four `golden` subcommands of the previous draft by one runner with modes):
+   `--expect` (check), `--update[=record|restamp|vocab]`, `--screen`, `--snapshot`, `--portable`, `--format`,
+   `--fail-fast`, `--max-mismatches`, `--strict-semantics`, `--accept-semantics`, `--accept-vocab`; the four sources
+   of 6.11, including the **new combination** `--connect` with `--script`; the table of illegal combinations with its
+   messages; whole-script validation before the program starts; the 80x24 default; headless behaviour; the exit codes
+   of 6.10 and a test that every bad option exits 64 and a refusal exits 2. **L** (after 6; it adds the script-runner
+   integration that the four small subcommands did not need, and is one command with five code paths instead of four
+   thin ones: sized up from M)
+8. **A timed-out `wait_for` fails the run** (OD12): the runner change in `src/client.rs` (exit 1, the stderr message,
+   the `optional` field, the `wait` mismatch kind), accepting `name` on `snapshot`, and the tests of every existing
+   script test that relied on exit 0. **S** (with 7; it is the same code path)
+9. **Test vectors** (appendix A): about 40 region/mask/assert triples, about 20 composite and pairing vectors, about 25
+   command-line vectors, the 46 regex vectors, the round-trip files, and a runner test; confirm that a second
+   implementation (TinyFugue's checker) passes them. **M** (written alongside 6 and 7; the triples are the acceptance
+   test for them)
+10. **`--update=migrate`** for schema 1 snapshots and grammar 0 goldens (5.3). **M** (no later than the first schema or
+    grammar bump; may follow 0.1.0)
+11. **Documentation:** the golden spec promoted to `docs/guide/golden-format.md`, the run command into
+    `docs/guide/cli-reference.md` and `docs/guide/testing-tuis.md`, `docs/guide/snapshot-semantics.md` created with the
+    semantics 1 entry and the three known deviations, `protocol.md` and `versioning.md` updated, the platform table in
+    `windows.md`, `examples/`. **M** (after 7)
+12. **Platform CI:** a few repository goldens (one of them a multi-screen script run) checked on both Linux and Windows
+    jobs, recorded with `--portable`. **S** (after 7)
+13. **Tell TinyFugue** the changes from their draft (below) before they record real goldens, and again when schema 2
     lands on `main`. **S**
 
-The order is 1, 2, then 3 and 4 and 5 together, then 6, 7 and 8, then 10 and 11, with 9 free to follow. TinyFugue's
-recordings made under schema 1 are re-recorded after step 2; they planned to re-record anyway.
+The order is 1, 2, then 3 and 4 and 5 together, then 6, then 7, 8 and 9 together, then 11 and 12, with 10 free to
+follow. TinyFugue's recordings made under schema 1 are re-recorded after step 2 (they planned to re-record anyway).
 
 ### Changes from TinyFugue's draft
 
 - Assertions moved to their own `[assert]` section.
 - `[text]` is cell-per-token with escapes (`\.`, `\u{H}`, `\+{H}`, `\\`); the draft joined the cells' `ch` values and had no
   rule for wide characters.
+- A golden holds one or more screens, always as `[screen N]` blocks: the draft's flat single-screen layout is now
+  `[screen 1]`. The header is split into a **file header** (versions, vocabulary, file-wide `ignore`) and a **screen
+  header** (`size`, `cursor`, `modes`, `alt_screen`, `title`, `wrapped`, `name`, screen `ignore`). A shared `[masks]`
+  section before the first screen applies to every screen.
 - Header: `semantics`, `vocab`, `wrapped`, `ignore`, `x-producer` added; `title` is `null` or a JSON string, and the
   cursor line is `hidden=B`.
 - `modes-ignore` and `title-ignore` became `ignore modes ...` and `ignore title`; `ignore attrs` and the cursor forms
@@ -1203,7 +1628,9 @@ recordings made under schema 1 are re-recorded after step 2; they planned to re-
   and test vectors fix the dialect.
 - A whole-row region compares the row text without trailing blanks; `rows=A-B` is one span per row; the mask and
   assertion rules are the pseudocode of 6.5.
-- The grammar number is `vtee-golden 1`; the draft's `vtee-golden 0` is read by `golden migrate`.
+- The tooling is one command, not a checker script: `vtee --script S --expect G -- APP` to check, `--update` to
+  record, instead of a prototype `golden.py check`.
+- The grammar number is `vtee-golden 1`; the draft's `vtee-golden 0` is read by `--update=migrate`.
 
 ## 10. Deferred, with the additive path reserved
 
@@ -1221,22 +1648,35 @@ Each path below was checked against the rule "an existing reader and an existing
 | `snapshot` command parameters (`scrollback`, `lines`, a cell region) | optional request fields | Absent means today's reply | Each is additive |
 | Grapheme clustering | a different width model, behind `semantics_version` | **Not additive**: it changes meaning, so it is a semantics bump by the table in 4.1 | Changes meaning |
 | Structural queries for tables (columns by header alignment, numeric ranges) | new assertion forms behind a new grammar number | Old goldens parse unchanged; only goldens using the new forms need a newer reader | TinyFugue's own recordings suggest the form; build after masks |
+| The program's exit status as expected output | an `[exit]` section at the end of the file (the name is reserved: a grammar-1 reader rejects it) | A new section behind a new grammar number; an old reader refuses the new file loudly, and old goldens parse unchanged | A status is not a screen and needs its own rules and report kind; the script can read it with `wait_exit` today (OD14) |
+| A shared `[assert]` list | `[assert]` before the first `[screen]` (rejected in grammar 1) | A new section behind a new grammar number | No consumer yet |
+| Pairing screens by name, several goldens per run, an overall run timeout | `--pair-by name`, repeated `--expect`, `--timeout` | New options; the default is today's behaviour | Position pairing is enough for the recorded cases; CI jobs have their own time limits |
+| A shared `ignore` that a screen can cancel | none | Would need a negation form | Not needed; an `ignore` only some screens need belongs in those screens (6.2) |
 | Images (sixel, kitty graphics), selection, timestamps | none | | Not in the emulator |
 
 ## Appendix A. Test vectors
 
-A second implementation of `golden check`, in any language, proves it agrees by passing these. They are frozen data
-under the rules of section 5.4. Layout, in the repository when item 8 of section 9 is done:
+A second implementation of the checker, in any language, proves it agrees by passing these. They are frozen data
+under the rules of section 5.4. A vector is a **run**: a golden, the actual screens (an NDJSON file in the format of
+source (d), 6.11, so every vector can be run offline with `--snapshot`), the command-line options, and the expected
+verdict. Layout, in the repository when item 9 of section 9 is done:
 
 ```
 tests/fixtures/golden-vectors/
   README.md                         how to run the vectors; the version of this document they belong to
-  regions/<id>-<name>/
-      golden.golden                 the golden under test
-      snapshot.json                 the actual screen (schema 2)
+  runs/<id>-<name>/
+      golden.golden                 the golden under test (one or more screens)
+      run.ndjson                    the actual screens, one snapshot document per line (schema 2)
+      args                          the options after `--expect golden.golden --snapshot run.ndjson`, one per line (may be empty)
       expected.txt                  the exact text report
       expected.json                 the exact JSON report
       exit                          the expected exit code, one number
+  cli/<id>-<name>/
+      args                          the whole command line, one argument per line
+      stderr-first-line             the normative first clause of the message (illegal combinations)
+      exit                          the expected exit code
+  update/<id>-<name>/
+      before.golden  run.ndjson  args  after.golden  stdout  exit     the file rewritten by an `--update` run, byte for byte
   regex/vectors.tsv                 pattern <TAB> subject <TAB> operation <TAB> result   (A.3)
   roundtrip/*.golden                canonical files: write(parse(g)) must equal g byte for byte
   reject/*.golden                   one malformed file per rule of 6.13, expected exit 65 (name says which rule)
@@ -1246,7 +1686,7 @@ tests/fixtures/golden-vectors/
 
 ### A.1 The region, mask, assert and version vectors
 
-About 40, each pinning one rule of sections 6.5 to 6.8. The `regions/` directories are named `<id>-<name>`:
+About 40, each pinning one rule of sections 6.5 to 6.8. The `runs/` directories are named `<id>-<name>`:
 
 | Id | Name | Pins |
 | --- | --- | --- |
@@ -1254,7 +1694,7 @@ About 40, each pinning one rule of sections 6.5 to 6.8. The `regions/` directori
 | R02 | mask-rows-range-per-row-regex | `rows=7-8` is two spans; each matches the pattern on its own |
 | R03 | mask-rows-range-one-row-fails | a regex failure in the second row is a `mask` mismatch |
 | R04 | mask-find-pass | a `find=` yields spans and the figures vary |
-| R05 | mask-find-stale | a `find=` with no span at all is a failure |
+| R05 | mask-find-stale | a per-screen `find=` with no span at all is a failure |
 | R06 | mask-find-missing-in-one-row-ok | `rows=2-4`, one row without a match: not stale |
 | R07 | mask-find-cols-anchors-inside | `$` anchors at the end of the `cols=` range |
 | R08 | mask-find-empty-match-skipped | `a*` yields only non-empty spans |
@@ -1286,29 +1726,75 @@ About 40, each pinning one rule of sections 6.5 to 6.8. The `regions/` directori
 | R34 | schema-higher-refused | exit 2 |
 | R35 | vocab-unknown-token-refused | a declared token the reader does not know: exit 2 |
 | R36 | crlf-accepted | the same golden with CRLF line endings passes |
-| R37 | portable-golden-passes-both | a `--portable` golden against a Linux and a ConPTY-shaped snapshot |
+| R37 | portable-golden-passes-both | a `--portable` golden against a Linux and a ConPTY-shaped screen |
+| R38 | vocab-unknown-token-accepted | the same golden with `--accept-vocab`: PASS with `WARN vocab` |
 
-The `reject/` files cover each rule of 6.13: BOM, lone CR, NUL, bad first line, missing and duplicated keys, unknown
-section, wrong row count, bad label, `\.` at the start of a row and after `\.`, `\+` at the start of a row and after
-`\.`, a bad `\u{}`, overlapping runs, an empty run, a repeated token, an undeclared attribute, a comment in `[text]`, a
-region outside the size, a mask with nothing to do, `text="EXACT"` on several rows and with `find=`, a regex outside the
-dialect, a bad JSON string, a repeated token in a `mask` line, an empty `ignore modes`.
+**Composite, pairing and run-level vectors.** About 25 more, in the same `runs/` layout:
+
+| Id | Name | Pins |
+| --- | --- | --- |
+| C01 | composite-three-screens-pass | the three-screen tf run of 7.1 passes against itself |
+| C02 | shared-mask-applies-to-every-screen | a clock mask written once masks all three screens |
+| C03 | per-screen-mask-applies-to-its-screen-only | the startup screen's build-line masks do not mask screens 2 and 3 |
+| C04 | shared-and-screen-masks-union | a part is skipped if either list covers it |
+| C05 | shared-find-matches-in-one-screen-not-stale | a shared `find=` that matches in only one screen is not stale |
+| C06 | shared-find-matches-in-no-screen-stale | the same mask matching in none: a run-level `mask` mismatch (`problem` `stale`) |
+| C07 | per-screen-find-stale-in-its-screen | a per-screen `find=` with no span in its screen is stale |
+| C08 | shared-ignore-applies-to-every-screen | a file-level `ignore title` |
+| C09 | screen-ignore-applies-to-one-screen | a screen-level `ignore wrapped` |
+| C10 | shared-region-mask-outside-a-screen-rejected | a shared `row=`/`cols=` mask outside the smallest screen: exit 65 |
+| P01 | pair-by-position | screen 2 of the run is compared with screen 2 of the golden |
+| P02 | fewer-screens-than-golden | a `screens` mismatch with `missing`; the common prefix is compared |
+| P03 | more-screens-than-golden | a `screens` mismatch with `extra` |
+| P04 | inserted-checkpoint-shifts-everything | one extra screen early: the later screens differ |
+| P05 | names-equal-pass | both sides name a screen and the names match |
+| P06 | names-differ | a `name` mismatch for that screen; its cells are still compared |
+| P07 | name-on-one-side-only-ignored | only the golden names the screen: no mismatch |
+| P08 | one-screen-run-against-composite | a `screens` mismatch whose message adds the `--screen N` hint |
+| P09 | screen-selector | `--screen 2` against a one-screen run compares golden screen 2 only |
+| P10 | screen-selector-out-of-range | `--screen 4` on a three-screen golden: exit 64 |
+| W01 | wait-timeout-fails | a `wait_for` reply with `"matched":false`: a `wait` mismatch, exit 1 |
+| W02 | wait-timeout-optional-passes | the same with `"optional":true` in the script line: PASS |
+| W03 | wait-timeout-with-matching-screens | screens equal the golden but a wait timed out: still exit 1 |
+| W04 | fail-fast-stops-at-first-problem | later screens are `skipped`, the exit code is the first problem's |
+| W05 | other-replies-are-not-screens | `wait_exit` and `exit_status` replies in `run.ndjson` do not become screens |
+
+**Command-line vectors** (`cli/`, no run): one per row of the table of illegal combinations in 6.11 (about 14), plus
+`--strict-semantics` with `--accept-semantics`, an unknown `--update` mode, `--expect` with a missing golden (exit 66,
+message with the `--update` hint), a malformed golden (65), a missing script (66), and a bad flag exits 64 not 2.
+
+**Update vectors** (`update/`): `--update` creating a file (`CREATED`, no masks); re-recording a screen and keeping
+masks, assertions and comments verbatim; adding a screen; dropping a screen (the message lists what it had); an
+`UNCHANGED` re-record produces an empty diff including `x-producer`; `--update` refusing to write after a timed-out
+wait (exit 1, `not written`); `--update --screen 2` rewriting one block; `--update=restamp` succeeding and refusing;
+`--update=vocab` replacing the vocabulary; `--update=migrate` on a grammar-0 file and a schema-1 file, with the unknown
+facts written as unknown, and on an up-to-date file (`UNCHANGED`).
+
+The `reject/` files cover each rule of 6.13: BOM, lone CR, NUL, bad first line, missing and duplicated keys (in the file
+header and in a screen header), a key in the wrong header, unknown and duplicated sections, no `[screen]`, a wrong screen
+number, a `[text]` before the first `[screen]`, `[exit]`, a shared `[masks]` after a screen, wrong row count, bad label,
+`\.` at the start of a row and after `\.`, `\+` at the start of a row and after `\.`, a bad `\u{}`, overlapping runs, an
+empty run, a repeated token, an undeclared attribute, a comment in `[text]`, a region outside the size, a mask with
+nothing to do, `text="EXACT"` on several rows and with `find=`, a regex outside the dialect, a bad JSON string, a
+repeated token in a `mask` line, an empty `ignore modes`.
 
 ### A.2 Two vectors in full
 
-A 6 by 2 screen whose row 0 reads `ab 12 ` with the digits bold. The golden:
+A 6 by 2 screen whose row 0 reads `ab 12 ` with the digits bold. The golden (one screen, so `[screen 1]`):
 
 ```text
 vtee-golden 1
 schema 2
 semantics 1
+vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
+vocab attrs bold dim italic reverse strike conceal underline ulcolor link
+
+[screen 1]
 size 6x2
 cursor row=0 col=0 shape=block hidden=false
 modes
 alt_screen false
 title null
-vocab modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
-vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 
 [text]
 0|ab 12
@@ -1321,21 +1807,24 @@ vocab attrs bold dim italic reverse strike conceal underline ulcolor link
 mask row=0 cols=3-4 text=/[0-9]+/
 ```
 
+The mask is on line 22 of the file. The run (source (d)) is the single document of `run.ndjson`.
+
 **R-a (pass, exit 0).** The actual screen's row 0 is `ab 99 ` with the `99` bold. Cells 0, 1, 2 and 5 equal the golden's; cells
 3 and 4 are masked for text, the span text `99` matches `^(?:[0-9]+)$`, and the bold attribute equals the stored one.
-Report: `PASS g.golden`.
+Report: `PASS g.golden (1 screen)`.
 
 **R-b (fail, exit 1).** The actual row 0 is `ab x7 ` with the `x7` bold. The span text `x7` does not match. Report:
 
 ```text
-FAIL g.golden: 1 mismatch
-  mask       golden line 20   mask row=0 cols=3-4 text=/[0-9]+/   row 0 col 3-4   actual 'x7' does not match
+FAIL g.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  mask       golden line 22   mask row=0 cols=3-4 text=/[0-9]+/   row 0 col 3-4   actual 'x7' does not match
 ```
 
 and the JSON report:
 
 ```json
-{"golden":"g.golden","result":"fail","grammar":1,"schema":2,"semantics":1,"snapshot":{"schema":2,"semantics":1},"total":1,"shown":1,"mismatches":[{"kind":"mask","line":20,"mask":"mask row=0 cols=3-4 text=/[0-9]+/","problem":"text","row":0,"col_start":3,"col_end":4,"actual":"x7"}],"warnings":[]}
+{"golden":"g.golden","result":"fail","grammar":1,"schema":2,"semantics":1,"snapshot":{"schema":2,"semantics":1},"screens_expected":1,"screens_actual":1,"total":1,"shown":1,"run":[],"screens":[{"index":1,"name":null,"result":"fail","mismatches":[{"kind":"mask","line":22,"mask":"mask row=0 cols=3-4 text=/[0-9]+/","problem":"text","row":0,"col_start":3,"col_end":4,"actual":"x7"}]}],"warnings":[]}
 ```
 
 ### A.3 Regex vectors
@@ -1465,3 +1954,35 @@ decision and the reason are in the table.
 | FA-C: `underline` changes type under the same name | **Decided: keep the name** | Failure modes for readers that skip the version check argue for it. 3.2 |
 | FA OD1 to OD7 | **Agreed**, with the changes to OD3, OD4, OD5 and OD7 above | Section 8 |
 | FA-E: not verified (`wrapped_rows` live, Linux ConPTY equivalent, Windows vim and less) | **Open** | `wrapped_rows` is inferred from the emulator source (E20) and is verified when item 3 of section 9 is built |
+
+### The run-and-compare model (owner change after the reviews)
+
+After the two reviews the owner chose the test model `app + input + expected output` and removed the `golden`
+subcommand family. These are the changes and their reasons; the earlier rows above that mention `golden write`,
+`golden check`, `golden update` or `golden migrate` refer to the options below.
+
+**Mapping of the earlier names.**
+
+| Earlier (in the reviews and in rows above) | Now |
+| --- | --- |
+| `vtee golden check G (--connect S \| --snapshot F)` | `vtee --expect G (--connect S \| --snapshot F)`; with a script, `--script X --expect G -- APP` |
+| `vtee golden write -o G ...` | `vtee ... --expect G --update` (creates the file if it is missing) |
+| `vtee golden update G ...` | `vtee ... --expect G --update` (keeps masks, assertions, comments, `ignore`) |
+| `golden update --restamp` | `--update=restamp` |
+| `golden update --refresh-vocab` | `--update=vocab` |
+| `vtee golden migrate FILE...` | `vtee --expect FILE --update=migrate` |
+| `golden write --portable` | `--update --portable` |
+
+| Change | Disposition | Reason and where it landed |
+| --- | --- | --- |
+| A golden holds one or more screens | **Accepted (owner)** | The output of a script is a sequence of screens. Composite grammar: 6.1, 6.2 |
+| A one-screen golden keeps the flat layout, or is a composite of one | **Decided: composite of one** | One grammar and one canonical form; a flat form would need a conversion when a script gains a second `snapshot`. 6.1, OD11 |
+| Shared masks across screens; how they combine; staleness | **Decided** | Union, no negation; a shared `find=` mask is stale only if it matches in no screen. 6.5, OD13 |
+| Pairing by position; names as labels | **Decided** | An inserted checkpoint shows as a diff; a `name` is compared only when both sides have one. 6.8 |
+| No golden fields in script commands | **Accepted (owner)** | An optional `name` on `snapshot` and `optional` on `wait_for` are ignored by servers. 6.11 |
+| A timed-out `wait_for` fails a script | **Decided**, owner decision | E27 shows a script cannot fail today. 6.11, OD12 |
+| The four sources, the legality table and its messages | **Decided** | 6.11 |
+| Update modes `record`, `restamp`, `vocab`, `migrate` | **Decided**, owner decision | 6.11, OD16, OD17 |
+| Whole-script validation and the 80x24 default under `--expect` | **Decided** | E28 and E31. 6.10, 6.11 |
+| The child's exit status as expected output | **Deferred; name `[exit]` reserved** | 6.11, section 10, OD14 |
+| The earlier reviews' test-vector, regex, escape-set and report requirements | **Carried over unchanged** | Appendices A and B were extended, not replaced, for composites, pairing, the command line and update modes |
