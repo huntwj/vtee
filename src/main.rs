@@ -60,12 +60,11 @@ impl From<WritableMode> for vtee::WritePolicy {
 /// path can never contain NUL.
 const BARE_LISTEN: &str = "\0";
 
-/// `vtee`: a terminal multiplexer for AI and testing - tee for a TUI, with queryable terminal
-/// state (`docs/architecture.md`). Three primary modes, selected by which flags are given
-/// rather than a subcommand, so existing invocations keep working as flags are added:
-/// `--script <path>` for a batch test run, `--connect <path>` to attach to someone else's
-/// `--listen`, and plain `[--] <command> [args...]` for everything else (interactive, with
-/// `--headless` for an AI-only session - `docs/decisions.md`).
+/// A terminal multiplexer for AI and testing: run a program in a virtual terminal that people and
+/// programs can watch, type into and read back as structured data.
+///
+/// `vtee [OPTIONS] [--] PROGRAM [ARGS]...` starts a session. `--script PATH` runs a batch of
+/// JSON commands and exits; `--connect PATH` talks to a running session's command socket.
 #[derive(Parser)]
 #[command(name = "vtee", version)]
 struct Cli {
@@ -75,25 +74,23 @@ struct Cli {
     #[command(flatten)]
     verbosity: clap_verbosity_flag::Verbosity<InfoLevel>,
 
-    /// `CommandResult.snapshot.lines` only, for a human skimming output, instead of the full
-    /// JSON - requested by TinyFugue as a quicker alternative while developing a script.
-    /// Shared by `--script` and `--connect`; meaningless (and ignored) otherwise.
+    /// With `--script` or `--connect`, print only the screen rows of each result instead of the
+    /// full JSON. Ignored otherwise.
     #[arg(long)]
     text: bool,
 
-    /// Attach to someone else's `--listen` socket instead of spawning anything - the observation
-    /// client (`docs/roadmap.md`, "connect and watch").
+    /// Talk to a running session's command socket instead of starting a program: read JSON
+    /// commands from stdin, one per line, and print the replies.
     #[arg(long, value_name = "PATH")]
     connect: Option<PathBuf>,
 
-    /// Record the child's raw byte stream (asciicast-compatible) for later `replay()` - distinct
-    /// from the leveled diagnostic logging `-v` controls.
+    /// Record the program's raw output to PATH as an asciicast v2 file. `vtee replay PATH`
+    /// shows the final screen. (`-v` controls diagnostic logging, which is separate.)
     #[arg(long, value_name = "PATH")]
     log: Option<PathBuf>,
 
-    /// Run a newline-delimited-JSON script of `Command`s non-interactively (`docs/roadmap.md`,
-    /// the batch CLI TinyFugue asked for) instead of the plain interactive mode. Conflicts with
-    /// every interactive-only flag below rather than silently ignoring them.
+    /// Run the JSON commands in PATH (one per line) against the program, print each result, then
+    /// stop the program. Cannot be combined with the session options below.
     #[arg(
         long,
         value_name = "PATH",
@@ -104,87 +101,69 @@ struct Cli {
     )]
     script: Option<PathBuf>,
 
-    /// Observation/control socket (`docs/decisions.md`). Read-only observation is on by default
-    /// now even without this flag at all; give it explicitly (bare, or `--listen=<path>`) to pick
-    /// your own path instead of the hardened per-user default, or pair with `--writable` for
-    /// write access. The `=` is required for an explicit path (POSIX's own rule for an optional-
-    /// value long option, same as `grep --color[=WHEN]`) - `--listen <path>` with a space is not
-    /// the same thing and will be read as `<path>` starting the command instead.
+    /// Put the session's JSON command socket at PATH instead of in the per-user session
+    /// directory. Write it as `--listen=PATH` (the `=` is required; with a space, PATH would be
+    /// read as the program to run). Every session has a read-only socket by default.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = BARE_LISTEN, value_name = "PATH", conflicts_with = "no_listen")]
     listen: Option<PathBuf>,
 
-    /// Opt out of the default-on observation socket entirely - for a CI script driving `vtee`
-    /// through plain stdin/stdout, which has no use for an attachable socket and would rather
-    /// not have one appear in a shared `/tmp` at all.
+    /// Create no socket, pid file or session name, so nothing is left in the session directory
+    /// (useful for a CI run driven only through stdin and stdout).
     #[arg(long, conflicts_with = "listen")]
     no_listen: bool,
 
-    /// Allow write commands on the observation socket (`docs/roadmap.md`, "Full duplex").
-    /// Meaningless without a socket to allow them on - rejected alongside `--no-listen` for the
-    /// same reason `--headless` is, rather than being silently accepted and silently ignored.
-    /// `open`: any connected writer, no arbitration - fine when nothing else is also writing.
-    /// `exclusive`/`exclusive-shared`: "take the pen" - one holder at a time via
-    /// `acquire_write`/`release_write`; the two differ only in whether a human's own typing
-    /// also revokes whoever currently holds it.
+    /// Let clients of the command socket write (send text and keys, resize), not just read. MODE
+    /// is `open` (anyone, no arbitration; the default), `exclusive` (one writer at a time, who
+    /// takes access with `acquire_write`) or `exclusive-shared` (as `exclusive`, and typing at
+    /// this session's own terminal takes access back). Write it as `--writable=MODE`.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "open", value_name = "MODE", conflicts_with = "no_listen")]
     writable: Option<WritableMode>,
 
-    /// Don't forward our own stdin to the child - a human can watch (output still forwarded)
-    /// without being able to type, leaving the pty to a `--connect --writable` client instead.
+    /// Show the program's output in this terminal but do not send this terminal's keystrokes to
+    /// it (socket clients and `attach` can still type).
     #[arg(long)]
     no_stdin: bool,
 
-    /// Print the final screen state to stderr when the child exits. Off by default
-    /// (`docs/decisions.md`): redundant for a human who already watched the real output render
-    /// live, and never what `--script`/`--listen` are for.
+    /// When the program exits, print the final screen to stderr.
     #[arg(long)]
     dump_on_exit: bool,
 
-    /// AI-only session: spawn and bind both sockets, but don't also self-attach (no human
-    /// stdin/stdout forwarding, no raw-mode guard/watchdog, and a remote `resize` is never
-    /// rejected as "owned by the real terminal" since there isn't one) - declared rather than
-    /// left to the accident of whatever stdin/stdout happen to be (`docs/decisions.md`).
+    /// Run without using this terminal at all: no input or output forwarding, so the session is
+    /// driven through its sockets and `vtee attach`.
     #[arg(long, conflicts_with = "no_listen")]
     headless: bool,
 
-    /// Session name, for `vtee attach`/`ls`/`kill` to find it by later - defaults to the
-    /// program's own basename (`docs/architecture.md`, "session naming"). Two live sessions
-    /// can't share a name; starting one while another of the same name is still running is a
-    /// usage error unless `--attach-if-exists` (or its config default) says otherwise.
+    /// Name this session (default: the program's file name) so `attach`, `ls` and `kill` can find
+    /// it. A live session's name can't be reused unless `--attach-if-exists` is set.
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
 
-    /// Attach to the already-live session instead of erroring, if `--name` (or the default
-    /// name) is already taken - tmux's own `-A`. Overrides the config file's standing default
-    /// either direction; `--no-attach-if-exists` forces the error even if the config default is
-    /// set.
+    /// If a live session already has this name, attach to it instead of failing (like tmux's
+    /// `new-session -A`). Overrides the config file's `attach_if_exists`.
     #[arg(long, conflicts_with = "no_attach_if_exists")]
     attach_if_exists: bool,
 
+    /// Fail if the name is taken, even when the config file sets `attach_if_exists = true`.
     #[arg(long, conflicts_with = "attach_if_exists")]
     no_attach_if_exists: bool,
 
-    /// Virtual tty width, overriding the real terminal's own (`docs/roadmap.md`, "virtual tty
-    /// specs" - the first of more to follow: terminal emulation mode, colour support, ...).
-    /// Falls back to the real terminal's size, or 80 if there isn't one.
+    /// Terminal width in columns, 1-1000. Default: this terminal's width, else 80. Applies to
+    /// `--script` too.
     #[arg(long, value_name = "N")]
     cols: Option<u16>,
 
-    /// Virtual tty height - see `--cols`. Falls back to the real terminal's size, or 24.
+    /// Terminal height in rows, 1-1000. Default: this terminal's height, else 24. Applies to
+    /// `--script` too.
     #[arg(long, value_name = "N")]
     rows: Option<u16>,
 
-    /// Set (or override) an environment variable on the spawned child, `KEY=VALUE` - repeatable.
-    /// Applied on top of `vtee`'s own inherited environment, not in place of it (requirement
-    /// 6, "Deterministic": `TERM` is just one entry here, not a separate flag). Shared by every
-    /// mode, same as `--cols`/`--rows` - unlike those, `run_script` does read this one too.
+    /// Set an environment variable for the program, `KEY=VALUE`; repeat for more. They are added
+    /// to the inherited environment, which is not cleared. Applies to `--script` too.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair)]
     env: Vec<(String, String)>,
 
-    /// The program to run, and its own arguments - everything after the last recognized flag
-    /// (or after an explicit `--`, needed if the program's own name or first argument could
-    /// otherwise be mistaken for one of ours). Not required with `--connect`, which has nothing
-    /// to spawn.
+    /// The program to run and its arguments. Put `--` before it if its name or first argument
+    /// could be mistaken for an vtee option. Not needed with `--connect`.
     // Not `required_unless_present`: clap rejects naming a subcommand field there. `main()`
     // checks it instead, after subcommands and `--connect` have already returned.
     #[arg(trailing_var_arg = true, value_name = "PROGRAM")]

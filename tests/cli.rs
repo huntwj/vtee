@@ -59,6 +59,40 @@ fn ls_help_describes_the_columns_it_prints() {
         .stdout(predicate::str::contains(", age").not());
 }
 
+/// `--help` is for users: it must not leak project-internal vocabulary, and every flag needs a line.
+#[test]
+fn help_is_user_facing_and_covers_every_flag() {
+    let out = vtee().arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    for internal in ["TinyFugue", "requirement 6", "CommandResult", "docs/roadmap.md", "docs/decisions.md"] {
+        assert!(!help.contains(internal), "--help mentions {internal:?}");
+    }
+    for flag in [
+        "--text",
+        "--connect",
+        "--log",
+        "--script",
+        "--listen",
+        "--no-listen",
+        "--writable",
+        "--no-stdin",
+        "--dump-on-exit",
+        "--headless",
+        "--name",
+        "--attach-if-exists",
+        "--no-attach-if-exists",
+        "--cols",
+        "--rows",
+        "--env",
+    ] {
+        let at = help.find(&format!("      {flag}")).unwrap_or_else(|| panic!("--help does not list {flag}"));
+        let after = &help[at..];
+        let described = after.lines().nth(1).is_some_and(|l| l.trim_start().len() > 10);
+        assert!(described, "{flag} has no help line");
+    }
+    assert!(help.contains("Fail if the name is taken"));
+}
+
 #[test]
 fn requires_a_command_unless_connecting() {
     // Enforced manually now, not via clap's own `required_unless_present` (which can't
