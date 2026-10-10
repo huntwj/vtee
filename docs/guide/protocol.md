@@ -39,6 +39,9 @@ Strings are ordinary JSON. Control characters must be escaped, and JSON has no o
 
 Reply: `{"cmd":"snapshot","snapshot":{...}}`. See [the snapshot schema](#snapshot-schema).
 
+A script line may add `"name":"connected"`, a label for the checkpoint that a golden records (`--expect`). A session
+ignores it.
+
 ### `wait_for`
 
 ```
@@ -55,8 +58,12 @@ of the joined text. Only the visible screen is searched, not the scrollback. It 
 and does not poll.
 
 Reply: `{"cmd":"wait_for","matched":true,"snapshot":{...}}`. `matched` is `false` when it timed out; the snapshot is
-the screen at that moment either way, so a timeout is not an error. The snapshot is taken at the instant of the
-match, which makes it safe to use for the next decision.
+the screen at that moment either way, so a timeout is not an error on the socket. The snapshot is taken at the
+instant of the match, which makes it safe to use for the next decision.
+
+In a script file run by `vtee --script` (or `--connect --script`) a timed-out wait does fail the run: exit 1, with a
+line on standard error. The field `"optional":true` on the script line says the wait may time out. It is read by the
+script runner only; a session ignores it, and so it is safe to leave in a line sent to one.
 
 ### `wait_ms`
 

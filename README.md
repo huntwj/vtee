@@ -21,11 +21,10 @@ It started as a way to test TinyFugue, whose display code cannot be tested witho
 Pre-1.0. The core feature set works on Linux and Windows and is covered by automated tests that run in CI on
 Ubuntu and Windows runners. The interface may still change.
 
-Versions 0.0.x are early previews that reserve the crate name. The snapshot shape is frozen, but the golden-file
-format and the `--expect` runner for screen tests are not built yet, and the input-policy options are still being
-designed. Version numbers
-follow semantic versioning driven by commit messages: see [docs/releasing.md](docs/releasing.md) and the
-[stability policy](docs/guide/versioning.md).
+Versions 0.0.x are early previews that reserve the crate name. The snapshot shape is frozen. Screen tests with
+golden files (`vtee --script S --expect GOLDEN -- APP`) are new in 0.1.0, and the input-policy options are still being
+designed. Version numbers follow semantic versioning driven by commit messages: see
+[docs/releasing.md](docs/releasing.md) and the [stability policy](docs/guide/versioning.md).
 
 License: dual-licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
 at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
@@ -76,6 +75,15 @@ End it:
 
 ```
 vtee kill demo
+```
+
+To test a program's screens, record them once into a golden file and then check against it (the script is the
+JSON commands to type; each `snapshot` in it is a checkpoint). The check exits 0 on a pass, 1 on a difference and 2
+when the golden was recorded under other version numbers; see [testing TUIs](docs/guide/testing-tuis.md#golden-files):
+
+```
+vtee --script flow.ndjson --expect flow.golden --update -- tf     # CREATED flow.golden: 3 screens
+vtee --script flow.ndjson --expect flow.golden -- tf              # PASS flow.golden (3 screens)
 ```
 
 To run a program with your own terminal as usual while still exposing it to other tools, leave out `--headless`:

@@ -15,7 +15,7 @@
 | **script** | A file of JSON commands run in order against a fresh program (`--script`). |
 | **stale** | A session record whose holder is gone but whose files were left behind, for example after a `SIGKILL`. `vtee ls` says `stale`; `vtee kill <name>` cleans it up. See [troubleshooting](troubleshooting.md). |
 | **pen** | Informal name for exclusive write access: under an exclusive write policy only the connection that holds it (after `acquire_write`) may type. See [write policies](protocol.md#write-policies). |
-| **golden** | A stored expected screen that a test compares against. A golden-file format and checker are planned and do not exist yet; see [testing TUIs](testing-tuis.md#planned-golden-files). |
+| **golden** | A stored expected screen that a test compares against. Made and checked with `vtee --script S --expect G -- APP`; see [testing TUIs](testing-tuis.md#golden-files). |
 | **ConPTY** | Windows' pseudo-console, which `vtee` uses on Windows. See [Windows](windows.md). |
 
 ## Questions

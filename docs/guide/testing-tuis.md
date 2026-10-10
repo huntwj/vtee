@@ -1,8 +1,9 @@
 # Testing a TUI with vtee
 
 This page is for people who write a full-screen program and want tests that read its screen: from a script, from CI,
-or from an AI agent. It covers what to pin so a run gives the same screen every time, how to wait, how to compare,
-and where today's tooling stops. The command details are in the [protocol reference](protocol.md).
+or from an AI agent. It covers what to pin so a run gives the same screen every time, how to wait, and how to store the
+expected screens in a golden file and check against them. The command details are in the
+[protocol reference](protocol.md) and the [CLI reference](cli-reference.md#testing-with-goldens---expect).
 
 ## The idea
 
@@ -89,19 +90,18 @@ A program killed by a signal answers with `"signal":"Terminated"` and no `code`.
 time answers `"running":true,"timed_out":true`. In `--script` mode `vtee` itself still exits 0 here, so read the
 reply.
 
-## A script does not fail by itself
+## A timed-out wait fails the run
 
-`--script` runs every command and exits 0 whenever they all ran. A `wait_for` that timed out is not a failure: it
-prints `matched:false` with the screen as it was, and the exit status is still 0. There are no assertions in a script.
-Today the test runner must look at the output. The simplest check:
+A `wait_for` that times out makes `vtee --script` exit 1. The reply is still printed with `matched:false` and the
+screen as it was, a line on standard error says which script line gave up (`vtee: script line 3: wait_for "42" timed
+out after 5000 ms`), and the rest of the script still runs. A wait that is allowed to time out says so:
 
 ```
-vtee --script t.ndjson --env PS1='$ ' -- bash --norc | grep -q '"matched":false' && echo "a wait timed out"
+{"cmd":"wait_for","text":"Press any key","timeout_ms":500,"optional":true}
 ```
 
-Run against a script whose only command waits for text that never appears, that printed `a wait timed out`. In text
-mode the same condition prints the line `--- wait_for matched=false (byte_offset=2) ---`. Fail the test when you see
-either.
+The same rule holds with `--connect --script` and with `--expect`, where the timeout is a problem of the run in the
+report. A script has no other assertions: use a golden for those.
 
 ## Compare snapshots
 
@@ -126,8 +126,8 @@ you store or compare. Use the JSON output when the test cares about colour, bold
 title or the modes: the fields are in the [snapshot schema](protocol.md#snapshot-schema). Record
 `schema_version` and `semantics_version` next to anything you store; the [stability policy](versioning.md) says when it changes.
 
-Volatile parts of a screen (a clock, an idle timer, a process id) have to be handled by your own comparison today.
-Compare the stable rows, or match the volatile ones with a pattern, in the code that reads the snapshot.
+Volatile parts of a screen (a clock, an idle timer, a process id) are what a golden's masks are for; see the next
+section.
 
 ## A live session in CI
 
@@ -178,8 +178,54 @@ two
 The library function `vtee::replay` does the same from Rust, and the repository's own tests use it. See the
 [CLI reference](cli-reference.md#vtee-replay-file---json).
 
-## Planned: golden files
+## Golden files
 
-This does not exist yet. The plan is a text format for a stored screen, with masks for volatile cells (a clock, an
-idle timer), assertions on colour and other attributes, and an `vtee golden check` command that reports the first
-differing cell. It is designed but not built, and nothing on this page depends on it.
+A test is an app, an input and an expected output. The script is the input; the expected output is a **golden**, a
+text file with one or more screens. Record it once, review it, commit it:
+
+```
+vtee --script flow.ndjson --expect flow.golden --update --portable -- tf -n    # CREATED flow.golden: 3 screens
+vtee --script flow.ndjson --expect flow.golden -- tf -n                        # PASS flow.golden (3 screens)
+```
+
+Each `snapshot` in the script is a checkpoint, and may carry a `name` (`{"cmd":"snapshot","name":"connected"}`) that
+the golden keeps as a label. The screens are paired by position. The size is 80 by 24 unless you say otherwise, so
+the result does not depend on the terminal you ran it from.
+
+What a failure looks like:
+
+```
+FAIL flow.golden: 2 mismatches in 1 of 3 screens
+screen 2 "connected":
+  attrs      row 19 col 0-7 (8 cells)   expected fg=idx:1 bold   actual fg=idx:3
+  text       row 20 col 79   expected '8'   actual '9'
+```
+
+and the exit status is 1. `--format json` gives the same facts as one JSON object, for a test runner.
+
+**Masks and assertions are written by hand.** A recording has none. Open the golden and add what the program's
+volatile output needs, for example a clock at the right end of a status row, on every screen:
+
+```
+[masks]
+mask row=20 cols=75-79 text=/\d\d:\d\d/
+```
+
+The cells under a mask are no longer compared with the stored text (the pattern must match instead), but their
+colours still are. Assertions check the actual screen for what matters, whatever the stored text says:
+`assert find=/goblin/ fg=idx:1 bold`. The grammar, the regex dialect and every rule are in sections 6.1 to 6.8 of the
+[snapshot and golden contract](../design/snapshot-and-golden-contract.md). `--update` keeps masks, assertions and
+comments when it regenerates the screens, and says what moved.
+
+**Linux and Windows.** `--portable` (when the golden is created) writes `ignore` lines for the differences ConPTY
+introduces: the window title, the terminal modes it hides, and underline colour. A golden recorded that way can pass
+on both if the program's output is the same.
+
+**When `vtee` is upgraded.** A golden records the `schema` and `semantics` numbers it was written under, and a build
+with other numbers refuses it (exit 2) rather than guess. If nothing your golden checks changed, `--update=restamp`
+rewrites the number after confirming that; otherwise record it again with `--update` and review the diff. See
+[versioning](versioning.md) and the [semantics changelog](snapshot-semantics.md).
+
+**In CI.** `--update` is refused while the `CI` environment variable is set, so a pipeline cannot make itself pass by
+rewriting its expectations. Update goldens on a developer machine and commit them. Add `*.golden text eol=lf` to
+`.gitattributes`: a golden is read with either line ending, but a diff of your repository should not be noise.

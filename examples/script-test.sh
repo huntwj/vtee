@@ -1,14 +1,12 @@
 #!/bin/sh
 # Run arithmetic.ndjson and fail unless every wait matched and the program exited with code 7.
-# A script exits 0 even when a wait_for times out, so the test has to read the results itself.
+# A wait_for that times out makes the run exit 1 (stderr says which line), so `set -e` covers it;
+# the program's own exit code is in the wait_exit reply, which the test has to read itself.
 set -eu
 cd "$(dirname "$0")"
 
-out=$(vtee --script arithmetic.ndjson --env 'PS1=$ ' -- bash --norc)
+out=$(vtee --script arithmetic.ndjson --env 'PS1=$ ' -- bash --norc) || { echo "FAIL: vtee exited $?"; exit 1; }
 
-case $out in
-    *'"matched":false'*) echo "FAIL: a wait_for timed out"; exit 1 ;;
-esac
 case $out in
     *'"cmd":"wait_exit","running":false,"code":7,"timed_out":false'*) echo "PASS" ;;
     *) echo "FAIL: the program did not exit with code 7"; exit 1 ;;

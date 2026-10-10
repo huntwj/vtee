@@ -1,9 +1,9 @@
 # Snapshot and golden contract (design)
 
-Status: **decided by the owner on 2026-10-10 (section 8, "Decisions"); the golden library and its test vectors are implemented (`src/golden/`, `tests/fixtures/golden-vectors/`); the run command (`--expect`, `--update`) is not.** Written and revised
+Status: **decided by the owner on 2026-10-10 (section 8, "Decisions"); the golden library, the run command (`--expect`, `--update`, `--update=restamp`) and the test vectors are implemented (`src/golden/`, `src/expect.rs`, `tests/fixtures/golden-vectors/`); `--update=migrate` is not (OD7).** Written and revised
 2026-10-10 after two independent reviews and after the owner chose the run-and-compare test model. When implemented,
-the normative parts (sections 3 to 6) move to the user guide and this page stays as the record of why. Of the rest, only the library
-and the vectors exist; where a section says "today" it describes `main` before this work. The reviews and what was done with each finding are in appendix C.
+the normative parts (sections 3 to 6) move to the user guide and this page stays as the record of why. Of the rest, only the library,
+the run command and the vectors exist; where a section says "today" it describes `main` before this work. The reviews and what was done with each finding are in appendix C.
 
 **The test model.** A test is an app, an input and an expected output: `vtee --script flow.ndjson --expect
 flow.golden -- APP`. The script is the existing NDJSON script; each `snapshot` in it is a checkpoint; the screens a run

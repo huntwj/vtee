@@ -27,8 +27,9 @@ State as of 2026-10-09. The core feature set works on Linux and Windows. What is
 - [ ] **Richer wait conditions.** `wait_for` is a substring match on one screen row, or on a soft-wrapped line with
   `join_wrapped`; there is no regular expression or region. `exit_status` and `wait_exit` exist for the process itself.
   A "screen unchanged" wait was deliberately not built (requirement 4).
-- [ ] **Masking volatile regions** (a clock) for golden comparisons. Left to the caller so far; a golden-file format
-  with masks and attribute checks is proposed but not built.
+- [x] **Masking volatile regions** (a clock) for golden comparisons: golden files with masks, assertions and
+  attribute checks, made and checked by `vtee --script S --expect G -- APP` (2026-10-10, for 0.1.0). Still to do:
+  `--update=migrate`, which follows the first schema or grammar bump.
 - [ ] **Windows terminal-restore watchdog.** Nothing restores the console if the holder is force-killed.
 - [x] **Windows `attach` console flags.** `RawModeGuard` sets `ENABLE_VIRTUAL_TERMINAL_INPUT` and
   `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and restores the original modes on drop and from the console control

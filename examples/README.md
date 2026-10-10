@@ -78,7 +78,7 @@ mark](../docs/guide/windows.md#powershell-and-the-byte-order-mark) for when pipi
 ## A script test that can fail
 
 `arithmetic.ndjson` types an expression, waits for its result, tells the shell to exit with code 7, and asks for the
-exit status. `script-test.sh` runs it and checks the output, because a script exits 0 even when a wait timed out:
+exit status. `script-test.sh` runs it, relies on the exit status 1 a timed-out wait gives, and checks the program's exit code in the output:
 
 ```
 $ sh examples/script-test.sh
@@ -89,7 +89,8 @@ Change the wait in `arithmetic.ndjson` from `"42"` to `"43"` and it fails, the w
 
 ```
 $ sh examples/script-test.sh
-FAIL: a wait_for timed out
+vtee: script line 3: wait_for "43" timed out after 5000 ms
+FAIL: vtee exited 1
 $ echo $?
 1
 ```
