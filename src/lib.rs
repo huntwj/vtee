@@ -58,6 +58,7 @@
 //! detail of the command-line tool and may change without notice.
 
 mod command;
+pub mod golden;
 mod keys;
 mod log;
 pub mod ndjson;
