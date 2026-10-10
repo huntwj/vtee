@@ -1,0 +1,7 @@
+--expect
+g.golden
+--update=migrate
+--script
+s.ndjson
+--
+sh

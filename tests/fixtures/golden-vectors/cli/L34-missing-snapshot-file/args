@@ -1,0 +1,4 @@
+--expect
+g.golden
+--snapshot
+missing.ndjson

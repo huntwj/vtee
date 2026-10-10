@@ -1,0 +1,4 @@
+--expect
+bad.golden
+--snapshot
+s.ndjson

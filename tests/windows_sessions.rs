@@ -703,3 +703,49 @@ fn bare_attach_picks_the_session_attached_to_most_recently() {
     );
     assert_eq!(mtime("newer"), newer_before, "bare attach must not touch the other session");
 }
+
+/// A live session can be scripted from outside (`--connect` with `--script`), its screen recorded as a golden, and the
+/// same screen checked again by asking for the session's screen now (`--connect` alone).
+#[test]
+fn a_live_session_can_be_scripted_recorded_and_checked() {
+    let _guard = serial();
+    let env = Env::new();
+    let _holder = Holder::start(&env, "expect");
+    let sock = env.sock("expect");
+    let script = env.local.join("s.ndjson");
+    std::fs::write(
+        &script,
+        "{\"cmd\":\"wait_for\",\"text\":\"ready?\",\"timeout_ms\":15000}\n{\"cmd\":\"snapshot\",\"name\":\"prompt\"}\n",
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        env.cmd()
+            .current_dir(&env.local)
+            .env_remove("CI")
+            .env("NO_COLOR", "1")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let sock = sock.to_str().unwrap();
+    let out = run(&["--connect", sock, "--script", "s.ndjson", "--expect", "live.golden", "--update", "--portable"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"), "CREATED live.golden: 1 screen\n");
+    let golden = std::fs::read_to_string(env.local.join("live.golden")).unwrap();
+    assert!(golden.contains("name \"prompt\"") && golden.contains("ready?"), "{golden}");
+
+    let out = run(&["--connect", sock, "--expect", "live.golden"]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"), "PASS live.golden (1 screen)\n");
+
+    let out = run(&["--connect", sock, "--script", "s.ndjson", "--expect", "live.golden"]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+}

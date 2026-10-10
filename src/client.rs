@@ -4,7 +4,10 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::output::{exit_code, fail};
+use crate::output::{exit_code, fail, print_error};
+use crate::script::{
+    self, Driver, Flow, ReadError, Reply, Script, ScriptLine, Sink, SocketDriver, TapDriver, read_script, strip_bom,
+};
 
 pub struct ScriptOpts<'a> {
     pub log_path: Option<&'a Path>,
@@ -17,8 +20,14 @@ pub struct ScriptOpts<'a> {
 
 /// Run a newline-delimited-JSON script of `Command`s against a non-interactive tap, writing one
 /// result line per `snapshot`/`wait_for`. Always kills the child at the end so a script can't
-/// leave a test harness hanging.
+/// leave a test harness hanging. A `wait_for` that times out (unless the line says `"optional":true`) makes the
+/// run exit 1; the script still runs to its end.
 pub fn run_script(program: &str, rest: &[String], opts: ScriptOpts) -> ExitCode {
+    let script = match read_script(opts.script_path) {
+        Ok(script) => script,
+        Err(e) => return fail(exitcode::NOINPUT, format!("failed to open script {}: {e}", opts.script_path.display())),
+    };
+
     let spawn_opts = vtee::SpawnOptions {
         cols: opts.cols,
         rows: opts.rows,
@@ -35,71 +44,88 @@ pub fn run_script(program: &str, rest: &[String], opts: ScriptOpts) -> ExitCode 
 
     tap.watch_sigterm();
 
-    let code = run_script_body(&tap, opts.script_path, opts.text_mode);
+    let code = print_script(&mut TapDriver(&tap), &script, opts.text_mode);
 
     tap.kill();
     let _ = tap.wait();
     code
 }
 
-fn run_script_body(tap: &vtee::Tap, script_path: &Path, text_mode: bool) -> ExitCode {
-    let script = match std::fs::File::open(script_path) {
-        Ok(f) => f,
+/// `--connect` with `--script`: the same script, run against a live session's command socket. The session is left
+/// running.
+pub fn run_connect_script(socket: &Path, script_path: &Path, text_mode: bool) -> ExitCode {
+    let script = match read_script(script_path) {
+        Ok(script) => script,
         Err(e) => return fail(exitcode::NOINPUT, format!("failed to open script {}: {e}", script_path.display())),
     };
+    let mut driver = match SocketDriver::connect(socket) {
+        Ok(driver) => driver,
+        Err(failure) => return fail(failure.code, failure.message),
+    };
+    print_script(&mut driver, &script, text_mode)
+}
 
+/// Executes a script and prints each result as `--script` always has: a line of JSON, or the screen rows.
+fn print_script(driver: &mut dyn Driver, script: &Script, text_mode: bool) -> ExitCode {
     let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for (lineno, line) in std::io::BufReader::new(script).lines().enumerate() {
-        let lineno = lineno + 1;
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => return fail(exitcode::IOERR, format!("error reading script line {lineno}: {e}")),
-        };
-        let line = strip_bom(&line);
-        if line.trim().is_empty() {
-            continue;
-        }
-        let cmd: vtee::Command = match serde_json::from_str(line) {
-            Ok(c) => c,
-            Err(e) => return fail(exitcode::DATAERR, format!("bad command on script line {lineno}: {e}")),
-        };
-        match cmd.execute(tap) {
-            Ok(Some(result)) => {
-                if text_mode {
-                    print_text(&mut out, &result);
-                } else {
-                    match vtee::ndjson::to_line(&result) {
-                        Ok(text) => {
-                            let _ = writeln!(out, "{text}");
-                        }
-                        Err(e) => {
-                            return fail(
-                                exitcode::SOFTWARE,
-                                format!("failed to serialize result on script line {lineno}: {e}"),
-                            );
-                        }
-                    }
-                }
-                let _ = out.flush();
-            }
-            Ok(None) => {}
-            Err(e) => {
-                // An unknown key name is bad script data, not a software fault.
-                let code =
-                    if e.kind() == std::io::ErrorKind::InvalidInput { exitcode::DATAERR } else { exitcode::SOFTWARE };
-                return fail(code, format!("command on script line {lineno} failed: {e}"));
-            }
-        }
+    let mut sink = PrintSink { out: stdout.lock(), text_mode, timed_out: false };
+    if let Err(failure) = script::drive(driver, &script.lines, &mut sink) {
+        return fail(failure.code, failure.message);
     }
-    ExitCode::SUCCESS
+    match &script.error {
+        Some(ReadError::Bad { line, message }) => {
+            return fail(exitcode::DATAERR, format!("bad command on script line {line}: {message}"));
+        }
+        Some(ReadError::Io { line, source }) => {
+            return fail(exitcode::IOERR, format!("error reading script line {line}: {source}"));
+        }
+        None => {}
+    }
+    if sink.timed_out { exit_code(1) } else { ExitCode::SUCCESS }
+}
+
+struct PrintSink<W: Write> {
+    out: W,
+    text_mode: bool,
+    timed_out: bool,
+}
+
+impl<W: Write> Sink for PrintSink<W> {
+    fn reply(&mut self, line: &ScriptLine, reply: Reply) -> Flow {
+        if let Some((text, timeout_ms)) = script::timed_out_wait(line, &reply) {
+            self.timed_out = true;
+            // After the reply, which is printed first as it always was; the message goes to standard error.
+            let message = format!(
+                "script line {}: wait_for {} timed out after {timeout_ms} ms",
+                line.number,
+                vtee::golden::escape::encode_string(text)
+            );
+            self.print(&reply);
+            print_error(&message);
+        } else {
+            self.print(&reply);
+        }
+        Flow::Continue
+    }
+}
+
+impl<W: Write> PrintSink<W> {
+    fn print(&mut self, reply: &Reply) {
+        if self.text_mode {
+            match serde_json::from_value::<vtee::CommandResult>(reply.value.clone()) {
+                Ok(result) => print_text(&mut self.out, &result),
+                Err(e) => print_error(&format!("malformed response from server: {e}")),
+            }
+        } else {
+            let _ = writeln!(self.out, "{}", reply.line);
+        }
+        let _ = self.out.flush();
+    }
 }
 
 /// `--connect`: relay our stdin to a session's command socket line by line (the same NDJSON a
 /// script file holds) and print the result lines that come back.
 pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
-    use crate::output::print_error;
-
     let stream = match vtee::net::UnixStream::connect(path) {
         Ok(s) => s,
         Err(e) => return fail(exitcode::NOHOST, format!("failed to connect to {}: {e}", path.display())),
@@ -205,12 +231,6 @@ pub fn run_replay(path: &Path, json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark, which is not JSON, and
-/// sends it twice when `$OutputEncoding` already carries one; drop every leading mark.
-fn strip_bom(line: &str) -> &str {
-    line.trim_start_matches('\u{feff}')
-}
-
 /// `running`, `code=N` or `signal=...`, and `timed_out=...` for a `wait_exit` reply.
 fn describe_exit(running: bool, code: Option<u32>, signal: Option<&str>, timed_out: Option<bool>) -> String {
     let mut parts = vec![if running {
@@ -260,21 +280,6 @@ fn print_text(out: &mut impl Write, result: &vtee::CommandResult) {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_bom;
-
-    #[test]
-    fn a_leading_byte_order_mark_is_removed() {
-        assert_eq!(strip_bom("\u{feff}{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
-        assert_eq!(strip_bom("{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
-        assert_eq!(strip_bom(""), "");
-    }
-
-    #[test]
-    fn a_doubled_byte_order_mark_is_removed_too() {
-        assert_eq!(strip_bom("\u{feff}\u{feff}{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
-        assert_eq!(strip_bom("{\"a\":\"\u{feff}\"}"), "{\"a\":\"\u{feff}\"}");
-    }
-
     #[test]
     fn only_unparseable_input_counts_as_a_bad_command() {
         assert!(super::is_bad_command("bad command: expected value at line 1 column 1"));

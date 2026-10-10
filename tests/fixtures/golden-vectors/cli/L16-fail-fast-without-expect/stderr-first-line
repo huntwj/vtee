@@ -1,0 +1,1 @@
+vtee: --fail-fast needs --expect GOLDEN

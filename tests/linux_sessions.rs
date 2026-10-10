@@ -960,3 +960,173 @@ fn a_session_with_no_clients_ends_as_soon_as_the_child_exits() {
     wait_until("the holder to end", || s.child.try_wait().ok().flatten().is_some());
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
 }
+
+// ---- --connect with --script ---------------------------------------------------------------------
+
+fn script_file(lines: &[&str]) -> PathBuf {
+    let path = unique("vtee-connect-script");
+    let mut text = lines.join("\n");
+    text.push('\n');
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn reply_lines(stdout: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(stdout).lines().map(|l| serde_json::from_str(l).expect("a JSON reply line")).collect()
+}
+
+/// The script goes to a live session instead of a new program: typing reaches it, replies come back in order, and the
+/// session is still there afterwards.
+#[test]
+fn a_script_can_be_run_against_a_live_session() {
+    let s = Session::start("scripted", &["--writable"], &["sh", "-c", "echo ready; read x; echo got:$x; sleep 60"]);
+    let script = script_file(&[
+        r#"{"cmd":"wait_for","text":"ready","timeout_ms":8000}"#,
+        r#"{"cmd":"send","text":"hi\r"}"#,
+        r#"{"cmd":"wait_for","text":"got:hi","timeout_ms":8000}"#,
+        r#"{"cmd":"snapshot"}"#,
+    ]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let replies = reply_lines(&out.stdout);
+    assert_eq!(replies.len(), 3, "{replies:?}");
+    assert_eq!(replies[0]["matched"], true);
+    assert_eq!(replies[1]["matched"], true);
+    assert!(screen(&replies[2]["snapshot"]).contains("got:hi"));
+    assert_eq!(s.nd().request(json!({"cmd": "exit_status"}))["running"], true, "the session was left running");
+    let _ = std::fs::remove_file(script);
+}
+
+/// A read-only session refuses `send`; the script run stops there with the refusal, not silently.
+#[test]
+fn a_script_run_against_a_read_only_session_stops_at_a_refused_write() {
+    let s = Session::start("scripted-ro", &[], &["sh", "-c", "echo ready; sleep 60"]);
+    let script = script_file(&[r#"{"cmd":"send","text":"x"}"#, r#"{"cmd":"snapshot"}"#]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::NOPERM), "{out:?}");
+    assert!(out.stdout.is_empty(), "the snapshot after the refused send must not have run: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("the session refused script line 1") && stderr.contains("--writable"), "{stderr}");
+    let _ = std::fs::remove_file(script);
+}
+
+#[test]
+fn a_timed_out_wait_fails_a_script_run_against_a_live_session_too() {
+    let s = Session::start("scripted-wait", &[], &["sh", "-c", "echo ready; sleep 60"]);
+    let script = script_file(&[r#"{"cmd":"wait_for","text":"never","timeout_ms":300}"#]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(reply_lines(&out.stdout)[0]["matched"], false);
+    assert!(String::from_utf8_lossy(&out.stderr).contains(r#"script line 1: wait_for "never" timed out after 300 ms"#));
+    let _ = std::fs::remove_file(script);
+}
+
+#[test]
+fn a_script_cannot_reach_a_session_that_is_not_there() {
+    let tmp = unique("vtee-connect-none");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let script = script_file(&[r#"{"cmd":"snapshot"}"#]);
+    let out = vtee_in(&tmp).arg("--connect").arg(tmp.join("none.sock")).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::UNAVAILABLE), "{out:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(script);
+}
+
+// ---- --expect against a live session ----------------------------------------------------------------
+
+fn expect_in(s: &Session, args: &[&str]) -> std::process::Output {
+    let mut cmd = vtee_in(&s.tmp);
+    cmd.current_dir(&s.tmp).env_remove("CI").env("NO_COLOR", "1").args(args);
+    cmd.output().unwrap()
+}
+
+/// `--connect SOCK --expect GOLDEN` takes the screen of the session now: it can be recorded and checked, and the
+/// session keeps running.
+#[test]
+fn the_screen_of_a_live_session_can_be_recorded_and_checked() {
+    let s = Session::start("expect-now", &[], &["sh", "-c", "echo hello; echo END; sleep 60"]);
+    let mut nd = s.nd();
+    wait_until("the output", || screen(&nd.snapshot()).contains("END"));
+    let sock = s.sock();
+    let sock = sock.to_str().unwrap();
+
+    let out = expect_in(&s, &["--connect", sock, "--expect", "now.golden", "--update", "--portable"]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "CREATED now.golden: 1 screen\n");
+    let text = std::fs::read_to_string(s.tmp.join("now.golden")).unwrap();
+    assert!(text.contains("\n 0|hello\n 1|END\n"), "{text}");
+
+    let out = expect_in(&s, &["--connect", sock, "--expect", "now.golden"]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "PASS now.golden (1 screen)\n");
+
+    std::fs::write(s.tmp.join("now.golden"), text.replace(" 0|hello", " 0|howdy")).unwrap();
+    let out = expect_in(&s, &["--connect", sock, "--expect", "now.golden"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("text       row 0"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(nd.request(json!({"cmd": "exit_status"}))["running"], true, "the session was left running");
+}
+
+/// `--connect SOCK --script FILE --expect GOLDEN`: the script runs against the live session and its screens are
+/// judged; a wait that times out is a problem of the run, as it is with a program of its own.
+#[test]
+fn a_script_run_against_a_live_session_is_judged_against_a_golden() {
+    let s =
+        Session::start("expect-script", &["--writable"], &["sh", "-c", "echo ready; read x; echo got:$x; sleep 60"]);
+    let sock = s.sock();
+    let sock = sock.to_str().unwrap();
+    let script = script_file(&[
+        r#"{"cmd":"wait_for","text":"ready","timeout_ms":8000}"#,
+        r#"{"cmd":"send","text":"hi\r"}"#,
+        r#"{"cmd":"wait_for","text":"got:hi","timeout_ms":8000}"#,
+        r#"{"cmd":"snapshot","name":"typed"}"#,
+    ]);
+    let script = script.to_str().unwrap();
+
+    let out =
+        expect_in(&s, &["--connect", sock, "--script", script, "--expect", "typed.golden", "--update", "--portable"]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = std::fs::read_to_string(s.tmp.join("typed.golden")).unwrap();
+    assert!(text.contains("name \"typed\"") && text.contains("got:hi"), "{text}");
+
+    let out = expect_in(&s, &["--connect", sock, "--script", script, "--expect", "typed.golden"]);
+    // The session has now been typed into twice, so its screen shows a second line: the golden notices.
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stdout));
+
+    let lenient = script_file(&[r#"{"cmd":"wait_for","text":"never","timeout_ms":300}"#, r#"{"cmd":"snapshot"}"#]);
+    let out = expect_in(
+        &s,
+        &["--connect", sock, "--script", lenient.to_str().unwrap(), "--expect", "typed.golden", "--screen", "1"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("wait       script line 1   wait_for \"never\" timed out after 300 ms")
+    );
+    let _ = std::fs::remove_file(script);
+    let _ = std::fs::remove_file(lenient);
+}
+
+#[test]
+fn a_golden_cannot_be_checked_against_a_session_that_is_not_there() {
+    let tmp = unique("vtee-expect-none");
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(
+        tmp.join("g.golden"),
+        "vtee-golden 1\nschema 1\nsemantics 1\n\n[screen 1]\nsize 3x1\ncursor row=0 col=0 shape=block hidden=false\nmodes\nalt_screen false\ntitle null\n\n[text]\n0|\n",
+    )
+    .unwrap();
+    let out = vtee_in(&tmp)
+        .current_dir(&tmp)
+        .env_remove("CI")
+        .args(["--connect", "none.sock", "--expect", "g.golden"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::UNAVAILABLE), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("vtee: failed to connect to none.sock"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}

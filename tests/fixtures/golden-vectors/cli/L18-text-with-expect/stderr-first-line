@@ -1,0 +1,1 @@
+vtee: --text has no effect with --expect, which prints a report; use --format text or --format json

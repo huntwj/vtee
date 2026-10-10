@@ -1,0 +1,1 @@
+vtee: --screen 1 updates one screen of an existing golden; new.golden does not exist

@@ -1,0 +1,2 @@
+UNCHANGED golden.golden: 1 screen
+  note: --portable only applies when a golden is created; the ignore lines of the existing file were kept

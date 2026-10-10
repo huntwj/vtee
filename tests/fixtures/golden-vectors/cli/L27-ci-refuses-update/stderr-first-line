@@ -1,0 +1,1 @@
+vtee: --update is refused when CI is set (it would make a pipeline pass by rewriting its expectations); set VTEE_ALLOW_UPDATE=1 to allow it

@@ -1,0 +1,2 @@
+NOT WRITTEN golden.golden: a wait_for timed out; the golden was left as it was
+  wait       script line 2   wait_for "ready" timed out after 5000 ms

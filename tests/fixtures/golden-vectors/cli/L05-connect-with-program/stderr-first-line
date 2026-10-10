@@ -1,0 +1,1 @@
+vtee: --connect talks to a running session; it cannot be combined with a program

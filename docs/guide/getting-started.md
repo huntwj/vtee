@@ -135,13 +135,14 @@ the JSON output (without the first `wait_for` result) and the text output (`--te
 A program ended by a signal reads `exited signal=Terminated`, and a `wait_exit` that ran out of time reads
 `running timed_out=true`.
 
-### Scripts do not fail on their own
+### A script fails when a wait times out
 
-The exit status of `vtee --script` is 0 when every command ran. It stays 0 when a `wait_for` timed out (the result
-says `matched=false`, and in JSON `"matched":false`), and it stays 0 when the program exited with a non-zero code,
-as in the example above. A script has no assertions. To make a test fail, read the output: search it for
-`"matched":false` and check the `code` in the `wait_exit` reply. [`examples/script-test.sh`](../../examples/script-test.sh)
-does both.
+The exit status of `vtee --script` is 0 when every command ran and every `wait_for` found its text. A `wait_for` that
+timed out still prints its result (`matched=false`, and in JSON `"matched":false`), a line on standard error names
+the script line, the rest of the script runs, and the exit status is 1. A wait that may time out says
+`"optional":true` on its line. The program exiting with a non-zero code does not fail the run, as in the example
+above: read the `code` in the `wait_exit` reply. [`examples/script-test.sh`](../../examples/script-test.sh) does
+that. To compare whole screens with stored ones, see [testing TUIs](testing-tuis.md#golden-files).
 
 A command that cannot be parsed ends the run with status 65, and a script file that cannot be opened with 66. See
 the [exit codes](cli-reference.md#exit-codes).

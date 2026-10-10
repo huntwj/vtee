@@ -10,6 +10,7 @@ mod parse;
 pub mod pattern;
 mod report;
 mod run;
+mod update;
 mod version;
 mod write;
 
@@ -23,9 +24,10 @@ pub use model::{
 };
 pub use parse::{LoadError, ParseError};
 pub use report::{
-    CheckError, CheckOptions, DEFAULT_MAX_MISMATCHES, Report, Verdict, check_run, check_saved, display_name,
-    refuse_unread,
+    CheckError, CheckOptions, DEFAULT_MAX_MISMATCHES, Report, Verdict, check_run, check_saved, describe_wait,
+    display_name, refuse_golden, refuse_unread,
 };
-pub use run::{Run, RunError, RunProblem, read_run};
+pub use run::{Run, RunError, RunProblem, read_run, read_run_for_build};
+pub use update::{ScreenChange, Update, plan_record, plan_screen, restamped};
 pub use version::{Build, Invocation, Refusal, WayForward};
 pub use write::{RecordOptions, portable_profile};

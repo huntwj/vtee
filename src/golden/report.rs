@@ -8,7 +8,7 @@ use super::compare::{
 };
 use super::escape::{encode_string, visible};
 use super::model::{GRAMMAR_VERSION, Golden, Semantics};
-use super::run::{Run, RunError, read_run};
+use super::run::{Run, RunError, RunProblem, read_run};
 use super::version::{Build, Invocation, Refusal, WayForward};
 
 /// How many mismatch blocks a report shows unless asked otherwise.
@@ -103,6 +103,13 @@ fn refused(
         comparison: None,
         max_mismatches: options.max_mismatches,
     }
+}
+
+/// The report for a golden this build will not compare because of its own numbers (section 6.8, step 2): decided from
+/// the header alone, so the run it would have judged need not start.
+pub fn refuse_golden(golden: &Golden, invocation: &Invocation, refusal: Refusal, options: &CheckOptions) -> Report {
+    let build = Build::current();
+    refused(golden, invocation, refusal, (build.schema, build.semantics), options)
 }
 
 /// The report for a golden that could not even be read because its grammar number is above this build's: nothing about
@@ -393,6 +400,21 @@ fn cursor_value(value: &CursorValue) -> String {
     }
 }
 
+fn wait_description(text: Option<&str>, timeout_ms: Option<u64>) -> String {
+    match (text, timeout_ms) {
+        (Some(t), Some(ms)) => format!("wait_for {} timed out after {ms} ms", encode_string(t)),
+        (Some(t), None) => format!("wait_for {} timed out", encode_string(t)),
+        (None, Some(ms)) => format!("wait_for timed out after {ms} ms"),
+        (None, None) => "wait_for timed out".to_string(),
+    }
+}
+
+/// How a `wait_for` that timed out is told to the user, in a report and in a message of its own:
+/// `script line 7   wait_for "10/10mv>" timed out after 5000 ms`.
+pub fn describe_wait(problem: &RunProblem) -> String {
+    format!("script line {}   {}", problem.line, wait_description(problem.text.as_deref(), problem.timeout_ms))
+}
+
 fn write_block(out: &mut String, mismatch: &Mismatch) {
     let pad = |kind: &str| format!("  {kind:<10} ");
     match mismatch {
@@ -410,13 +432,8 @@ fn write_block(out: &mut String, mismatch: &Mismatch) {
             out.push('\n');
         }
         Mismatch::Wait { line, text, timeout_ms } => {
-            let what = match (text, timeout_ms) {
-                (Some(t), Some(ms)) => format!("wait_for {} timed out after {ms} ms", encode_string(t)),
-                (Some(t), None) => format!("wait_for {} timed out", encode_string(t)),
-                (None, Some(ms)) => format!("wait_for timed out after {ms} ms"),
-                (None, None) => "wait_for timed out".to_string(),
-            };
-            let _ = writeln!(out, "{}script line {line}   {what}", pad("wait"));
+            let _ =
+                writeln!(out, "{}script line {line}   {}", pad("wait"), wait_description(text.as_deref(), *timeout_ms));
         }
         Mismatch::Name { expected, actual } => {
             let _ =
@@ -765,6 +782,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
         let invocation = Invocation {
             golden: "dir/g.golden".to_string(),
             command: "vtee --expect dir/g.golden --snapshot run.ndjson".to_string(),
+            ..Invocation::default()
         };
         check_saved(&golden, &invocation, saved, &CheckOptions::default()).unwrap()
     }
@@ -801,6 +819,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
         let invocation = Invocation {
             golden: "g.golden".to_string(),
             command: "vtee --expect g.golden --snapshot run.ndjson".to_string(),
+            ..Invocation::default()
         };
         let r = check_saved(&golden, &invocation, &saved("x7", 1, 1), &CheckOptions::default()).unwrap();
         assert_eq!(r.exit_code(), 2);
@@ -825,7 +844,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
         let provisional =
             "{\"schema_version\":1,\"byte_offset\":1,\"cols\":1,\"rows\":1,\"cells\":[[{\"ch\":\"a\"}]]}\n";
         let golden = Golden::parse_str(A2).unwrap();
-        let invocation = Invocation { golden: "g.golden".to_string(), command: String::new() };
+        let invocation = Invocation { golden: "g.golden".to_string(), ..Invocation::default() };
         let e = check_saved(&golden, &invocation, provisional, &CheckOptions::default()).unwrap_err();
         assert!(e.to_string().starts_with("snapshot: line 1: it has no `semantics_version`"), "{e}");
     }
@@ -843,7 +862,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
             "",
         ))
         .unwrap();
-        let invocation = Invocation { golden: "g.golden".to_string(), command: String::new() };
+        let invocation = Invocation { golden: "g.golden".to_string(), ..Invocation::default() };
         let options = CheckOptions { max_mismatches: 1, ..CheckOptions::default() };
         let r = check_saved(&golden, &invocation, &saved("x7", 1, 1), &options).unwrap();
         let text = r.to_text();

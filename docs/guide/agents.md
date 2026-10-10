@@ -51,7 +51,8 @@ Every interaction follows the same three steps.
 
 Sleeping is the wrong way to wait. `wait_for` wakes the instant the text appears, and when the timeout passes it
 tells you so (`"matched":false`) rather than failing, with the screen as it was at that moment. A timeout is
-information: look at the snapshot to see what the program is actually showing.
+information: look at the snapshot to see what the program is actually showing. (A script file run with `--script` is
+stricter: a timed-out wait makes the run exit 1, unless the line says `"optional":true`.)
 
 ## Choosing what to wait for
 
@@ -127,8 +128,9 @@ For editors, pagers and other TUIs:
 ## Scripts versus a live connection
 
 `--script` runs a fixed list of commands, prints the results, kills the program and exits. It is the right tool for
-a regression test where every step is known in advance: one process, one exit status. It cannot branch on what it
-sees.
+a regression test where every step is known in advance: one process, one exit status (1 if a `wait_for` timed
+out). It cannot branch on what it sees. With `--connect` it runs the same script against a session that is already
+running.
 
 An agent that decides each step from the previous screen needs a live session and `--connect`, with one or more
 commands per call as in the loop above.

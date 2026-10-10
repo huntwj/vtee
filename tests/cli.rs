@@ -1158,9 +1158,33 @@ mod unix_behavior {
     }
 
     #[test]
-    fn a_wait_for_that_times_out_reports_no_match_and_the_script_still_succeeds() {
+    fn a_wait_for_that_times_out_fails_the_run_but_the_script_still_finishes() {
         let dir = isolated_tmpdir();
-        let script = script_file(&dir, &[r#"{"cmd":"wait_for","text":"never-appears","timeout_ms":300}"#]);
+        let script = script_file(
+            &dir,
+            &[r#"{"cmd":"wait_for","text":"never-appears","timeout_ms":300}"#, r#"{"cmd":"snapshot"}"#],
+        );
+        let out = vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--", "sleep", "5"])
+            .timeout(Duration::from_secs(20))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let results = result_lines(&out.stdout);
+        assert_eq!(results[0]["matched"], false, "the reply is still printed");
+        assert_eq!(results[1]["cmd"], "snapshot", "the script goes on after the timed-out wait");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(r#"vtee: script line 1: wait_for "never-appears" timed out after 300 ms"#), "{stderr}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_optional_wait_for_may_time_out_without_failing_the_run() {
+        let dir = isolated_tmpdir();
+        let script =
+            script_file(&dir, &[r#"{"cmd":"wait_for","text":"never-appears","timeout_ms":300,"optional":true}"#]);
         let out = vtee()
             .arg("--script")
             .arg(&script)
@@ -1170,6 +1194,7 @@ mod unix_behavior {
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(result_lines(&out.stdout)[0]["matched"], false);
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("timed out"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1183,9 +1208,9 @@ mod unix_behavior {
             &dir,
             &[
                 r#"{"cmd":"wait_for","text":"delta-echo","timeout_ms":8000}"#,
-                r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":300}"#,
+                r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":300,"optional":true}"#,
                 r#"{"cmd":"wait_for","text":"charlie-delta","timeout_ms":8000,"join_wrapped":true}"#,
-                r#"{"cmd":"wait_for","text":"echo-zulu","timeout_ms":300,"join_wrapped":true}"#,
+                r#"{"cmd":"wait_for","text":"echo-zulu","timeout_ms":300,"join_wrapped":true,"optional":true}"#,
                 r#"{"cmd":"snapshot"}"#,
             ],
         );

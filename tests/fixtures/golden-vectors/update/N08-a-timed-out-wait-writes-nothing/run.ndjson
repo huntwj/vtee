@@ -1,0 +1,2 @@
+{"cmd":"wait_for","matched":false,"line":2,"text":"ready","timeout_ms":5000}
+{"cmd":"snapshot","snapshot":{"schema_version":1,"semantics_version":1,"byte_offset":100,"cols":20,"rows":1,"lines":["changed             "],"cells":[[{"ch":"c"},{"ch":"h"},{"ch":"a"},{"ch":"n"},{"ch":"g"},{"ch":"e"},{"ch":"d"},{},{},{},{},{},{},{},{},{},{},{},{},{}]],"wrapped_rows":[],"cursor":{"row":0,"col":0,"hidden":false,"shape":"block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[],"producer":{"vtee":"","emulator":""}}}

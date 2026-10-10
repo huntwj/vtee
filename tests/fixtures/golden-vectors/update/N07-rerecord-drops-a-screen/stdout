@@ -1,0 +1,2 @@
+UPDATED golden.golden: 1 screen
+  screen 2: dropped (it had 2 masks and 1 assert, which are lost)

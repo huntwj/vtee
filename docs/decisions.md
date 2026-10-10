@@ -892,3 +892,57 @@ Where the design is silent or two of its sentences disagree, the conservative re
   0.1.0; the line also offers a re-record. Revisit when the runner is built.
 - **The escape set** moved from `docs/design/` to `tests/fixtures/golden-vectors/escapes/escape-set.txt`, where the design's
   vector layout puts it, and is compiled into the library.
+
+## 2026-10-10: the `--expect` run command is built; where the design left a choice
+
+`vtee --script S --expect G -- APP` (design 6.11) is built on top of `src/golden/`: `src/expect.rs` has the options, the
+table of illegal combinations and the run; `src/script.rs` has the script runner shared with plain `--script`. A timed-out
+`wait_for` now fails every script run (exit 1, a line on standard error, the script goes on), `"optional":true` allows
+it, and a `snapshot` may carry a `name`. `--update=migrate` is rejected as not available (OD7). Where the design is silent
+or two of its sentences disagree, the conservative reading was taken:
+
+- **One path for all four sources.** A run is turned into the saved output a plain `--script` prints, plus the `name` of
+  each `snapshot` and the `line`, `text`, `timeout_ms` and `optional` of each `wait_for`, and then checked, recorded or
+  restamped from that text. So a live run and the same output checked offline with `--snapshot` give the same verdict by
+  construction, and the version rules for snapshots of another build (exit 2) are the library's, not a second copy. What a
+  plain `--script` prints is unchanged.
+- **Whole script first, only with `--expect`.** A run with `--expect` reads and validates the entire script before the
+  program is started (a bad line is `script line N: ...`, exit 65, no spawn). A plain `--script` still runs the lines
+  before a bad one and then stops with `vtee: bad command on script line N: ...` (design E28 left that as it was).
+- **Messages of data errors have no `vtee: ` prefix** (`snapshot: line 3: ...`, `GOLDEN: line 7: ...`, `script line 2: ...`),
+  because design 6.10 says their first words say which file is wrong. Usage errors and I/O errors keep it.
+- **Exit codes for the session.** Under `--expect`, and for the new `--connect --script`, an unreachable session or a
+  connection that closes is 69 (design 6.10). Plain `--connect` (standard input relay) keeps 68, because it shipped in
+  0.0.1. A command the session refuses in `--connect --script` (for example `send` on a read-only socket) stops the script
+  with 77; a command the session cannot parse is 65.
+- **`--connect --script` and replies.** A session answers `send`, `send_key`, `resize` and `wait_ms` only when it refuses
+  them. After such a command the runner sends `exit_status`, which is always answered in order, to know where the answer
+  would have been; any `error` reply before it belongs to the command.
+- **The suggested command keeps the program last.** `Invocation` has a `tail` (`-- tf -n`) so the `--update=restamp`
+  suggested after a refusal goes before the program, as in the design's example; the library used to append it after.
+- **`--fail-fast` stops the script at a timed-out wait** (the rest could not be compared anyway); a screen that differs
+  is still found by comparing the finished run, which then keeps only the first problem. The report and the exit code are
+  what stopping at once would give.
+- **`--update` details.** It writes through a temporary file and a rename. An unchanged golden is not touched, unless the
+  file on disk is not in canonical form (CRLF, another order), in which case it is rewritten and the report says so.
+  `--portable` does nothing to an existing golden and says so. A `vtee-golden 0` draft is replaced (its rejection message
+  says to record it again); any other malformed golden is 65 and is not overwritten. A golden of a newer grammar is
+  refused (2), never rewritten. Snapshots of another schema or semantics than the build are not recorded (2): the golden
+  could not be read back. `--update --screen N` also refuses (2) if the golden was recorded under other numbers, since a
+  file must not mix them. A run with a timed-out wait, or with no screens, writes nothing (`NOT WRITTEN`, exit 1).
+- **`--update=restamp`** with a golden whose schema differs is a refusal (2); with the semantics already current it prints
+  `UNCHANGED` and runs nothing; otherwise it checks with the numbers set aside and either rewrites `semantics` and
+  `x-producer` (`RESTAMPED`) or writes nothing (`NOT RESTAMPED`, the check report follows, exit 1).
+- **The summaries.** `CREATED`, `UPDATED` and `UNCHANGED` list only screens that moved: `screen 2: 14 cells changed (text 3,
+  attrs 11), cursor moved`, `new`, `dropped (it had 2 masks and 1 assert, which are lost)`, and a `stamp:` line when the
+  numbers changed. `--format json` gives `{"golden","result","count","stamp","screens":[...],"notes":[...]}` with one
+  entry per screen that moved.
+- **The terminal size is 80x24** under `--expect`, and the diagnostic log is not redirected to a file (no terminal is
+  shown). `--text` with `--expect` is refused.
+- **Vectors.** `cli/` has one directory per refusal or failure (`args`, `env`, working files, `stderr-first-line`,
+  `exit`), `update/` one per `--update` run on saved output (`before.golden`, `run.ndjson`, `args`, `after.golden`,
+  `stdout`, `exit`); all are run through the real command by `tests/golden_vectors`. The spawn-failure vector passes `-qqq`
+  because ConPTY's own error log would otherwise be the first line of standard error on Windows.
+
+Still not built: `--update=migrate` (follows the first schema or grammar bump), the user-guide promotion of the golden
+format (`docs/guide/golden-format.md`), and `--input-policy`.

@@ -1,0 +1,4 @@
+--connect
+none.sock
+--expect
+g.golden

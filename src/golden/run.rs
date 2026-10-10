@@ -7,7 +7,7 @@ use std::fmt;
 use serde_json::Value;
 
 use super::model::Golden;
-use super::version::Refusal;
+use super::version::{Build, Refusal};
 use crate::snapshot::{SCHEMA_VERSION, Snapshot};
 
 /// A `wait_for` of the script that timed out (design section 6.9, kind `wait`).
@@ -64,6 +64,26 @@ fn malformed<T>(line: usize, message: impl fmt::Display) -> Result<T, RunError> 
 /// Each snapshot's version numbers are checked against `golden` as the snapshot is read, before its shape is looked
 /// at: a difference is a refusal (section 6.8, step 3).
 pub fn read_run(text: &str, golden: &Golden) -> Result<Run, RunError> {
+    read_run_with(text, &|schema, semantics| golden.check_snapshot(schema, semantics))
+}
+
+/// Like [`read_run`], for output that is not compared with a golden but turned into one (`--update`): each snapshot
+/// must carry the numbers of `build`. A refusal then names `build` in the place of the golden.
+pub fn read_run_for_build(text: &str, build: Build) -> Result<Run, RunError> {
+    read_run_with(text, &|schema, semantics| {
+        if schema != build.schema {
+            Err(Refusal::SnapshotSchema { golden: build.schema, snapshot: schema })
+        } else if semantics != build.semantics {
+            Err(Refusal::SnapshotSemantics { golden: build.semantics, snapshot: semantics })
+        } else {
+            Ok(())
+        }
+    })
+}
+
+type Check<'a> = &'a dyn Fn(u32, u32) -> Result<(), Refusal>;
+
+fn read_run_with(text: &str, check: Check<'_>) -> Result<Run, RunError> {
     let mut run = Run::default();
     for (index, line) in text.split('\n').enumerate() {
         let number = index + 1;
@@ -82,7 +102,7 @@ pub fn read_run(text: &str, golden: &Golden) -> Result<Run, RunError> {
                 let Some(snapshot) = object.get("snapshot") else {
                     return malformed(number, "a snapshot reply has no `snapshot`");
                 };
-                run.screens.push(read_snapshot(number, snapshot, golden)?);
+                run.screens.push(read_snapshot(number, snapshot, check)?);
                 run.names.push(name);
             }
             Some(Some("wait_for")) => {
@@ -102,7 +122,7 @@ pub fn read_run(text: &str, golden: &Golden) -> Result<Run, RunError> {
             Some(Some(_)) => {}
             Some(None) => return malformed(number, "`cmd` is not a string"),
             None => {
-                run.screens.push(read_snapshot(number, &value, golden)?);
+                run.screens.push(read_snapshot(number, &value, check)?);
                 run.names.push(name);
             }
         }
@@ -110,7 +130,7 @@ pub fn read_run(text: &str, golden: &Golden) -> Result<Run, RunError> {
     Ok(run)
 }
 
-fn read_snapshot(line: usize, value: &Value, golden: &Golden) -> Result<Snapshot, RunError> {
+fn read_snapshot(line: usize, value: &Value, check: Check<'_>) -> Result<Snapshot, RunError> {
     let Some(object) = value.as_object() else { return malformed(line, "a snapshot must be a JSON object") };
     let number = |key: &str| object.get(key).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
     let (schema, semantics) = match (number("schema_version"), number("semantics_version")) {
@@ -123,7 +143,7 @@ fn read_snapshot(line: usize, value: &Value, golden: &Golden) -> Result<Snapshot
         }
         _ => return malformed(line, "it has no `schema_version` and `semantics_version`, so it is not a snapshot"),
     };
-    golden.check_snapshot(schema, semantics).map_err(RunError::Refused)?;
+    check(schema, semantics).map_err(RunError::Refused)?;
     if schema != SCHEMA_VERSION {
         // The golden agrees with the snapshots but this build cannot read their layout.
         return Err(RunError::Refused(Refusal::Schema { golden: schema, tool: SCHEMA_VERSION }));
@@ -140,4 +160,38 @@ fn read_snapshot(line: usize, value: &Value, golden: &Golden) -> Result<Snapshot
         return malformed(line, "`cells` is not `rows` by `cols`");
     }
     Ok(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_line(schema: u32, semantics: u32) -> String {
+        format!(
+            "{{\"cmd\":\"snapshot\",\"name\":\"one\",\"snapshot\":{{\"schema_version\":{schema},\"semantics_version\":{semantics},\
+             \"byte_offset\":1,\"cols\":1,\"rows\":1,\"lines\":[\"a\"],\"cells\":[[{{\"ch\":\"a\"}}]],\"wrapped_rows\":[],\
+             \"cursor\":{{\"row\":0,\"col\":0,\"hidden\":false,\"shape\":\"block\"}},\"modes\":[],\"alt_screen\":false,\
+             \"title\":null,\"scrollback\":[]}}}}\n"
+        )
+    }
+
+    #[test]
+    fn output_of_the_build_is_read_whatever_golden_there_is() {
+        let run = read_run_for_build(&snapshot_line(1, 1), Build { schema: 1, semantics: 1 }).unwrap();
+        assert_eq!(run.screens.len(), 1);
+        assert_eq!(run.names, [Some("one".to_string())]);
+    }
+
+    #[test]
+    fn output_of_another_build_is_refused_naming_the_numbers() {
+        let build = Build { schema: 1, semantics: 1 };
+        assert_eq!(
+            read_run_for_build(&snapshot_line(1, 4), build).unwrap_err(),
+            RunError::Refused(Refusal::SnapshotSemantics { golden: 1, snapshot: 4 })
+        );
+        assert_eq!(
+            read_run_for_build(&snapshot_line(3, 1), build).unwrap_err(),
+            RunError::Refused(Refusal::SnapshotSchema { golden: 1, snapshot: 3 })
+        );
+    }
 }

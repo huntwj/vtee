@@ -1,0 +1,5 @@
+--expect
+g.golden
+--update=migrate
+--screen
+1

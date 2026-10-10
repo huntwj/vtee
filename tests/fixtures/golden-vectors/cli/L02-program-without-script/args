@@ -1,0 +1,4 @@
+--expect
+g.golden
+--
+sh

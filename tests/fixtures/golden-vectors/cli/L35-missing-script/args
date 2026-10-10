@@ -1,0 +1,6 @@
+--script
+nope.ndjson
+--expect
+g.golden
+--
+never-started

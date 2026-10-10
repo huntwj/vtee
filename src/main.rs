@@ -1,5 +1,7 @@
 mod client;
+mod expect;
 mod output;
+mod script;
 mod session_cmds;
 
 use std::io::IsTerminal;
@@ -11,7 +13,7 @@ use clap::{Parser, Subcommand};
 use clap_verbosity_flag::InfoLevel;
 use serde::{Deserialize, Serialize};
 
-use client::{ScriptOpts, run_connect, run_replay, run_script};
+use client::{ScriptOpts, run_connect, run_connect_script, run_replay, run_script};
 use output::{exit_code, fail, print_error, print_info};
 use session_cmds::{run_attach, run_kill, run_ls};
 
@@ -72,7 +74,8 @@ const BARE_LISTEN: &str = "\0";
 /// virtual terminal that people and programs can watch, type into and read back as structured data.
 ///
 /// `vtee [OPTIONS] [--] PROGRAM [ARGS]...` starts a session. `--script PATH` runs a batch of
-/// JSON commands and exits; `--connect PATH` talks to a running session's command socket.
+/// JSON commands against the program and exits; with `--connect PATH` it runs them against a
+/// running session's command socket instead, and without `--script` `--connect` relays stdin.
 #[derive(Parser)]
 #[command(name = "vtee", version)]
 struct Cli {
@@ -88,7 +91,8 @@ struct Cli {
     text: bool,
 
     /// Talk to a running session's command socket instead of starting a program: read JSON
-    /// commands from stdin, one per line, and print the replies.
+    /// commands from stdin, one per line, and print the replies. With `--script`, run that
+    /// script against the session instead of reading stdin; the session is left running.
     #[arg(long, value_name = "PATH")]
     connect: Option<PathBuf>,
 
@@ -98,7 +102,8 @@ struct Cli {
     log: Option<PathBuf>,
 
     /// Run the JSON commands in PATH (one per line) against the program, print each result, then
-    /// stop the program. Cannot be combined with the session options below.
+    /// stop the program. A `wait_for` that times out makes the run exit 1 unless its line says
+    /// `"optional":true`. Cannot be combined with the session options below.
     #[arg(
         long,
         value_name = "PATH",
@@ -108,6 +113,51 @@ struct Cli {
         ]
     )]
     script: Option<PathBuf>,
+
+    /// Run the script and compare the screens its `snapshot` commands produce, in order, with the
+    /// expected output in GOLDEN (a golden file). Prints PASS, FAIL or REFUSED with what differs.
+    /// Exit 0 passes, 1 differs, 2 cannot be compared (the golden was recorded under other version
+    /// numbers). The terminal defaults to 80x24. Sources: a program after `--` with `--script`,
+    /// `--connect SOCK` (with `--script`, or alone for the screen now), or `--snapshot FILE`.
+    #[arg(long, value_name = "GOLDEN")]
+    expect: Option<PathBuf>,
+
+    /// With `--expect`: write GOLDEN from the run instead of comparing. `--update` (same as
+    /// `--update=record`) creates it, or regenerates the screens and keeps its masks, assertions and
+    /// comments; `--update=restamp` rewrites only the semantics number, and only if nothing the
+    /// golden checks changed. Always prints what it changed. Refused when the `CI` environment
+    /// variable is set, unless `VTEE_ALLOW_UPDATE=1`. Write it with the `=`.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "record", value_name = "MODE")]
+    update: Option<String>,
+
+    /// With `--expect`: compare one screen of a composite golden, 1-based, with the only screen
+    /// the run produces; with `--update`, regenerate just that screen of an existing golden.
+    #[arg(long, value_name = "N")]
+    screen: Option<usize>,
+
+    /// With `--expect`: print the report as `text` (default) or `json`.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    format: Option<expect::Format>,
+
+    /// With `--expect --update`: write a golden that passes on Linux and Windows, ignoring the
+    /// differences between them (mode tokens ConPTY hides, the window title, underline colour).
+    #[arg(long)]
+    portable: bool,
+
+    /// With `--expect`: stop at the first difference or timed-out `wait_for`; the rest of the
+    /// screens are reported as skipped.
+    #[arg(long)]
+    fail_fast: bool,
+
+    /// With `--expect`: show at most N mismatches in the report (default 20); the total is still
+    /// counted.
+    #[arg(long, value_name = "N")]
+    max_mismatches: Option<usize>,
+
+    /// With `--expect`: check saved output instead of running anything. FILE (or `-` for standard
+    /// input) holds what a `--script` run printed: one JSON document per line.
+    #[arg(long, value_name = "FILE")]
+    snapshot: Option<PathBuf>,
 
     /// Put the session's JSON command socket at PATH instead of in the per-user session
     /// directory. Write it as `--listen=PATH` (the `=` is required; with a space, PATH would be
@@ -212,20 +262,54 @@ fn main() -> ExitCode {
 
     init_logging(&cli);
 
-    if let Some(path) = &cli.connect {
-        return run_connect(path, cli.text);
+    let expect_args = expect::Args {
+        expect: cli.expect.clone(),
+        update: cli.update.clone(),
+        screen: cli.screen,
+        format: cli.format,
+        portable: cli.portable,
+        fail_fast: cli.fail_fast,
+        max_mismatches: cli.max_mismatches,
+        snapshot: cli.snapshot.clone(),
+        text: cli.text,
+        connect: cli.connect.is_some(),
+        script: cli.script.is_some(),
+        program: !cli.command.is_empty(),
+        session_options: cli.cols.is_some() || cli.rows.is_some() || !cli.env.is_empty() || cli.log.is_some(),
+    };
+    let plan = match expect::plan(&expect_args, &|name| std::env::var(name).ok()) {
+        Ok(plan) => plan,
+        Err(message) => return fail(exitcode::USAGE, message),
+    };
+
+    if let Some(plan) = &plan {
+        if let Err(code) = check_dimensions(&cli) {
+            return code;
+        }
+        // A run that is judged must not depend on where it happens to run: not on this terminal's size.
+        let (cols, rows) = (cli.cols.unwrap_or(80), cli.rows.unwrap_or(24));
+        let ctx = expect::Context {
+            program: cli.command.split_first().map(|(program, rest)| (program.as_str(), rest)),
+            script: cli.script.as_deref(),
+            connect: cli.connect.as_deref(),
+            log_path: cli.log.as_deref(),
+            cols,
+            rows,
+            env: &cli.env,
+            argv: std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect(),
+        };
+        return expect::run(plan, &ctx);
     }
 
-    // The same bound `resize` enforces: the emulator allocates cols x rows cells.
-    for (flag, value) in [("--cols", cli.cols), ("--rows", cli.rows)] {
-        if let Some(n) = value
-            && !(1..=vtee::MAX_TERMINAL_DIMENSION).contains(&n)
-        {
-            return fail(
-                exitcode::USAGE,
-                format!("{flag} {n} is out of range: it must be between 1 and {}", vtee::MAX_TERMINAL_DIMENSION),
-            );
-        }
+    if let Some(path) = &cli.connect {
+        return match &cli.script {
+            Some(script) => run_connect_script(path, script, cli.text),
+            None => run_connect(path, cli.text),
+        };
+    }
+
+    if let Err(code) = check_dimensions(&cli) {
+        return code;
     }
 
     let observed_size = observed_terminal_size();
@@ -270,12 +354,30 @@ fn main() -> ExitCode {
     )
 }
 
+/// The same bound `resize` enforces: the emulator allocates cols x rows cells.
+fn check_dimensions(cli: &Cli) -> Result<(), ExitCode> {
+    for (flag, value) in [("--cols", cli.cols), ("--rows", cli.rows)] {
+        if let Some(n) = value
+            && !(1..=vtee::MAX_TERMINAL_DIMENSION).contains(&n)
+        {
+            return Err(fail(
+                exitcode::USAGE,
+                format!("{flag} {n} is out of range: it must be between 1 and {}", vtee::MAX_TERMINAL_DIMENSION),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Diagnostics go to stderr, except when this process is showing the child live on a real
 /// terminal: stderr would interleave with the child's screen, so they go to a file beside the
 /// session's socket instead (`docs/decisions.md`).
 fn init_logging(cli: &Cli) {
-    let mux_shows_child_live =
-        cli.script.is_none() && cli.connect.is_none() && !cli.headless && std::io::stdin().is_terminal();
+    let mux_shows_child_live = cli.script.is_none()
+        && cli.connect.is_none()
+        && cli.expect.is_none()
+        && !cli.headless
+        && std::io::stdin().is_terminal();
 
     let mut builder = env_logger::Builder::new();
     builder.filter_level(cli.verbosity.log_level_filter());
