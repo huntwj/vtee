@@ -80,7 +80,8 @@ pub use session::{
     write_session_record,
 };
 pub use snapshot::{
-    Cell, Color, Cursor, CursorShape, SCHEMA_VERSION, SEMANTICS_VERSION, Snapshot, UnderlineStyle, redraw_sequence,
+    Cell, Color, Cursor, CursorShape, EMULATOR, Producer, SCHEMA_VERSION, SEMANTICS_VERSION, Snapshot, UnderlineStyle,
+    redraw_sequence,
 };
 #[cfg(windows)]
 pub use tap::restore_default_ctrl_c;

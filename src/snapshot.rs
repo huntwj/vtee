@@ -241,6 +241,28 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// attribute value. Every bump is an entry in `docs/guide/snapshot-semantics.md`.
 pub const SEMANTICS_VERSION: u32 = 1;
 
+/// The emulator this build links, as `name version`. A test checks it against `Cargo.lock`, so
+/// upgrading the dependency without updating this string fails the build.
+pub const EMULATOR: &str = "alacritty_terminal 0.26.0";
+
+/// Which build produced a snapshot. Debugging information only: nothing may depend on it and a
+/// comparison never looks at it. An absent `producer` reads as empty strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Producer {
+    /// The `vtee` version.
+    pub vtee: String,
+    /// The terminal emulator and its version.
+    pub emulator: String,
+}
+
+impl Producer {
+    /// The build that is running.
+    pub fn current() -> Self {
+        Producer { vtee: env!("CARGO_PKG_VERSION").to_string(), emulator: EMULATOR.to_string() }
+    }
+}
+
 /// The full state of a tap's screen as of `byte_offset` bytes of child output. Two snapshots
 /// built from the same byte offset (e.g. one live, one replayed from the raw log) should be
 /// identical - that's what makes a golden test out of this stable.
@@ -269,6 +291,9 @@ pub struct Snapshot {
     /// Scrolled-off rows, oldest first, text only (cell-level scrollback detail is not
     /// exposed - a possible future addition if something needs it).
     pub scrollback: Vec<String>,
+    /// The build that produced this snapshot. Informational; see [`Producer`].
+    #[serde(default)]
+    pub producer: Producer,
 }
 
 pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Option<String>) -> Snapshot {
@@ -358,6 +383,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
         alt_screen: mode.contains(TermMode::ALT_SCREEN),
         title,
         scrollback: build_scrollback(term),
+        producer: Producer::current(),
     }
 }
 
@@ -779,6 +805,35 @@ mod emulator_tests {
         v["semantics_version"] = 9.into();
         let newer: Snapshot = serde_json::from_value(v).unwrap();
         assert_eq!((newer.schema_version, newer.semantics_version), (7, 9), "numbers are kept, not rewritten");
+    }
+
+    #[test]
+    fn the_producer_names_this_build_and_is_written_last() {
+        let s = snap(b"x", 5, 2);
+        assert_eq!(
+            s.producer,
+            Producer { vtee: env!("CARGO_PKG_VERSION").to_string(), emulator: EMULATOR.to_string() }
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        let tail = format!(r#""producer":{{"vtee":"{}","emulator":"{EMULATOR}"}}}}"#, env!("CARGO_PKG_VERSION"));
+        assert!(json.ends_with(&tail), "{json}");
+        // Nothing may depend on it, so a snapshot without one still reads.
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("producer");
+        assert_eq!(serde_json::from_value::<Snapshot>(v).unwrap().producer, Producer::default());
+    }
+
+    #[test]
+    fn the_emulator_string_matches_the_locked_dependency() {
+        let lock = include_str!("../Cargo.lock");
+        let start = lock.find("name = \"alacritty_terminal\"").expect("alacritty_terminal is not in Cargo.lock");
+        let version = lock[start..]
+            .lines()
+            .nth(1)
+            .and_then(|l| l.strip_prefix("version = \""))
+            .and_then(|l| l.strip_suffix('"'))
+            .expect("no version line after the package name");
+        assert_eq!(EMULATOR, format!("alacritty_terminal {version}"), "update EMULATOR and bump semantics_version");
     }
 
     #[test]
