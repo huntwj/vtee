@@ -107,7 +107,7 @@ emulator. Without this, the program appeared to hang about half the time.
 `vtee` can only report what ConPTY passes on. A program that turns on mouse reporting (`ESC[?1000h`, `?1006h`)
 or application cursor keys (`ESC[?1h`) does not show them in the snapshot's `modes` on Windows, because ConPTY
 consumes those sequences and never forwards them. The cause is ConPTY, not the emulator: the same bytes from a
-Linux program produce `["?1000","?1006","?2004","?1"]`, while under ConPTY on Windows 11 (build 26300) only
+Linux program produce `["?1","?1000","?1006","?2004"]`, while under ConPTY on Windows 11 (build 26300) only
 `?2004` appeared. What does get through includes the alternate screen (`?1049`), cursor visibility (`?25`) and
 bracketed paste (`?2004`). Other private modes were not tested.
 

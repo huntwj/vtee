@@ -171,7 +171,7 @@ is internally consistent: the state and `byte_offset` always agree.
 A real reply from a 12 by 3 screen that shows `$ ` and a bold red `R`, with the last two rows of cells shortened:
 
 ```
-{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"cursor":{"row":0,"col":3,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
+{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"cursor":{"row":0,"col":3,"hidden":false,"shape":"block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
 ```
 
 Cells are sparse: a field that has its default value is left out, and a blank cell is `{}`. A full 80 by 24 screen
@@ -184,7 +184,7 @@ is about 8 KB when empty and 11 KB for a typical shell session, instead of about
 | `cols`, `rows` | integer | Screen size. |
 | `lines` | array of string | One string per row, padded with spaces to `cols`. Combining marks are included. Convenient when attributes do not matter. |
 | `cells` | array of array of Cell | `rows` by `cols` cells, row-major. |
-| `cursor` | object | `row`, `col` (zero-based), `hidden` (boolean), `shape`: `Block`, `Underline`, `Bar`, `HollowBlock` or `Hidden`. |
+| `cursor` | object | `row`, `col` (zero-based, non-negative; `col` can point at the continuation cell of a wide character), `hidden` (boolean, true when the program turned the cursor off with `?25l`), `shape`: `"block"`, `"underline"` or `"bar"`. Blinking styles are reported as the steady shape. |
 | `modes` | array of string | Active modes. See below. |
 | `alt_screen` | boolean | Whether the alternate screen (used by full-screen programs) is active. |
 | `title` | string or null | The window title set by the program, `null` if none. |
@@ -236,11 +236,26 @@ A string: `"default"`, `"idx:N"` for the 256-colour palette (0 to 15 are the sta
 
 ### Modes
 
-`modes` lists the strings below for the modes that are on, in this order: `?1000` (mouse click reporting), `?1006`
-(SGR mouse encoding), `?2004` (bracketed paste), `?1` (application cursor keys), `DECKPAM` (application keypad).
-Mouse and paste modes are reported, but there is no command to send mouse or paste input.
+`modes` is a set of the modes that are on. It is written sorted (private modes by number, then names
+alphabetically), so two snapshots of the same state are identical whatever order the program set the modes in; a
+reader accepts any order. The tokens are:
 
-On Windows, `?1000`, `?1006` and `?1` never appear in `modes`: ConPTY consumes those sequences and does not
+| Token | Mode |
+| --- | --- |
+| `?1` | application cursor keys |
+| `?1000` | mouse click reporting |
+| `?1002` | mouse drag reporting |
+| `?1003` | mouse motion reporting (all movement) |
+| `?1005` | UTF-8 mouse encoding |
+| `?1006` | SGR mouse encoding |
+| `?2004` | bracketed paste |
+| `DECKPAM` | application keypad |
+
+The emulator keeps one mouse report mode (`?1000`, `?1002` or `?1003`) and one mouse encoding (`?1005` or `?1006`)
+at most: turning on another replaces the earlier one, and turning one off clears only that mode. Mouse and paste
+modes are reported, but there is no command to send mouse or paste input.
+
+On Windows, `?1`, `?1000`, `?1002` and `?1006` never appear in `modes`: ConPTY consumes those sequences and does not
 forward them, so the emulator never sees them. `?2004` does appear. See
 [Windows](windows.md#terminal-modes-that-conpty-hides) for the evidence.
 

@@ -211,18 +211,22 @@ fn is_false(flag: &bool) -> bool {
     !*flag
 }
 
+/// The cursor's shape. Blinking variants collapse to the steady shape (blink is not tracked). The emulator's
+/// `HollowBlock` (an unfocused window) and `Hidden` (which `Cursor::hidden` already says) are reported as `Block`;
+/// the name `hollow_block` is reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CursorShape {
     Block,
     Underline,
     Bar,
-    HollowBlock,
-    Hidden,
 }
 
+/// Zero-based position inside the screen. `col` may point at the continuation cell of a wide character; that is
+/// reported as is.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cursor {
-    pub row: i32,
+    pub row: usize,
     pub col: usize,
     pub hidden: bool,
     pub shape: CursorShape,
@@ -253,9 +257,9 @@ pub struct Snapshot {
     /// Row-major cells, `rows` x `cols`.
     pub cells: Vec<Vec<Cell>>,
     pub cursor: Cursor,
-    /// Active DEC private modes, as their conventional string form (e.g. `"?1000"` for mouse
-    /// click reporting, `"DECKPAM"` for application keypad) - the same vocabulary used
-    /// throughout this project's probes and decisions.
+    /// Active modes, as a set written sorted: private modes by number (`"?1"`, `"?1000"`, `"?1002"`, `"?1003"`,
+    /// `"?1005"`, `"?1006"`, `"?2004"`), then names alphabetically (`"DECKPAM"`). A reader accepts any order. The
+    /// mouse report modes are mutually exclusive in the emulator, and so are the mouse encodings.
     pub modes: Vec<String>,
     pub alt_screen: bool,
     pub title: Option<String>,
@@ -308,30 +312,29 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     }
 
     let mode = *term.mode();
-    let mut modes: Vec<String> = Vec::new();
-    if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
-        modes.push("?1000".to_string());
-    }
-    if mode.contains(TermMode::SGR_MOUSE) {
-        modes.push("?1006".to_string());
-    }
-    if mode.contains(TermMode::BRACKETED_PASTE) {
-        modes.push("?2004".to_string());
-    }
-    if mode.contains(TermMode::APP_CURSOR) {
-        modes.push("?1".to_string());
-    }
-    if mode.contains(TermMode::APP_KEYPAD) {
-        modes.push("DECKPAM".to_string());
-    }
+    // Written sorted: private modes by number, then names alphabetically. The table is in that order.
+    let modes: Vec<String> = [
+        ("?1", TermMode::APP_CURSOR),
+        ("?1000", TermMode::MOUSE_REPORT_CLICK),
+        ("?1002", TermMode::MOUSE_DRAG),
+        ("?1003", TermMode::MOUSE_MOTION),
+        ("?1005", TermMode::UTF8_MOUSE),
+        ("?1006", TermMode::SGR_MOUSE),
+        ("?2004", TermMode::BRACKETED_PASTE),
+        ("DECKPAM", TermMode::APP_KEYPAD),
+    ]
+    .into_iter()
+    .filter(|(_, flag)| mode.contains(*flag))
+    .map(|(token, _)| token.to_string())
+    .collect();
 
     let cursor_point = grid.cursor.point;
     let shape = match term.cursor_style().shape {
-        vte::ansi::CursorShape::Block => CursorShape::Block,
         vte::ansi::CursorShape::Underline => CursorShape::Underline,
         vte::ansi::CursorShape::Beam => CursorShape::Bar,
-        vte::ansi::CursorShape::HollowBlock => CursorShape::HollowBlock,
-        vte::ansi::CursorShape::Hidden => CursorShape::Hidden,
+        vte::ansi::CursorShape::Block | vte::ansi::CursorShape::HollowBlock | vte::ansi::CursorShape::Hidden => {
+            CursorShape::Block
+        }
     };
 
     Snapshot {
@@ -342,7 +345,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
         lines,
         cells,
         cursor: Cursor {
-            row: cursor_point.line.0,
+            row: usize::try_from(cursor_point.line.0).unwrap_or(0).min(rows.saturating_sub(1)),
             col: cursor_point.column.0,
             hidden: !mode.contains(TermMode::SHOW_CURSOR),
             shape,
@@ -574,6 +577,35 @@ mod emulator_tests {
     }
 
     #[test]
+    fn modes_are_written_sorted_whatever_order_they_were_set_in() {
+        let s = snap(b"\x1b=\x1b[?2004h\x1b[?1005h\x1b[?1002h\x1b[?1h", 20, 4);
+        assert_eq!(s.modes, ["?1", "?1002", "?1005", "?2004", "DECKPAM"]);
+        let s = snap(b"\x1b[?1h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b=", 20, 4);
+        assert_eq!(s.modes, ["?1", "?1003", "?1006", "?2004", "DECKPAM"]);
+        assert!(snap(b"", 20, 4).modes.is_empty());
+        // A reader accepts any order.
+        let mut json = serde_json::to_value(&s).unwrap();
+        json["modes"] = serde_json::json!(["DECKPAM", "?2004", "?1"]);
+        let back: Snapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(back.modes, ["DECKPAM", "?2004", "?1"]);
+    }
+
+    #[test]
+    fn mouse_modes_follow_the_emulators_exclusive_model() {
+        // One report mode and one encoding at most (design E18): the later one replaces the earlier.
+        assert_eq!(snap(b"\x1b[?1000h", 10, 2).modes, ["?1000"]);
+        assert_eq!(snap(b"\x1b[?1002h", 10, 2).modes, ["?1002"]);
+        assert_eq!(snap(b"\x1b[?1003h", 10, 2).modes, ["?1003"]);
+        assert_eq!(snap(b"\x1b[?1000h\x1b[?1002h", 10, 2).modes, ["?1002"]);
+        // A reset clears only its own mode, so resetting another report mode changes nothing.
+        assert_eq!(snap(b"\x1b[?1003h\x1b[?1000l", 10, 2).modes, ["?1003"]);
+        assert!(snap(b"\x1b[?1003h\x1b[?1003l", 10, 2).modes.is_empty());
+        assert_eq!(snap(b"\x1b[?1005h", 10, 2).modes, ["?1005"]);
+        assert_eq!(snap(b"\x1b[?1006h\x1b[?1005h", 10, 2).modes, ["?1005"]);
+        assert_eq!(snap(b"\x1b[?1000h\x1b[?1006h", 10, 2).modes, ["?1000", "?1006"]);
+    }
+
+    #[test]
     fn cursor_position_visibility_and_shape() {
         let s = snap(b"ab\r\ncd\x1b[4 q", 10, 3);
         assert_eq!((s.cursor.row, s.cursor.col), (1, 2));
@@ -582,6 +614,35 @@ mod emulator_tests {
         assert_eq!(snap(b"\x1b[6 q", 10, 3).cursor.shape, CursorShape::Bar);
         assert_eq!(snap(b"\x1b[2 q", 10, 3).cursor.shape, CursorShape::Block);
         assert!(snap(b"\x1b[?25l", 10, 3).cursor.hidden);
+    }
+
+    #[test]
+    fn the_cursor_is_written_with_lowercase_shapes_and_a_row_inside_the_screen() {
+        let json = |bytes: &[u8]| serde_json::to_value(snap(bytes, 10, 3).cursor).unwrap();
+        assert_eq!(json(b"\x1b[4 q"), serde_json::json!({"row": 0, "col": 0, "hidden": false, "shape": "underline"}));
+        assert_eq!(json(b"\x1b[6 qx")["shape"], "bar");
+        assert_eq!(json(b"")["shape"], "block");
+        // Rows count from zero and stay inside the screen even when the output scrolls.
+        let s = snap(b"1\r\n2\r\n3\r\n4\r\n5", 10, 3);
+        assert_eq!((s.cursor.row, s.cursor.col), (2, 1));
+        for shape in ["Block", "HollowBlock", "Hidden"] {
+            let old = serde_json::json!({"row": 0, "col": 0, "hidden": false, "shape": shape});
+            assert!(serde_json::from_value::<Cursor>(old).is_err(), "{shape} must not be read");
+        }
+        let negative = serde_json::json!({"row": -1, "col": 0, "hidden": false, "shape": "block"});
+        assert!(serde_json::from_value::<Cursor>(negative).is_err());
+    }
+
+    #[test]
+    fn blinking_cursor_styles_collapse_to_the_steady_shape() {
+        for (code, shape) in [(1, CursorShape::Block), (2, CursorShape::Block), (3, CursorShape::Underline)] {
+            let bytes = format!("\x1b[{code} q");
+            assert_eq!(snap(bytes.as_bytes(), 10, 3).cursor.shape, shape, "DECSCUSR {code}");
+        }
+        for (code, shape) in [(4, CursorShape::Underline), (5, CursorShape::Bar), (6, CursorShape::Bar)] {
+            let bytes = format!("\x1b[{code} q");
+            assert_eq!(snap(bytes.as_bytes(), 10, 3).cursor.shape, shape, "DECSCUSR {code}");
+        }
     }
 
     #[test]
