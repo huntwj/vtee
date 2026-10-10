@@ -168,6 +168,9 @@ fn serve_connection(tap: &Tap, stream: UnixStream, opts: ServeOptions) {
 /// Parses, authorizes and executes one command line; `None` means there is nothing to report.
 fn handle_line(tap: &Tap, id: u64, opts: ServeOptions, line: &str) -> Option<CommandResult> {
     let error = |message: String| Some(CommandResult::Error { message });
+    // A client that is not `vtee --connect` (PowerShell 5.1 writing straight to the socket)
+    // may still start its first line with byte order marks.
+    let line = line.trim_start_matches('\u{feff}');
     let cmd = match serde_json::from_str::<Command>(line) {
         Ok(cmd) => cmd,
         Err(e) => return error(format!("bad command: {e}")),

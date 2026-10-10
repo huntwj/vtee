@@ -135,42 +135,35 @@ Nothing is changed if the handle is not a console, for example when output is re
 
 ## PowerShell and the byte-order mark
 
-A UTF-8 byte-order mark (BOM) in front of a JSON command makes it unreadable. `vtee --connect` and `--script`
-remove one leading BOM from each input line, which covers a `--script` file saved by Windows PowerShell 5.1 with
-`Set-Content -Encoding UTF8` (it starts `EF-BB-BF`; this works). Piping to `--connect` is the case that needs
-care, because Windows PowerShell 5.1 builds the bytes from `$OutputEncoding`:
+A UTF-8 byte-order mark (BOM) in front of a JSON command is not JSON. Windows PowerShell 5.1 writes one at the
+start of piped text and of files saved as UTF-8, and writes **two** when `$OutputEncoding` is a UTF-8 encoding
+that has a BOM (measured: the bytes arrive as `ef bb bf ef bb bf 7b 22 63 ...`). `vtee --connect` and
+`--script` remove every leading BOM from each input line, and the session socket ignores leading BOMs on a
+command line too, so both cases work without any workaround:
 
-- In a clean `powershell.exe -NoProfile`, `$OutputEncoding` is US-ASCII with no BOM, and piping works:
+```
+PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
+--- exit_status running ---
+PS> $OutputEncoding = New-Object System.Text.UTF8Encoding $true
+PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
+--- exit_status running ---
+```
 
-  ```
-  PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
-  --- exit_status running ---
-  ```
+A line the session cannot parse at all (here, `not json`) is an error reply, and `--connect` now exits 65
+(`DATAERR`) after printing it, so a garbled script no longer looks like success:
 
-- If a profile or script sets `$OutputEncoding` to a UTF-8 encoding that has a BOM, PowerShell sends **two** BOMs
-  (measured: the bytes arrive as `ef bb bf ef bb bf 7b 22 63 ...`). `vtee` removes one and the command still
-  fails. The reply is an error line, and `--connect` still exits 0:
+```
+PS> 'not json' | vtee --connect $sock; $LASTEXITCODE
+{"cmd":"error","message":"bad command: expected ident at line 1 column 2"}
+65
+```
 
-  ```
-  PS> $OutputEncoding = New-Object System.Text.UTF8Encoding $true
-  PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
-  --- error: bad command: expected value at line 1 column 1 ---
-  ```
+Other error replies, such as a write refused because the session is read-only, still exit 0; check reply lines for
+`"cmd":"error"`.
 
-  The same happens when `$OutputEncoding` is `[Console]::OutputEncoding` on a console set to UTF-8. Check with
-  `$OutputEncoding.GetPreamble().Length`: anything other than `0` sends a BOM.
-
-- The fix is an encoding without a BOM for the pipe:
-
-  ```
-  PS> $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-  PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
-  --- exit_status running ---
-  ```
-
-What was tested, all on Windows PowerShell 5.1 (5.1.26100): a `--script` file written with `Set-Content -Encoding
-UTF8`, and one written with `>` (which on that machine also produced UTF-8 with a BOM, `EF-BB-BF`); both run.
-Files saved as UTF-16 and PowerShell 7 were not tested.
+What was tested, all on Windows PowerShell 5.1 (5.1.26100): piping with `$OutputEncoding` set to UTF-8 without and
+with a BOM, a garbled line, and a `--script` file written with `Set-Content -Encoding UTF8`. Files saved as
+UTF-16 and PowerShell 7 were not tested.
 
 ## Known gaps
 
@@ -180,8 +173,6 @@ Files saved as UTF-16 and PowerShell 7 were not tested.
   refuses to terminate a process that was created after the session record was last written, since that process
   cannot be the holder. A reused process id is therefore left alone; the check relies on file and process times.
 - **Mouse modes are not visible in snapshots.** See the section above.
-- **A doubled BOM from PowerShell 5.1 is not handled.** One leading BOM is removed; the two that PowerShell sends
-  when `$OutputEncoding` has a BOM are not. See [PowerShell and the byte-order mark](#powershell-and-the-byte-order-mark).
 - **Windows must be 1803 or later**, for AF_UNIX sockets.
 - **Antivirus** products might interfere with socket files. No problem has been seen.
 - **The tests rely on tools that are not guaranteed to be installed**, such as Git for Windows' `vim` and `less`.

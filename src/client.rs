@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::output::fail;
+use crate::output::{exit_code, fail};
 
 pub struct ScriptOpts<'a> {
     pub log_path: Option<&'a Path>,
@@ -113,13 +113,22 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     };
     drop(stream);
 
+    // Returns whether the server rejected any input line as unparseable, so a garbled script
+    // (for example a stray byte order mark) is not reported as success.
     let reader_thread = std::thread::spawn(move || {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        let mut saw_bad_command = false;
         for line in std::io::BufReader::new(reader_side).lines() {
             let Ok(line) = line else { break };
+            let parsed = serde_json::from_str::<vtee::CommandResult>(&line);
+            if let Ok(vtee::CommandResult::Error { message }) = &parsed
+                && is_bad_command(message)
+            {
+                saw_bad_command = true;
+            }
             if text_mode {
-                match serde_json::from_str::<vtee::CommandResult>(&line) {
+                match parsed {
                     Ok(result) => print_text(&mut out, &result),
                     Err(e) => print_error(&format!("malformed response from server: {e}")),
                 }
@@ -128,6 +137,7 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
             }
             let _ = out.flush();
         }
+        saw_bad_command
     });
 
     for line in std::io::stdin().lock().lines() {
@@ -139,8 +149,15 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     // `try_clone` duplicates the fd, so dropping `writer` would not send EOF while the reader's
     // duplicate is open; `shutdown` acts on the socket itself.
     let _ = writer.shutdown(std::net::Shutdown::Write);
-    let _ = reader_thread.join();
+    if reader_thread.join().unwrap_or(false) {
+        return exit_code(exitcode::DATAERR);
+    }
     ExitCode::SUCCESS
+}
+
+/// The server's reply to a line that is not a valid command (`sockets.rs`, `handle_line`).
+fn is_bad_command(message: &str) -> bool {
+    message.starts_with("bad command:")
 }
 
 /// `replay`: feed an asciicast v2 recording (written by `--log`) into a fresh emulator and print the
@@ -188,9 +205,10 @@ pub fn run_replay(path: &Path, json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark, which is not JSON.
+/// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark, which is not JSON, and
+/// sends it twice when `$OutputEncoding` already carries one; drop every leading mark.
 fn strip_bom(line: &str) -> &str {
-    line.strip_prefix('\u{feff}').unwrap_or(line)
+    line.trim_start_matches('\u{feff}')
 }
 
 /// `running`, `code=N` or `signal=...`, and `timed_out=...` for a `wait_exit` reply.
@@ -249,5 +267,17 @@ mod tests {
         assert_eq!(strip_bom("\u{feff}{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
         assert_eq!(strip_bom("{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
         assert_eq!(strip_bom(""), "");
+    }
+
+    #[test]
+    fn a_doubled_byte_order_mark_is_removed_too() {
+        assert_eq!(strip_bom("\u{feff}\u{feff}{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
+        assert_eq!(strip_bom("{\"a\":\"\u{feff}\"}"), "{\"a\":\"\u{feff}\"}");
+    }
+
+    #[test]
+    fn only_unparseable_input_counts_as_a_bad_command() {
+        assert!(super::is_bad_command("bad command: expected value at line 1 column 1"));
+        assert!(!super::is_bad_command("write commands aren't allowed on this connection"));
     }
 }

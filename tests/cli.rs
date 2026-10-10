@@ -882,6 +882,39 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
+    /// Windows PowerShell 5.1 sends the mark twice when `$OutputEncoding` already has one, and a
+    /// line the server cannot parse must not look like success.
+    #[test]
+    fn connect_strips_a_doubled_mark_and_fails_on_unparseable_input() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "bom2", &[]);
+        wait_for_session(&tmpdir, "bom2");
+        let sock = dir.join("bom2.sock");
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("\u{feff}\u{feff}{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":80"));
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("this is not json\n")
+            .assert()
+            .code(exitcode::DATAERR)
+            .stdout(predicate::str::contains("bad command"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
     /// Regression test for a real, adversarially-found bug: broadcasting to raw-TTY sinks used
     /// to do a blocking `write_all` to *every* sink under the one lock that also gates `term`,
     /// `bytes_seen`, and `snapshot()` - so one attach client that simply stops reading (a
