@@ -211,18 +211,22 @@ fn is_false(flag: &bool) -> bool {
     !*flag
 }
 
+/// The cursor's shape. Blinking variants collapse to the steady shape (blink is not tracked). The emulator's
+/// `HollowBlock` (an unfocused window) and `Hidden` (which `Cursor::hidden` already says) are reported as `Block`;
+/// the name `hollow_block` is reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CursorShape {
     Block,
     Underline,
     Bar,
-    HollowBlock,
-    Hidden,
 }
 
+/// Zero-based position inside the screen. `col` may point at the continuation cell of a wide character; that is
+/// reported as is.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cursor {
-    pub row: i32,
+    pub row: usize,
     pub col: usize,
     pub hidden: bool,
     pub shape: CursorShape,
@@ -327,11 +331,11 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
 
     let cursor_point = grid.cursor.point;
     let shape = match term.cursor_style().shape {
-        vte::ansi::CursorShape::Block => CursorShape::Block,
         vte::ansi::CursorShape::Underline => CursorShape::Underline,
         vte::ansi::CursorShape::Beam => CursorShape::Bar,
-        vte::ansi::CursorShape::HollowBlock => CursorShape::HollowBlock,
-        vte::ansi::CursorShape::Hidden => CursorShape::Hidden,
+        vte::ansi::CursorShape::Block | vte::ansi::CursorShape::HollowBlock | vte::ansi::CursorShape::Hidden => {
+            CursorShape::Block
+        }
     };
 
     Snapshot {
@@ -342,7 +346,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
         lines,
         cells,
         cursor: Cursor {
-            row: cursor_point.line.0,
+            row: usize::try_from(cursor_point.line.0).unwrap_or(0).min(rows.saturating_sub(1)),
             col: cursor_point.column.0,
             hidden: !mode.contains(TermMode::SHOW_CURSOR),
             shape,
@@ -582,6 +586,35 @@ mod emulator_tests {
         assert_eq!(snap(b"\x1b[6 q", 10, 3).cursor.shape, CursorShape::Bar);
         assert_eq!(snap(b"\x1b[2 q", 10, 3).cursor.shape, CursorShape::Block);
         assert!(snap(b"\x1b[?25l", 10, 3).cursor.hidden);
+    }
+
+    #[test]
+    fn the_cursor_is_written_with_lowercase_shapes_and_a_row_inside_the_screen() {
+        let json = |bytes: &[u8]| serde_json::to_value(snap(bytes, 10, 3).cursor).unwrap();
+        assert_eq!(json(b"\x1b[4 q"), serde_json::json!({"row": 0, "col": 0, "hidden": false, "shape": "underline"}));
+        assert_eq!(json(b"\x1b[6 qx")["shape"], "bar");
+        assert_eq!(json(b"")["shape"], "block");
+        // Rows count from zero and stay inside the screen even when the output scrolls.
+        let s = snap(b"1\r\n2\r\n3\r\n4\r\n5", 10, 3);
+        assert_eq!((s.cursor.row, s.cursor.col), (2, 1));
+        for shape in ["Block", "HollowBlock", "Hidden"] {
+            let old = serde_json::json!({"row": 0, "col": 0, "hidden": false, "shape": shape});
+            assert!(serde_json::from_value::<Cursor>(old).is_err(), "{shape} must not be read");
+        }
+        let negative = serde_json::json!({"row": -1, "col": 0, "hidden": false, "shape": "block"});
+        assert!(serde_json::from_value::<Cursor>(negative).is_err());
+    }
+
+    #[test]
+    fn blinking_cursor_styles_collapse_to_the_steady_shape() {
+        for (code, shape) in [(1, CursorShape::Block), (2, CursorShape::Block), (3, CursorShape::Underline)] {
+            let bytes = format!("\x1b[{code} q");
+            assert_eq!(snap(bytes.as_bytes(), 10, 3).cursor.shape, shape, "DECSCUSR {code}");
+        }
+        for (code, shape) in [(4, CursorShape::Underline), (5, CursorShape::Bar), (6, CursorShape::Bar)] {
+            let bytes = format!("\x1b[{code} q");
+            assert_eq!(snap(bytes.as_bytes(), 10, 3).cursor.shape, shape, "DECSCUSR {code}");
+        }
     }
 
     #[test]
