@@ -13,6 +13,7 @@ query and drive it at the same time. The project front page is the [README](../R
 | [JSON protocol](guide/protocol.md) | Drive a session from your own code: every command, the snapshot format, errors, limits |
 | [Driving a session as an AI agent](guide/agents.md) | Use the send, wait, read loop well and avoid its traps |
 | [Windows](guide/windows.md) | Know what works on Windows and what does not |
+| [Security](guide/security.md) | Know who can reach a session, what is trusted and what is not |
 | [Troubleshooting](guide/troubleshooting.md) | Fix stale sessions, odd terminals and common error messages |
 
 ## Working on vtee

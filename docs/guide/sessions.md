@@ -87,15 +87,16 @@ They live in a private per-user directory:
 | Windows | `%LOCALAPPDATA%\vtee` |
 
 On Linux the directory is created with mode `0700`, and `vtee` refuses to use an existing directory that is not
-a real directory, is owned by someone else, or is readable by group or others. The directory's permissions are the
-access control: a process that cannot enter the directory cannot connect.
+a real directory, is owned by someone else, or is readable by group or others. The sockets themselves are created
+mode `0600`, and every connection is checked for the user on the other end. See [security](security.md) for what
+that does and does not protect against.
 
 ```
 $ ls -la $TMPDIR/vtee-0
 drwx------ 2 root root 4096 Oct  9 19:31 .
 -rw-r--r-- 1 root root    4 Oct  9 19:31 demo.pid
-srwxr-xr-x 1 root root    0 Oct  9 19:31 demo.sock
-srwxr-xr-x 1 root root    0 Oct  9 19:31 demo.tty.sock
+srw------- 1 root root    0 Oct  9 19:31 demo.sock
+srw------- 1 root root    0 Oct  9 19:31 demo.tty.sock
 ```
 
 `--no-listen` creates none of this, and `--script` never does. `--listen=<path>` moves only the JSON socket to a
