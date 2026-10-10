@@ -134,7 +134,7 @@ is internally consistent: the state and `byte_offset` always agree.
 A real reply from a 12 by 3 screen, with the cell lists shortened:
 
 ```
-{"cmd":"snapshot","snapshot":{"byte_offset":2,"cols":12,"rows":3,"lines":["$           ","            ","            "],"cells":[[{"ch":"$","fg":"Default","bg":"Default","bold":false,"dim":false,"italic":false,"underline":false,"blink":false,"reverse":false,"strike":false,"hyperlink":null}, ...]],"cursor":{"row":0,"col":2,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
+{"cmd":"snapshot","snapshot":{"byte_offset":2,"cols":12,"rows":3,"lines":["$           ","            ","            "],"cells":[[{"ch":"$","fg":"Default","bg":"Default","bold":false,"dim":false,"italic":false,"underline":false,"underline_style":"none","underline_color":"Default","blink":false,"reverse":false,"strike":false,"hyperlink":null}, ...]],"cursor":{"row":0,"col":2,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
 ```
 
 | Field | Type | Meaning |
@@ -156,6 +156,8 @@ A real reply from a 12 by 3 screen, with the cell lists shortened:
 | `ch` | string | The character, with any combining marks. The second half of a wide character is the empty string. |
 | `fg`, `bg` | Color | See below. |
 | `bold`, `dim`, `italic`, `underline`, `reverse`, `strike` | boolean | Text attributes. `underline` is true for any underline style. |
+| `underline_style` | string | `"none"`, `"single"`, `"double"`, `"curly"`, `"dotted"` or `"dashed"`. Set by `SGR 4` (single) and the `4:N` forms (`4:2` double, `4:3` curly, `4:4` dotted, `4:5` dashed). `SGR 21` is "bold off" in this emulator, not double underline. Older JSON without the field reads as `"none"`. |
+| `underline_color` | Color | The underline colour set by `SGR 58`, `"Default"` when none. Older JSON without the field reads as `"Default"`. |
 | `blink` | boolean | Always `false`; blink is not tracked. |
 | `hyperlink` | string or null | The target of an OSC 8 hyperlink. |
 

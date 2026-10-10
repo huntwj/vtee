@@ -11,11 +11,41 @@ use vte::ansi::Color as AnsiColor;
 
 use crate::ObserverListener;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Color {
+    #[default]
     Default,
     Indexed(u8),
     Rgb(u8, u8, u8),
+}
+
+/// How a cell is underlined. Serialised as a lowercase string.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+fn underline_style(flags: Flags) -> UnderlineStyle {
+    if flags.contains(Flags::UNDERCURL) {
+        UnderlineStyle::Curly
+    } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+        UnderlineStyle::Double
+    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else if flags.contains(Flags::UNDERLINE) {
+        UnderlineStyle::Single
+    } else {
+        UnderlineStyle::None
+    }
 }
 
 fn convert_color(c: AnsiColor) -> Color {
@@ -42,7 +72,14 @@ pub struct Cell {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
+    /// True for any underline style; see `underline_style` for which one.
     pub underline: bool,
+    /// Absent in older JSON, where it reads as `none`.
+    #[serde(default)]
+    pub underline_style: UnderlineStyle,
+    /// SGR 58 underline colour; `Default` when none was set. Absent in older JSON.
+    #[serde(default)]
+    pub underline_color: Color,
     /// Always false: `alacritty_terminal` has no blink flag at all (a known, accepted gap -
     /// see docs/decisions.md).
     pub blink: bool,
@@ -124,6 +161,8 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
                 dim: f.contains(Flags::DIM) || f.contains(Flags::DIM_BOLD),
                 italic: f.contains(Flags::ITALIC),
                 underline: f.intersects(Flags::ALL_UNDERLINES),
+                underline_style: underline_style(f),
+                underline_color: cell.underline_color().map(convert_color).unwrap_or_default(),
                 blink: false,
                 reverse: f.contains(Flags::INVERSE),
                 strike: f.contains(Flags::STRIKEOUT),
@@ -207,9 +246,19 @@ pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
             if cell.italic {
                 codes.push("3".to_string());
             }
-            if cell.underline {
-                codes.push("4".to_string());
+            // Plain `4` for a single underline (understood everywhere); the others use the
+            // colon sub-parameter form `4:N` (xterm, kitty, VTE, Windows Terminal). `21` is not
+            // used for double: the Linux console reads it as "normal intensity".
+            match cell.underline_style {
+                UnderlineStyle::None if cell.underline => codes.push("4".to_string()),
+                UnderlineStyle::None => {}
+                UnderlineStyle::Single => codes.push("4".to_string()),
+                UnderlineStyle::Double => codes.push("4:2".to_string()),
+                UnderlineStyle::Curly => codes.push("4:3".to_string()),
+                UnderlineStyle::Dotted => codes.push("4:4".to_string()),
+                UnderlineStyle::Dashed => codes.push("4:5".to_string()),
             }
+            push_underline_color(&mut codes, cell.underline_color);
             if cell.reverse {
                 codes.push("7".to_string());
             }
@@ -234,6 +283,14 @@ fn push_color_codes(codes: &mut Vec<String>, color: Color, foreground: bool) {
         Color::Default => {}
         Color::Indexed(i) => codes.push(format!("{};5;{i}", if foreground { 38 } else { 48 })),
         Color::Rgb(r, g, b) => codes.push(format!("{};2;{r};{g};{b}", if foreground { 38 } else { 48 })),
+    }
+}
+
+fn push_underline_color(codes: &mut Vec<String>, color: Color) {
+    match color {
+        Color::Default => {}
+        Color::Indexed(i) => codes.push(format!("58;5;{i}")),
+        Color::Rgb(r, g, b) => codes.push(format!("58;2;{r};{g};{b}")),
     }
 }
 
@@ -373,9 +430,47 @@ mod emulator_tests {
         assert_eq!(combined.cells[0][1].ch, "x");
     }
 
+    #[test]
+    fn underline_styles_and_colour_reach_the_cells() {
+        let styles = [
+            (&b"\x1b[4mx"[..], UnderlineStyle::Single),
+            // SGR 21 is "bold off" in this emulator, not double underline.
+            (b"\x1b[21mx", UnderlineStyle::None),
+            (b"\x1b[4:2mx", UnderlineStyle::Double),
+            (b"\x1b[4:3mx", UnderlineStyle::Curly),
+            (b"\x1b[4:4mx", UnderlineStyle::Dotted),
+            (b"\x1b[4:5mx", UnderlineStyle::Dashed),
+            (b"\x1b[4:0mx", UnderlineStyle::None),
+            (b"\x1b[4m\x1b[24mx", UnderlineStyle::None),
+            (b"x", UnderlineStyle::None),
+        ];
+        for (bytes, want) in styles {
+            let c = &snap(bytes, 10, 2).cells[0][0];
+            assert_eq!(c.underline_style, want, "{:?}", String::from_utf8_lossy(bytes));
+            assert_eq!(c.underline, want != UnderlineStyle::None, "{:?}", String::from_utf8_lossy(bytes));
+        }
+        let c = &snap(b"\x1b[4:3m\x1b[58;2;1;2;3mx\x1b[58;5;9my\x1b[59mz", 10, 2).cells[0];
+        assert_eq!(c[0].underline_color, Color::Rgb(1, 2, 3));
+        assert_eq!(c[1].underline_color, Color::Indexed(9));
+        assert_eq!(c[2].underline_color, Color::Default);
+    }
+
+    #[test]
+    fn older_json_without_the_underline_fields_still_reads() {
+        let mut v = serde_json::to_value(snap(b"\x1b[4mx", 5, 2).cells[0][0].clone()).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("underline_style");
+        o.remove("underline_color");
+        let cell: Cell = serde_json::from_value(v).unwrap();
+        assert!(cell.underline);
+        assert_eq!(cell.underline_style, UnderlineStyle::None);
+        assert_eq!(cell.underline_color, Color::Default);
+        assert_eq!(serde_json::to_value(UnderlineStyle::Curly).unwrap(), "curly");
+    }
+
     /// Replaying a snapshot's redraw into a fresh emulator must give back the same screen, which
-    /// is what an attaching client's terminal does with it. Hyperlinks and underline styles are
-    /// not part of the redraw, so they are excluded from the comparison.
+    /// is what an attaching client's terminal does with it. Hyperlinks are not part of the
+    /// redraw, so they are excluded from the comparison.
     fn assert_round_trips(bytes: &[u8], cols: usize, rows: usize) {
         let before = snap(bytes, cols, rows);
         let after = snap(&redraw_sequence(&before), cols, rows);
@@ -405,6 +500,16 @@ mod emulator_tests {
             4,
         );
         assert_round_trips(b"\x1b[2mdim\x1b[0m \x1b[3mitalic\x1b[0m \x1b[9mstrike", 40, 3);
+    }
+
+    #[test]
+    fn redraw_reproduces_underline_styles_and_colours() {
+        assert_round_trips(
+            b"\x1b[4mone\x1b[0m \x1b[4:2mtwo\x1b[0m \x1b[4:3mcurly\x1b[0m \x1b[4:4mdot\x1b[0m \x1b[4:5mdash\x1b[0m\r\n\
+              \x1b[4:3m\x1b[58;2;200;10;20mrgb\x1b[0m \x1b[4m\x1b[58;5;33midx",
+            60,
+            4,
+        );
     }
 
     #[test]
