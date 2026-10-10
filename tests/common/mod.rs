@@ -2,11 +2,14 @@
 #![allow(dead_code)]
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::fs;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use vtee::Snapshot;
 
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 const CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
@@ -145,4 +148,62 @@ impl Drop for PtyProc {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+// ---- shared by the differential and conformance tests ---------------------------------------------
+
+/// `\e` is ESC and `\\` is a backslash; the JSON already carries CR, LF and BEL. The oracle
+/// generator has the same function.
+pub fn decode(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('e') => out.push('\x1b'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+pub fn run_vtee(dir: &Path, name: &str, cols: u16, rows: u16, input: &str) -> Snapshot {
+    let path = dir.join(format!("{name}.cast"));
+    let header = format!("{{\"version\":2,\"width\":{cols},\"height\":{rows}}}");
+    let event = serde_json::json!([0.0, "o", input]);
+    fs::write(&path, format!("{header}\n{event}\n")).unwrap();
+    vtee::replay(&path, cols, rows).unwrap_or_else(|e| panic!("{name}: replay failed: {e}"))
+}
+
+/// Live resize needs a running pty (replay has no resize event), so these cases go through `Tap`,
+/// on Unix only. The child prints the case input byte for byte (`stty -onlcr` keeps the pty from
+/// rewriting newlines), the test waits until every byte has been seen, then resizes.
+#[cfg(unix)]
+pub fn run_vtee_resized(cols: u16, rows: u16, input: &str, resize: (u16, u16)) -> Snapshot {
+    let octal: String = input.bytes().map(|b| format!("\\0{b:03o}")).collect();
+    let script = format!("stty -onlcr; printf '%b' '{octal}'; sleep 30");
+    let opts = vtee::SpawnOptions { cols, rows, log_path: None, forward_input: false, forward_output: false, env: &[] };
+    let tap = vtee::Tap::spawn("sh", &["-c".to_string(), script], opts).expect("spawn sh");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while tap.bytes_seen() < input.len() as u64 {
+        assert!(
+            Instant::now() < deadline,
+            "child output never arrived ({} of {} bytes)",
+            tap.bytes_seen(),
+            input.len()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    tap.resize(resize.0, resize.1).expect("resize");
+    let snap = tap.snapshot();
+    tap.kill();
+    snap
 }
