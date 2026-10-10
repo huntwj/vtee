@@ -339,7 +339,6 @@ concrete needs it" question rather than a near-term one.
 - **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
   fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
   pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.
-- **Licence.** `MIT OR Apache-2.0`, chosen 2026-10-10. `publish = false` stays in `Cargo.toml` until publishing to
-  crates.io is decided separately.
+- **Licence.** `MIT OR Apache-2.0`, chosen 2026-10-10. The crate is published on crates.io (0.0.1 preview, 2026-10-10).
 - **Whether the name `vtee` is free to use.** Checked 2026-10-10: the crate name is free on crates.io and no GitHub
   project uses it for a terminal tool (searches turned up only empty or unrelated repositories).
