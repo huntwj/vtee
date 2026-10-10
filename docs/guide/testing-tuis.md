@@ -123,8 +123,8 @@ $ diff -u expected.txt actual.txt
 
 Text mode keeps the line for every screen row, so trim trailing spaces (the `sed 's/[[:space:]]*$//'` filter) before
 you store or compare. Use the JSON output when the test cares about colour, bold, reverse video, the cursor, the
-title or the modes: the fields are in the [snapshot schema](protocol.md#snapshot-schema). Record the
-`schema_version` next to anything you store; the [stability policy](versioning.md) says when it changes.
+title or the modes: the fields are in the [snapshot schema](protocol.md#snapshot-schema). Record
+`schema_version` and `semantics_version` next to anything you store; the [stability policy](versioning.md) says when it changes.
 
 Volatile parts of a screen (a clock, an idle timer, a process id) have to be handled by your own comparison today.
 Compare the stable rows, or match the volatile ones with a pattern, in the code that reads the snapshot.
