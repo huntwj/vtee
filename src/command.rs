@@ -4,9 +4,22 @@
 use std::io;
 use std::time::Duration;
 
+use portable_pty::ExitStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::{Snapshot, Tap};
+
+/// `(running, code, signal)` for the wire: `code` for a normal exit, `signal` instead for a child
+/// the OS ended with one.
+fn describe_exit(status: Option<&ExitStatus>) -> (bool, Option<u32>, Option<String>) {
+    match status {
+        None => (true, None, None),
+        Some(s) => match s.signal() {
+            Some(signal) => (false, None, Some(signal.to_string())),
+            None => (false, Some(s.exit_code()), None),
+        },
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -35,6 +48,12 @@ pub enum Command {
         timeout_ms: u64,
     },
     Snapshot,
+    /// Whether the child has exited, and how. Never blocks.
+    ExitStatus,
+    /// Blocks until the child exits or `timeout_ms` elapses, then reports like `ExitStatus`.
+    WaitExit {
+        timeout_ms: u64,
+    },
     /// Stage 3b's "take the pen" handoff (`WritePolicy::Exclusive`, `docs/roadmap.md`): ask to
     /// become the one connection allowed to `Send`/`SendKey`/`Resize` right now. Meaningless
     /// (and rejected by `authorize`) under any other policy.
@@ -56,6 +75,24 @@ pub enum CommandResult {
     WaitFor {
         matched: bool,
         snapshot: Snapshot,
+    },
+    /// Reply to `ExitStatus`. A child that ended normally has `code`; one killed by a signal has
+    /// `signal` (the OS's own text, e.g. `Terminated` on Linux) and no `code`.
+    ExitStatus {
+        running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
+    },
+    /// Reply to `WaitExit`: the same fields as `ExitStatus`, plus whether the wait gave up.
+    WaitExit {
+        running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
+        timed_out: bool,
     },
     /// Reply to `AcquireWrite`/`ReleaseWrite` - `acquired` is the lock's state *after* this
     /// request, so a losing `AcquireWrite` (someone else already holds it) still gets a
@@ -121,7 +158,11 @@ impl Command {
     /// size, whatever the policy, since a remote resize would fight with it.
     pub fn authorize(&self, policy: WritePolicy, resize_owned_by_terminal: bool) -> Result<(), Denied> {
         match self {
-            Command::Snapshot | Command::WaitFor { .. } | Command::WaitMs { .. } => Ok(()),
+            Command::Snapshot
+            | Command::WaitFor { .. }
+            | Command::WaitMs { .. }
+            | Command::ExitStatus
+            | Command::WaitExit { .. } => Ok(()),
             Command::AcquireWrite | Command::ReleaseWrite => match policy {
                 WritePolicy::Exclusive { .. } => Ok(()),
                 WritePolicy::ReadOnly | WritePolicy::Open => Err(Denied::NotExclusivePolicy),
@@ -157,6 +198,15 @@ impl Command {
                 Ok(Some(CommandResult::WaitFor { matched, snapshot }))
             }
             Command::Snapshot => Ok(Some(CommandResult::Snapshot { snapshot: tap.snapshot() })),
+            Command::ExitStatus => {
+                let (running, code, signal) = describe_exit(tap.exit_status()?.as_ref());
+                Ok(Some(CommandResult::ExitStatus { running, code, signal }))
+            }
+            Command::WaitExit { timeout_ms } => {
+                let status = tap.wait_exit(Duration::from_millis(*timeout_ms))?;
+                let (running, code, signal) = describe_exit(status.as_ref());
+                Ok(Some(CommandResult::WaitExit { running, code, signal, timed_out: running }))
+            }
             // The connection handler intercepts these; only it knows which connection is asking.
             Command::AcquireWrite | Command::ReleaseWrite => Ok(None),
         }
@@ -172,6 +222,8 @@ mod tests {
             ("snapshot", Command::Snapshot),
             ("wait_for", Command::WaitFor { text: "x".into(), timeout_ms: 1 }),
             ("wait_ms", Command::WaitMs { ms: 1 }),
+            ("exit_status", Command::ExitStatus),
+            ("wait_exit", Command::WaitExit { timeout_ms: 1 }),
             ("acquire_write", Command::AcquireWrite),
             ("release_write", Command::ReleaseWrite),
             ("send", Command::Send { text: "x".into() }),
@@ -221,12 +273,48 @@ mod tests {
     #[test]
     fn reads_are_never_denied() {
         for (name, cmd) in commands() {
-            if matches!(name, "snapshot" | "wait_for" | "wait_ms") {
+            if matches!(name, "snapshot" | "wait_for" | "wait_ms" | "exit_status" | "wait_exit") {
                 for (_, policy) in policies() {
                     assert_eq!(cmd.authorize(policy, true), Ok(()), "{name}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn exit_commands_parse_and_their_replies_have_the_documented_shape() {
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"exit_status"}"#), Ok(Command::ExitStatus)));
+        assert!(matches!(
+            serde_json::from_str::<Command>(r#"{"cmd":"wait_exit","timeout_ms":250}"#),
+            Ok(Command::WaitExit { timeout_ms: 250 })
+        ));
+        let json = |r: &CommandResult| serde_json::to_string(r).unwrap();
+
+        let (running, code, signal) = describe_exit(None);
+        assert_eq!(
+            json(&CommandResult::ExitStatus { running, code, signal }),
+            r#"{"cmd":"exit_status","running":true}"#
+        );
+
+        let exited = ExitStatus::with_exit_code(7);
+        let (running, code, signal) = describe_exit(Some(&exited));
+        assert_eq!(
+            json(&CommandResult::ExitStatus { running, code, signal }),
+            r#"{"cmd":"exit_status","running":false,"code":7}"#
+        );
+
+        let killed = ExitStatus::with_signal("Terminated");
+        let (running, code, signal) = describe_exit(Some(&killed));
+        assert_eq!(
+            json(&CommandResult::ExitStatus { running, code, signal }),
+            r#"{"cmd":"exit_status","running":false,"signal":"Terminated"}"#
+        );
+
+        let (running, code, signal) = describe_exit(None);
+        assert_eq!(
+            json(&CommandResult::WaitExit { running, code, signal, timed_out: true }),
+            r#"{"cmd":"wait_exit","running":true,"timed_out":true}"#
+        );
     }
 
     #[test]

@@ -909,3 +909,50 @@ fn bare_attach_picks_the_session_attached_to_most_recently() {
     wait_until("the older session's record to be touched", || mtime(&older.pidfile()) > mtime(&newer.pidfile()));
     bare("MARK-OLDER", "MARK-NEWER");
 }
+
+// ---- exit_status / wait_exit over the socket ----------------------------------------------------
+
+/// Both commands are reads, so a default (read-only) session answers them. The holder itself sits
+/// in `Tap::wait` the whole time, which used to keep the child locked for anyone else.
+#[test]
+fn exit_status_and_wait_exit_follow_the_child_over_the_socket() {
+    let s = Session::start("exitcode", &[], &["sh", "-c", "sleep 2; exit 7"]);
+    let mut nd = s.nd();
+
+    let started = Instant::now();
+    assert_eq!(nd.request(json!({"cmd": "exit_status"})), json!({"cmd": "exit_status", "running": true}));
+    assert!(started.elapsed() < Duration::from_secs(1), "exit_status waited on the holder's own wait()");
+
+    assert_eq!(
+        nd.request(json!({"cmd": "wait_exit", "timeout_ms": 200})),
+        json!({"cmd": "wait_exit", "running": true, "timed_out": true})
+    );
+    assert_eq!(
+        nd.request(json!({"cmd": "wait_exit", "timeout_ms": 15000})),
+        json!({"cmd": "wait_exit", "running": false, "code": 7, "timed_out": false})
+    );
+    // The holder lingers for a connected client, so the answer is still available and stable.
+    assert_eq!(nd.request(json!({"cmd": "exit_status"})), json!({"cmd": "exit_status", "running": false, "code": 7}));
+}
+
+#[test]
+fn a_child_ended_by_a_signal_reports_the_signal_and_no_code() {
+    let s = Session::start("exitsignal", &[], &["sh", "-c", "sleep 1; kill -TERM $$"]);
+    let mut nd = s.nd();
+    let reply = nd.request(json!({"cmd": "wait_exit", "timeout_ms": 15000}));
+    assert_eq!(reply["cmd"], "wait_exit", "{reply}");
+    assert_eq!(reply["running"], false, "{reply}");
+    assert_eq!(reply["timed_out"], false, "{reply}");
+    assert!(reply["signal"].as_str().is_some_and(|s| !s.is_empty()), "no signal in {reply}");
+    assert!(reply.get("code").is_none(), "a signalled child has no exit code: {reply}");
+}
+
+/// A holder with no clients still exits the moment the child does: the linger only applies while
+/// an NDJSON client is connected.
+#[test]
+fn a_session_with_no_clients_ends_as_soon_as_the_child_exits() {
+    let mut s = Session::start("exitfast", &[], &["sh", "-c", "sleep 1; exit 0"]);
+    let started = Instant::now();
+    wait_until("the holder to end", || s.child.try_wait().ok().flatten().is_some());
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+}

@@ -76,6 +76,21 @@ A fixed prompt is the usual end-of-command marker. If the prompt is `$ `, waitin
 command, but the old prompt is still on the screen from before, so a command that finishes later could match the
 earlier one. Use an output marker for anything where that matters.
 
+## Waiting for the program to end
+
+`wait_for` waits for something on the screen; `wait_exit` waits for the program itself to finish and tells you how:
+
+```
+{"cmd":"send","text":"q"}
+{"cmd":"wait_exit","timeout_ms":5000}
+```
+
+Use `wait_exit` after you tell a program to quit (the `q` for `top`, `:q` for an editor) and you want to know it
+actually quit and with what exit code, or whether it is hung (`timed_out:true`). Use `exit_status` to check without
+waiting, for example to find out whether a program you expected to keep running has died. Do not infer an exit from
+the screen going quiet or from a prompt coming back: the shell's prompt appears whether or not the command it ran
+succeeded. Ask for the code, and read it before you disconnect, since the session ends shortly after the program.
+
 ## Reading the screen
 
 Use `lines` for text and `cells` when you need colour or attributes (for example, to find the highlighted menu

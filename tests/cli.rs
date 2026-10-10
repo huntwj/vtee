@@ -163,6 +163,87 @@ fn script_conflicts_with_every_interactive_only_flag() {
     }
 }
 
+// ---- exit_status / wait_exit in script mode, on both platforms ---------------------------------
+
+fn exit_script(lines: &[&str]) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "vtee-exit-{}-{}.ndjson",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    path
+}
+
+/// A program that exits with `code` straight away, and one that runs for a long time, using only
+/// what both platforms have.
+fn exits_with(code: u32) -> Vec<String> {
+    let line = format!("exit {code}");
+    if cfg!(windows) { vec!["cmd".into(), "/c".into(), line] } else { vec!["sh".into(), "-c".into(), line] }
+}
+
+fn runs_for_a_long_time() -> Vec<&'static str> {
+    if cfg!(windows) { vec!["ping", "-n", "30", "127.0.0.1"] } else { vec!["sleep", "30"] }
+}
+
+fn json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+#[test]
+fn wait_exit_and_exit_status_report_the_childs_exit_code() {
+    let script = exit_script(&[r#"{"cmd":"wait_exit","timeout_ms":15000}"#, r#"{"cmd":"exit_status"}"#]);
+    let out = vtee()
+        .arg("--script")
+        .arg(&script)
+        .arg("--")
+        .args(exits_with(7))
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&script);
+    assert!(out.status.success(), "{out:?}");
+    let results = json_lines(&out.stdout);
+    assert_eq!(results[0], serde_json::json!({"cmd":"wait_exit","running":false,"code":7,"timed_out":false}));
+    assert_eq!(results[1], serde_json::json!({"cmd":"exit_status","running":false,"code":7}));
+}
+
+#[test]
+fn wait_exit_times_out_while_the_child_is_still_running() {
+    let script = exit_script(&[r#"{"cmd":"exit_status"}"#, r#"{"cmd":"wait_exit","timeout_ms":200}"#]);
+    let out = vtee()
+        .arg("--script")
+        .arg(&script)
+        .arg("--")
+        .args(runs_for_a_long_time())
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&script);
+    assert!(out.status.success(), "{out:?}");
+    let results = json_lines(&out.stdout);
+    assert_eq!(results[0], serde_json::json!({"cmd":"exit_status","running":true}));
+    assert_eq!(results[1], serde_json::json!({"cmd":"wait_exit","running":true,"timed_out":true}));
+}
+
+#[test]
+fn text_mode_prints_the_exit_status_on_one_line() {
+    let script = exit_script(&[r#"{"cmd":"wait_exit","timeout_ms":15000}"#]);
+    vtee()
+        .arg("--script")
+        .arg(&script)
+        .arg("--text")
+        .arg("--")
+        .args(exits_with(3))
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--- wait_exit exited code=3 timed_out=false ---"));
+    let _ = std::fs::remove_file(&script);
+}
+
 #[cfg(unix)]
 mod unix_behavior {
     use super::*;
