@@ -58,8 +58,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
         timeout-minutes: 15
-      - run: cargo test --locked --lib --bins --test cli --test replay
+      - run: cargo test --locked --lib --bins --test cli --test replay --test differential
         timeout-minutes: 15
+      # `lint` does this on Linux; rustdoc output and warnings differ per platform (cfg-gated items).
+      - if: matrix.os == 'windows-latest'
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+        timeout-minutes: 10
 
   # Real pty children (shells, less, vim, python3) on Linux. VTEE_REQUIRE_TOOLS makes a
   # missing program a failure instead of a printed skip, so this job can't pass by testing nothing.
@@ -112,14 +118,14 @@ jobs:
           }
       - run: cargo build --locked --tests
         timeout-minutes: 20
-      - run: cargo test --locked --test windows_conpty --test windows_behavior --test windows_sessions
+      - run: cargo test --locked --test windows_conpty --test windows_console --test windows_behavior --test windows_sessions
         timeout-minutes: 20
       - name: Repeat pty tests
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_pty_tests }}
         shell: bash
         run: |
           for _ in $(seq 1 10); do
-            cargo test --locked --test windows_conpty --test windows_behavior --test windows_sessions || exit 1
+            cargo test --locked --test windows_conpty --test windows_console --test windows_behavior --test windows_sessions || exit 1
           done
         timeout-minutes: 40
 

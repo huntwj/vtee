@@ -11,7 +11,7 @@ use std::io;
 /// stdin, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on stdout) so escape sequences in the child's output
 /// are interpreted rather than printed and special keys reach the child as escape sequences. Terminals
 /// like Windows Terminal already do this; a legacy `conhost` window does not. The original modes are
-/// restored on drop and by the console control handler ([`restore_console_modes`]).
+/// restored on drop and by the console control handler.
 ///
 /// On Unix it also spawns a watchdog process that restores the terminal after `SIGKILL`. The
 /// watchdog's stdin is one end of a socketpair; we hold the other end, so when we die for any
