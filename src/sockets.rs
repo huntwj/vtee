@@ -107,7 +107,25 @@ impl Tap {
     }
 }
 
+/// Counts this NDJSON connection in `Tap::open_connections` for as long as it lives, so the holder
+/// can linger briefly for a client that is waiting on the child's exit.
+struct OpenConnection<'a>(&'a Tap);
+
+impl<'a> OpenConnection<'a> {
+    fn new(tap: &'a Tap) -> Self {
+        tap.open_connections.fetch_add(1, Ordering::AcqRel);
+        OpenConnection(tap)
+    }
+}
+
+impl Drop for OpenConnection<'_> {
+    fn drop(&mut self) {
+        self.0.open_connections.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn serve_connection(tap: &Tap, stream: UnixStream, opts: ServeOptions) {
+    let _open = OpenConnection::new(tap);
     let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
     ::log::debug!("connection {id}: accepted");
     let Ok(reader_stream) = stream.try_clone() else { return };

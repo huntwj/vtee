@@ -142,6 +142,21 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `running`, `code=N` or `signal=...`, and `timed_out=...` for a `wait_exit` reply.
+fn describe_exit(running: bool, code: Option<u32>, signal: Option<&str>, timed_out: Option<bool>) -> String {
+    let mut parts = vec![if running {
+        "running".to_string()
+    } else if let Some(signal) = signal {
+        format!("exited signal={signal}")
+    } else {
+        format!("exited code={}", code.unwrap_or(0))
+    }];
+    if let Some(timed_out) = timed_out {
+        parts.push(format!("timed_out={timed_out}"));
+    }
+    parts.join(" ")
+}
+
 /// `--text`: print only a result's screen lines, for a human skimming output.
 fn print_text(out: &mut impl Write, result: &vtee::CommandResult) {
     let (label, snapshot) = match result {
@@ -153,6 +168,18 @@ fn print_text(out: &mut impl Write, result: &vtee::CommandResult) {
         }
         vtee::CommandResult::WriteAccess { acquired } => {
             let _ = writeln!(out, "--- write_access acquired={acquired} ---");
+            return;
+        }
+        vtee::CommandResult::ExitStatus { running, code, signal } => {
+            let _ = writeln!(out, "--- exit_status {} ---", describe_exit(*running, *code, signal.as_deref(), None));
+            return;
+        }
+        vtee::CommandResult::WaitExit { running, code, signal, timed_out } => {
+            let _ = writeln!(
+                out,
+                "--- wait_exit {} ---",
+                describe_exit(*running, *code, signal.as_deref(), Some(*timed_out))
+            );
             return;
         }
     };

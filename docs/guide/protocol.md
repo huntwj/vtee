@@ -20,6 +20,8 @@ Strings are ordinary JSON. Control characters must be escaped, and JSON has no o
 | `snapshot` | none | `snapshot` | no |
 | `wait_for` | `text` (string), `timeout_ms` (integer) | `wait_for` | no |
 | `wait_ms` | `ms` (integer) | none | no |
+| `exit_status` | none | `exit_status` | no |
+| `wait_exit` | `timeout_ms` (integer) | `wait_exit` | no |
 | `send` | `text` (string) | none | yes |
 | `send_key` | `key` (string) | none | yes |
 | `resize` | `cols`, `rows` (integers) | none | yes |
@@ -55,6 +57,37 @@ match, which makes it safe to use for the next decision.
 ```
 
 Sleeps on the server for `ms` milliseconds. No reply. Prefer `wait_for`.
+
+### `exit_status` and `wait_exit`
+
+```
+{"cmd":"exit_status"}
+{"cmd":"wait_exit","timeout_ms":5000}
+```
+
+`exit_status` says at once whether the program has ended and how. `wait_exit` waits up to `timeout_ms` for it to end,
+then answers the same way. Both are reads, so every write policy allows them, including the default read-only one.
+
+| Reply | Meaning |
+| --- | --- |
+| `{"cmd":"exit_status","running":true}` | Still running. |
+| `{"cmd":"exit_status","running":false,"code":7}` | Ended normally with exit code 7. |
+| `{"cmd":"exit_status","running":false,"signal":"Terminated"}` | Ended by a signal: `signal` is the operating system's own text and there is no `code`. |
+
+`wait_exit` replies with `"cmd":"wait_exit"` and the same fields plus `timed_out`: `true` when the time ran out with
+the program still running, `false` otherwise. A timeout is not an error.
+
+```
+{"cmd":"wait_exit","running":true,"timed_out":true}
+{"cmd":"wait_exit","running":false,"code":7,"timed_out":false}
+```
+
+- After the program ends, `wait_exit` gives the output a moment to drain, so a `snapshot` taken next includes the
+  program's last output.
+- The answer does not change once the program has ended; asking again returns the same reply.
+- The session itself ends soon after the program does. A client that is connected at that moment keeps the session
+  open for up to 300 ms, so it can still collect its answer. Ask before you disconnect; a session with no client
+  connected ends immediately.
 
 ### `send`
 

@@ -3,7 +3,7 @@
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -21,6 +21,12 @@ use crate::{RawLog, Snapshot, keys, snapshot};
 /// Upper bound on a requested terminal size; the emulator allocates cols x rows cells, so an
 /// unbounded remote resize could otherwise OOM the whole session.
 const MAX_TERMINAL_DIMENSION: u16 = 1000;
+
+/// How often `wait`/`wait_exit` poll the child; also the worst-case added latency to noticing an exit.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The longest `wait` holds the holder open after the child exits for connected clients.
+const CLIENT_LINGER: Duration = Duration::from_millis(300);
 
 /// A panic on one thread poisons every lock it held, and plain `unwrap()` would then make every
 /// later `snapshot()` panic too. The data behind these locks is consistent between statements,
@@ -165,11 +171,15 @@ pub struct Tap {
     pub(crate) title: ObserverListener,
     // Receiver is `Send` but not `Sync`.
     output_done: Mutex<Receiver<()>>,
+    // Remembered once seen, so every later `exit_status` agrees with the first.
+    exit: Mutex<Option<ExitStatus>>,
     pub(crate) exclusive_lock: Arc<ExclusiveLock>,
     // Set by `Tap::serve` after the stdin-forwarding thread is already running, hence not a
     // constructor argument.
     pub(crate) human_revokes_lock: Arc<AtomicBool>,
     pub(crate) next_connection_id: Arc<AtomicU64>,
+    // NDJSON clients currently connected; `wait` lingers for them after the child exits.
+    pub(crate) open_connections: AtomicUsize,
     // The session record, whose mtime is bumped on every attach so bare `attach` can tell which
     // session was used last.
     activity_file: Mutex<Option<PathBuf>>,
@@ -248,9 +258,11 @@ impl Tap {
             shared,
             title,
             output_done: Mutex::new(output_done),
+            exit: Mutex::new(None),
             exclusive_lock,
             human_revokes_lock,
             next_connection_id: Arc::new(AtomicU64::new(1)),
+            open_connections: AtomicUsize::new(0),
             activity_file: Mutex::new(None),
         })
     }
@@ -275,13 +287,54 @@ impl Tap {
         Ok(())
     }
 
-    /// Block until the child exits, then give the output thread a short grace period to drain.
-    /// ConPTY doesn't EOF the master reader when the child exits, so this can't wait for that.
-    /// Holds `child`'s lock while blocked; concurrent callers should use `clone_killer()`
-    /// instead (as `watch_sigterm` does).
+    /// The child's exit status if it has exited, without blocking. Safe to call from any thread
+    /// while another is in `wait`, `wait_exit` or `kill`: the child's lock is only held for the
+    /// instant of each poll.
+    pub fn exit_status(&self) -> io::Result<Option<ExitStatus>> {
+        if let Some(status) = self.exit.lock_unpoisoned().clone() {
+            return Ok(Some(status));
+        }
+        let polled = self.child.lock_unpoisoned().try_wait().map_err(to_io_error)?;
+        if let Some(status) = &polled {
+            *self.exit.lock_unpoisoned() = Some(status.clone());
+        }
+        Ok(polled)
+    }
+
+    /// Wait up to `timeout` for the child to exit: `Some` with its status, or `None` on timeout.
+    /// After an exit it gives the output thread a short grace period to drain, so a `snapshot`
+    /// taken next includes the child's last output. ConPTY doesn't EOF the master reader when
+    /// the child exits, so that can't be waited for directly.
+    pub fn wait_exit(&self, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.exit_status()? {
+                let _ = self.output_done.lock_unpoisoned().recv_timeout(Duration::from_millis(500));
+                return Ok(Some(status));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            thread::sleep(remaining.min(EXIT_POLL_INTERVAL));
+        }
+    }
+
+    /// Block until the child exits (see `wait_exit` for the output grace period). Polls instead
+    /// of blocking in the OS wait, so it never keeps `kill` or `exit_status` waiting on the
+    /// child's lock. If socket clients are connected it then lingers up to `CLIENT_LINGER` for
+    /// them to disconnect, so one blocked in `wait_exit` still receives its answer before the
+    /// holder process ends. With no clients it returns at once.
     pub fn wait(&self) -> io::Result<ExitStatus> {
-        let status = self.child.lock_unpoisoned().wait().map_err(to_io_error)?;
-        let _ = self.output_done.lock_unpoisoned().recv_timeout(Duration::from_millis(500));
+        let status = loop {
+            if let Some(status) = self.wait_exit(Duration::from_secs(3600))? {
+                break status;
+            }
+        };
+        let deadline = Instant::now() + CLIENT_LINGER;
+        while self.open_connections.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
         Ok(status)
     }
 
