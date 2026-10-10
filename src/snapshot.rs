@@ -257,9 +257,9 @@ pub struct Snapshot {
     /// Row-major cells, `rows` x `cols`.
     pub cells: Vec<Vec<Cell>>,
     pub cursor: Cursor,
-    /// Active DEC private modes, as their conventional string form (e.g. `"?1000"` for mouse
-    /// click reporting, `"DECKPAM"` for application keypad) - the same vocabulary used
-    /// throughout this project's probes and decisions.
+    /// Active modes, as a set written sorted: private modes by number (`"?1"`, `"?1000"`, `"?1002"`, `"?1003"`,
+    /// `"?1005"`, `"?1006"`, `"?2004"`), then names alphabetically (`"DECKPAM"`). A reader accepts any order. The
+    /// mouse report modes are mutually exclusive in the emulator, and so are the mouse encodings.
     pub modes: Vec<String>,
     pub alt_screen: bool,
     pub title: Option<String>,
@@ -312,22 +312,21 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     }
 
     let mode = *term.mode();
-    let mut modes: Vec<String> = Vec::new();
-    if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
-        modes.push("?1000".to_string());
-    }
-    if mode.contains(TermMode::SGR_MOUSE) {
-        modes.push("?1006".to_string());
-    }
-    if mode.contains(TermMode::BRACKETED_PASTE) {
-        modes.push("?2004".to_string());
-    }
-    if mode.contains(TermMode::APP_CURSOR) {
-        modes.push("?1".to_string());
-    }
-    if mode.contains(TermMode::APP_KEYPAD) {
-        modes.push("DECKPAM".to_string());
-    }
+    // Written sorted: private modes by number, then names alphabetically. The table is in that order.
+    let modes: Vec<String> = [
+        ("?1", TermMode::APP_CURSOR),
+        ("?1000", TermMode::MOUSE_REPORT_CLICK),
+        ("?1002", TermMode::MOUSE_DRAG),
+        ("?1003", TermMode::MOUSE_MOTION),
+        ("?1005", TermMode::UTF8_MOUSE),
+        ("?1006", TermMode::SGR_MOUSE),
+        ("?2004", TermMode::BRACKETED_PASTE),
+        ("DECKPAM", TermMode::APP_KEYPAD),
+    ]
+    .into_iter()
+    .filter(|(_, flag)| mode.contains(*flag))
+    .map(|(token, _)| token.to_string())
+    .collect();
 
     let cursor_point = grid.cursor.point;
     let shape = match term.cursor_style().shape {
@@ -575,6 +574,35 @@ mod emulator_tests {
         assert!(!off.alt_screen);
         assert!(!off.modes.iter().any(|m| m == "?1000" || m == "?2004"), "{:?}", off.modes);
         assert!(off.modes.iter().any(|m| m == "?1006"), "?1006 was never turned off");
+    }
+
+    #[test]
+    fn modes_are_written_sorted_whatever_order_they_were_set_in() {
+        let s = snap(b"\x1b=\x1b[?2004h\x1b[?1005h\x1b[?1002h\x1b[?1h", 20, 4);
+        assert_eq!(s.modes, ["?1", "?1002", "?1005", "?2004", "DECKPAM"]);
+        let s = snap(b"\x1b[?1h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b=", 20, 4);
+        assert_eq!(s.modes, ["?1", "?1003", "?1006", "?2004", "DECKPAM"]);
+        assert!(snap(b"", 20, 4).modes.is_empty());
+        // A reader accepts any order.
+        let mut json = serde_json::to_value(&s).unwrap();
+        json["modes"] = serde_json::json!(["DECKPAM", "?2004", "?1"]);
+        let back: Snapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(back.modes, ["DECKPAM", "?2004", "?1"]);
+    }
+
+    #[test]
+    fn mouse_modes_follow_the_emulators_exclusive_model() {
+        // One report mode and one encoding at most (design E18): the later one replaces the earlier.
+        assert_eq!(snap(b"\x1b[?1000h", 10, 2).modes, ["?1000"]);
+        assert_eq!(snap(b"\x1b[?1002h", 10, 2).modes, ["?1002"]);
+        assert_eq!(snap(b"\x1b[?1003h", 10, 2).modes, ["?1003"]);
+        assert_eq!(snap(b"\x1b[?1000h\x1b[?1002h", 10, 2).modes, ["?1002"]);
+        // A reset clears only its own mode, so resetting another report mode changes nothing.
+        assert_eq!(snap(b"\x1b[?1003h\x1b[?1000l", 10, 2).modes, ["?1003"]);
+        assert!(snap(b"\x1b[?1003h\x1b[?1003l", 10, 2).modes.is_empty());
+        assert_eq!(snap(b"\x1b[?1005h", 10, 2).modes, ["?1005"]);
+        assert_eq!(snap(b"\x1b[?1006h\x1b[?1005h", 10, 2).modes, ["?1005"]);
+        assert_eq!(snap(b"\x1b[?1000h\x1b[?1006h", 10, 2).modes, ["?1000", "?1006"]);
     }
 
     #[test]
