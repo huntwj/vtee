@@ -27,7 +27,7 @@ in [releasing](../releasing.md). Every release gets a changelog entry generated 
 | **Command line**: flags, subcommands, exit codes | May change in any minor release. A change is announced in the changelog and marked breaking in the commit. | Semantic versioning. |
 | **JSON protocol**: commands and replies | Additive changes (a new command, a new field in a reply) keep old clients working if they ignore fields they do not know. Renaming or removing a command or field, or changing what it means, is a breaking change. | Semantic versioning. |
 | **Snapshot** | `schema_version` says which layout you have and `semantics_version` what it means. See below. | Semantic versioning, with both numbers as the contract. |
-| **Rust library** (`vtee`) | No stability promise. The crate is `publish = false`, so it is not on crates.io; depend on it by git revision. Any release may change it. | To be decided before 1.0. |
+| **Rust library** (`vtee`) | No stability promise. The crate is on crates.io, but the library API is not part of the stability promise. Any release may change it. | To be decided before 1.0. |
 | **Session files and the config file** | Internal. Do not parse `<name>.pid` or the socket paths yourself; use `vtee ls` and the CLI. The config file is read only for the options documented in [Sessions](sessions.md). | Same. |
 
 ## The snapshot: two numbers
