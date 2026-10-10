@@ -1,0 +1,19 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 12x2
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|你\.e\+{301}\u{e000}\\👨\+{200d}\. \+{301}|\u{a0}
+1|x
+
+[attrs]
+0: 0-1 bold
+0: 3 bg=rgb:#0a0b0c underline=dotted ulcolor=idx:9
+0: 5-6 link="https://example.org/a b"

@@ -1,0 +1,16 @@
+vtee-golden 1
+schema 1
+semantics 1
+ignore modes ?1 ?1000 ?1002 ?1003 ?1005 ?1006 DECKPAM
+ignore attrs ulcolor
+ignore title
+
+[screen 1]
+size 20x1
+cursor row=0 col=0 shape=block hidden=false
+modes ?2004
+alt_screen false
+title "t"
+
+[text]
+0|abc

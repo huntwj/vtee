@@ -1,0 +1,17 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 20x2
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|
+1|A Quiet Meadow
+
+[assert]
+assert row=1 text="A Quiet Meadow"

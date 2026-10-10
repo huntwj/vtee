@@ -1,0 +1,16 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 20x1
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|load 12.5 up
+
+[masks]
+mask find=/[0-9]+\.[0-9]+/ text=ignore

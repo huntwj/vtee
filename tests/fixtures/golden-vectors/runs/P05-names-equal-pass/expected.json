@@ -1,0 +1,1 @@
+{"golden":"golden.golden","result":"pass","grammar":1,"schema":1,"semantics":1,"snapshot":{"schema":1,"semantics":1},"screens_expected":2,"screens_actual":2,"total":0,"shown":0,"run":[],"screens":[{"index":1,"name":"one","result":"pass"},{"index":2,"name":"two","result":"pass"}]}

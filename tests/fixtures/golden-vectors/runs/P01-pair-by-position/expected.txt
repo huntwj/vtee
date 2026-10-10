@@ -1,0 +1,6 @@
+FAIL golden.golden: 1 mismatch in 1 of 2 screens
+screen 2:
+  text       row 1 col 0-4   expected 'hello'   actual 'zzz  '
+             1| hello   (expected)
+             1| zzz   (actual)
+                ^^^^^

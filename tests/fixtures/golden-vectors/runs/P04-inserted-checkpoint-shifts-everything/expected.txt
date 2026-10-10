@@ -1,0 +1,25 @@
+FAIL golden.golden: 7 mismatches in 2 of 3 screens
+  screens    expected 3   actual 4   extra 4
+screen 2:
+  size       expected 20x4   actual 20x1   (cells, masks and assertions not compared)
+screen 3:
+  text       row 0 col 0   expected 'd'   actual 'c'
+             0| done   (expected)
+             0| connected   (actual)
+                ^
+  text       row 0 col 3-8   expected 'e     '   actual 'nected'
+             0| done   (expected)
+             0| connected   (actual)
+                   ^^^^^^
+  text       row 1 col 0-2   expected 'wor'   actual 'hel'
+             1| world   (expected)
+             1| hello   (actual)
+                ^^^
+  text       row 1 col 4   expected 'd'   actual 'o'
+             1| world   (expected)
+             1| hello   (actual)
+                    ^
+  text       row 3 col 19   expected '3'   actual '2'
+             3|                12:03   (expected)
+             3|                12:02   (actual)
+                                   ^

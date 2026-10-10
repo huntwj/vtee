@@ -1,0 +1,32 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 20x4
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|welcome
+1|
+2|
+3|               12:01
+
+[masks]
+mask row=1 text=ignore
+
+[screen 2]
+size 20x4
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|connected
+1|hello
+2|
+3|               12:02

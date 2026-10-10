@@ -1,0 +1,3 @@
+REFUSED golden.golden: semantics unknown in the golden, 1 in this vtee; nothing was compared
+  restamp (only if nothing the golden checks changed):  vtee --expect golden.golden --snapshot run.ndjson --update=restamp
+  or re-record with --update; what changed is listed in docs/guide/snapshot-semantics.md

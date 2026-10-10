@@ -1,0 +1,3 @@
+FAIL golden.golden: 1 mismatch in 1 of 3 screens
+screen 2:
+  mask       golden line 26   mask find=/[0-9]+/ text=ignore   matched nothing (stale)

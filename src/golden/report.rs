@@ -7,7 +7,7 @@ use super::compare::{
     UsageError, compare,
 };
 use super::escape::{encode_string, visible};
-use super::model::{Golden, Semantics};
+use super::model::{GRAMMAR_VERSION, Golden, Semantics};
 use super::run::{Run, RunError, read_run};
 use super::version::{Build, Invocation, Refusal, WayForward};
 
@@ -97,6 +97,31 @@ fn refused(
         snapshot_schema: snapshot.0,
         snapshot_semantics: snapshot.1,
         screens_expected: golden.screens.len(),
+        screens_actual: 0,
+        way_forward: refusal.way_forward(invocation),
+        refusal: Some(refusal),
+        comparison: None,
+        max_mismatches: options.max_mismatches,
+    }
+}
+
+/// The report for a golden that could not even be read because its grammar number is above this build's: nothing about
+/// the file past its first line is known.
+pub fn refuse_unread(invocation: &Invocation, refusal: Refusal, options: &CheckOptions) -> Report {
+    let build = Build::current();
+    let grammar = match &refusal {
+        Refusal::Grammar { golden, .. } => *golden,
+        _ => GRAMMAR_VERSION,
+    };
+    Report {
+        name: display_name(&invocation.golden),
+        verdict: Verdict::Refused,
+        grammar,
+        schema: build.schema,
+        semantics: Semantics::Number(build.semantics),
+        snapshot_schema: build.schema,
+        snapshot_semantics: build.semantics,
+        screens_expected: 0,
         screens_actual: 0,
         way_forward: refusal.way_forward(invocation),
         refusal: Some(refusal),

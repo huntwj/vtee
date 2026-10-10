@@ -1,0 +1,3 @@
+FAIL golden.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  cursor     shape      expected block   actual bar

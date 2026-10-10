@@ -24,6 +24,7 @@ pub use model::{
 pub use parse::{LoadError, ParseError};
 pub use report::{
     CheckError, CheckOptions, DEFAULT_MAX_MISMATCHES, Report, Verdict, check_run, check_saved, display_name,
+    refuse_unread,
 };
 pub use run::{Run, RunError, RunProblem, read_run};
 pub use version::{Build, Invocation, Refusal, WayForward};

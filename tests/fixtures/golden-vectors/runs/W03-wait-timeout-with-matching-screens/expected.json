@@ -1,0 +1,1 @@
+{"golden":"golden.golden","result":"fail","grammar":1,"schema":1,"semantics":1,"snapshot":{"schema":1,"semantics":1},"screens_expected":2,"screens_actual":2,"total":1,"shown":1,"run":[{"kind":"wait","line":7,"text":"10/10mv>","timeout_ms":5000}],"screens":[{"index":1,"name":null,"result":"pass"},{"index":2,"name":null,"result":"pass"}]}

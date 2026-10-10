@@ -1,0 +1,15 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 20x2
+cursor row=1 col=2 shape=block hidden=false
+modes
+alt_screen false
+title null
+ignore cursor.position
+
+[text]
+0|ab
+1|cd

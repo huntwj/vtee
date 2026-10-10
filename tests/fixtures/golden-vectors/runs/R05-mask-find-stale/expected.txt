@@ -1,0 +1,7 @@
+FAIL golden.golden: 2 mismatches in 1 of 1 screen
+screen 1:
+  text       row 0 col 5-11   expected '12.5 up'   actual 'n/a up '
+             0| load 12.5 up   (expected)
+             0| load n/a up   (actual)
+                     ^^^^^^^
+  mask       golden line 16   mask find=/[0-9]+\.[0-9]+/ text=ignore   matched nothing (stale)

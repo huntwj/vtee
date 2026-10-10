@@ -1,0 +1,3 @@
+FAIL golden.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  size       expected 20x2   actual 21x2   (cells, masks and assertions not compared)

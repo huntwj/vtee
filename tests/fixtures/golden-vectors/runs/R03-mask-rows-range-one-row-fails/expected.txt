@@ -1,0 +1,3 @@
+FAIL golden.golden: 1 mismatch in 1 of 1 screen
+screen 1:
+  mask       golden line 19   mask rows=1-2 text=/[0-9]+/   row 2 col 0-19   actual '1x' does not match

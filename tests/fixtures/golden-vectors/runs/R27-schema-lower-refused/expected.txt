@@ -1,0 +1,2 @@
+REFUSED golden.golden: schema 0 in the golden, 1 in this vtee; nothing was compared
+  migrate the file:  vtee --expect golden.golden --update=migrate      (or re-record with --update)

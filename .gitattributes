@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.png binary
+# The vectors are byte-exact data (one of them has CRLF line endings on purpose, one invalid UTF-8).
+tests/fixtures/golden-vectors/** -text
