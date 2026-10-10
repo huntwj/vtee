@@ -564,7 +564,11 @@ fn sigterm_to_the_holder_ends_the_child_and_the_name_can_be_reused() {
     wait_until("holder to exit", || matches!(first.child.try_wait(), Ok(Some(_))));
     wait_until("child to end", || procs_running("sleep", "31338").is_empty());
 
-    // Whatever files SIGTERM left behind, they must not block a fresh session with the same name.
+    // An external SIGTERM must leave nothing behind for `ls` to show as stale.
+    for file in [first.pidfile(), first.sock(), first.tty_sock()] {
+        assert!(!file.exists(), "{} was left behind after SIGTERM", file.display());
+    }
+
     let second = Session::start_in(&first.tmp, "reuse", &[], &["cat"]);
     let mut nd = second.nd();
     nd.snapshot();

@@ -461,7 +461,9 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
     if !cli.headless {
         tap.watch_resize(cli.observed_size);
     }
-    tap.watch_sigterm();
+    let session_files: Vec<PathBuf> =
+        [cli.pidfile, cli.listen_path, cli.tty_path].into_iter().flatten().map(Path::to_path_buf).collect();
+    tap.watch_sigterm_removing(&session_files);
 
     if let Some(path) = cli.listen_path {
         let write_policy = cli.write_policy.unwrap_or(vtee::WritePolicy::ReadOnly);
