@@ -1,5 +1,6 @@
 mod client;
 mod output;
+mod script;
 mod session_cmds;
 
 use std::io::IsTerminal;
