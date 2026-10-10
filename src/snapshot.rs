@@ -281,6 +281,11 @@ pub struct Snapshot {
     pub lines: Vec<String>,
     /// Row-major cells, `rows` x `cols`.
     pub cells: Vec<Vec<Cell>>,
+    /// Sorted indices of the rows whose last cell wraps into the next row: the row ended because the
+    /// text reached the right margin, not because the program moved to a new line. Also set when a
+    /// wide character did not fit and moved to the next row, leaving a blank cell behind. Empty when
+    /// no row wraps. Without it a soft wrap and a hard line break look alike.
+    pub wrapped_rows: Vec<usize>,
     pub cursor: Cursor,
     /// Active modes, as a set written sorted: private modes by number (`"?1"`, `"?1000"`, `"?1002"`, `"?1003"`,
     /// `"?1005"`, `"?1006"`, `"?2004"`), then names alphabetically (`"DECKPAM"`). A reader accepts any order. The
@@ -303,6 +308,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
 
     let mut lines = Vec::with_capacity(rows);
     let mut cells = Vec::with_capacity(rows);
+    let mut wrapped_rows = Vec::new();
     for r in 0..rows {
         let line = Line(r as i32);
         let mut text = String::new();
@@ -334,6 +340,9 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
                 conceal: f.contains(Flags::HIDDEN),
                 hyperlink: cell.hyperlink().map(|h| h.uri().to_string()),
             });
+        }
+        if cols > 0 && grid[Point::new(line, Column(cols - 1))].flags.contains(Flags::WRAPLINE) {
+            wrapped_rows.push(r);
         }
         lines.push(text);
         cells.push(row_cells);
@@ -373,6 +382,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
         rows,
         lines,
         cells,
+        wrapped_rows,
         cursor: Cursor {
             row: usize::try_from(cursor_point.line.0).unwrap_or(0).min(rows.saturating_sub(1)),
             col: cursor_point.column.0,
@@ -805,6 +815,42 @@ mod emulator_tests {
         v["semantics_version"] = 9.into();
         let newer: Snapshot = serde_json::from_value(v).unwrap();
         assert_eq!((newer.schema_version, newer.semantics_version), (7, 9), "numbers are kept, not rewritten");
+    }
+
+    #[test]
+    fn a_soft_wrap_is_reported_and_a_hard_line_break_is_not() {
+        let rows = |bytes: &[u8]| snap(bytes, 10, 5).wrapped_rows;
+        assert_eq!(rows(b"abcdefghijklmnopqrst"), [0]);
+        assert_eq!(rows(b"abcdefghijklmnopqrstuvwxy"), [0, 1]);
+        assert_eq!(rows(b"abcdefghij\r\nklm"), Vec::<usize>::new(), "a hard break is not a wrap");
+        assert_eq!(rows(b"abcdefghij"), Vec::<usize>::new(), "text that exactly fills a row has not wrapped yet");
+        assert_eq!(rows(b"short\r\nabcdefghijklm"), [1]);
+        assert_eq!(rows(b""), Vec::<usize>::new());
+        let s = snap(b"abcdefghijklm", 10, 5);
+        assert_eq!(s.lines[0], "abcdefghij");
+        assert_eq!(s.lines[1].trim_end(), "klm");
+    }
+
+    #[test]
+    fn a_wide_character_pushed_to_the_next_row_marks_the_row_as_wrapped() {
+        let s = snap("abcdefghi\u{4f60}z".as_bytes(), 10, 3);
+        assert_eq!(s.wrapped_rows, [0]);
+        assert_eq!(s.lines[0], "abcdefghi ", "the cell left behind is blank");
+        assert_eq!(s.cells[1][0].ch, "\u{4f60}");
+        assert_eq!(s.cells[1][1].ch, "", "the continuation cell");
+        assert_eq!(s.cells[1][2].ch, "z");
+    }
+
+    #[test]
+    fn wrapped_rows_survive_a_json_round_trip_and_are_required() {
+        let s = snap(b"abcdefghijklm", 10, 3);
+        let mut v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["wrapped_rows"], serde_json::json!([0]));
+        assert_eq!(serde_json::from_value::<Snapshot>(v.clone()).unwrap().wrapped_rows, [0]);
+        v.as_object_mut().unwrap().remove("wrapped_rows");
+        assert!(serde_json::from_value::<Snapshot>(v).is_err());
+        let json = serde_json::to_string(&snap(b"x", 4, 1)).unwrap();
+        assert!(json.contains(r#""cells":[[{"ch":"x"},{},{},{}]],"wrapped_rows":[],"cursor":"#), "{json}");
     }
 
     #[test]
