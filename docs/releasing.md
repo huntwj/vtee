@@ -1,7 +1,8 @@
 # Releasing
 
 Versions, `CHANGELOG.md`, git tags and GitHub Releases are generated from [Conventional Commits](https://www.conventionalcommits.org/)
-on `main` by [release-plz](https://release-plz.dev/). Nothing is published to crates.io (`publish = false`).
+on `main` by [release-plz](https://release-plz.dev/). release-plz does not publish to crates.io: uploads are manual
+for now ([Publishing to crates.io](#publishing-to-cratesio)).
 Status: the `CI` workflow has run on GitHub and is green. The `Release` workflow has run once, on a push to `main`:
 it failed at the step that opens the release PR with "GitHub Actions is not permitted to create or approve pull
 requests", which is the repository setting in the [checklist](#one-time-repository-setup-maintainer-checklist) below.
@@ -21,7 +22,7 @@ run yet; treat the first release as the test of it.
 (release-plz alone would bump only the patch). Only `feat`, `fix`, `perf` and `!` commits trigger a release; the
 rest never open a release PR on their own, and `docs`/`test`/`chore`/`ci`/`style`/`build` are left out of the changelog.
 
-**First release needs a baseline tag.** `Cargo.toml` is at `0.0.0`. With `git_only = true` (the crate is `publish = false`),
+**First release needs a baseline tag.** `Cargo.toml` is at `0.0.0`. With `git_only = true`,
 release-plz finds the previous release from the latest `vX.Y.Z` git tag, so create `v0.0.0` on the first commit once and push
 it: `jj tag set v0.0.0 -r 'root()+'` then `jj git push --tag v0.0.0`. Dry-run result with that tag (release-plz 0.3.170, on a
 copy of the history): `0.0.0 -> 0.1.0`, with a changelog grouped into Added / Changed / Fixed. Without the tag the dry run also
@@ -66,7 +67,31 @@ because the locked `uuid 1.27.0` requires 1.89. Windows was only built on curren
 - [ ] Settings > General > Pull Requests: allow squash merging (and make "Default to PR title" the squash message).
 - [ ] Settings > Branches: protect `main` and require the `Conventional Commits` and CI checks if you want enforcement.
 - [x] License: `MIT OR Apache-2.0` (the Rust convention), as `LICENSE-MIT`, `LICENSE-APACHE` and the `license` field
-      in `Cargo.toml`. `publish = false` stays until publishing to crates.io is a separate decision.
+      in `Cargo.toml`.
+
+## Publishing to crates.io
+
+`0.0.1` is a preview that reserves the `vtee` crate name. crates.io needs an API token for the first upload of a
+crate, so the first publish is done by hand by the owner:
+
+1. On a clean checkout of the commit to release, with `Cargo.toml` at the version to publish:
+   `cargo package --list` (check the file list and size), then `cargo publish --dry-run`.
+2. `cargo publish`. The token comes from `cargo login`; use a short-lived token scoped to `publish-new` (add
+   `publish-update` for later releases) and revoke it afterwards.
+3. Tag the published commit: `jj tag set v0.0.1 -r <commit>` then `jj git push --tag v0.0.1`. release-plz computes
+   the next version from the latest `vX.Y.Z` tag, so from `v0.0.1` the next `feat` proposes `0.1.0`. The `v0.0.0`
+   baseline tag stays as history. The open release PR is recomputed on the next push to `main`; keep it unmerged
+   until the release it describes is ready.
+4. On crates.io, open the crate's settings and add a Trusted Publisher (GitHub, owner `huntwj`, repository `vtee`,
+   the release workflow's file name, optionally an environment). After that the workflow can publish without a
+   stored token.
+5. Only then turn publishing on in `release-plz.toml` (`publish = true` and drop `git_only`). **Unverified:** how
+   release-plz behaves with trusted publishing and with a crate that has a `v0.0.1` tag made by hand. Try it with a
+   dry run before relying on it.
+
+`cargo package` ships the source, tests, fixtures and docs, about 1.1 MB over roughly 200 files. The `exclude` list
+in `Cargo.toml` leaves out CI configuration, the Docker test image, `HANDOFF.md`, `release-plz.toml` and the oracle
+generator for the differential test.
 
 ## Files
 

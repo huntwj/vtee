@@ -2,10 +2,10 @@
 # How it works and the one-time repo setup: docs/releasing.md.
 
 [workspace]
-# Never run `cargo publish`; releases are a git tag + GitHub Release (Cargo.toml also says `publish = false`).
+# release-plz never runs `cargo publish` for now: releases are a git tag + GitHub Release, and crates.io uploads
+# are manual (docs/releasing.md, "Publishing to crates.io").
 publish = false
-# Required for an unpublished crate: without it release-plz ignores a `publish = false` package, and with
-# publishing on it demands a crates.io entry. Versions are read from git tags (`vX.Y.Z`) instead.
+# Versions are read from git tags (`vX.Y.Z`) instead of from the crates.io index.
 git_only = true
 git_tag_enable = true
 git_release_enable = true
