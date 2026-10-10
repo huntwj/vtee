@@ -2,21 +2,87 @@
 //! (requirement 3, full state exposure), stamped with the output-byte offset it reflects
 //! (requirement 4: "snapshot as of byte N", so a query never sees a half-drawn frame).
 
+use std::fmt;
+use std::str::FromStr;
+
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use vte::ansi::Color as AnsiColor;
 
 use crate::ObserverListener;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// A cell colour. In JSON it is a string: `"default"`, `"idx:N"` (palette index 0 to 255) or
+/// `"rgb:#rrggbb"` (lower-case hex). `idx:1` and `rgb:#cd0000` are different values on purpose:
+/// a program that changes how it asks for red is a visible change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Color {
     #[default]
     Default,
     Indexed(u8),
     Rgb(u8, u8, u8),
+}
+
+impl fmt::Display for Color {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Color::Default => f.write_str("default"),
+            Color::Indexed(n) => write!(f, "idx:{n}"),
+            Color::Rgb(r, g, b) => write!(f, "rgb:#{r:02x}{g:02x}{b:02x}"),
+        }
+    }
+}
+
+/// Why a string is not a colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseColorError(String);
+
+impl fmt::Display for ParseColorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?} is not a colour (expected \"default\", \"idx:0\" to \"idx:255\" or \"rgb:#rrggbb\")", self.0)
+    }
+}
+
+impl std::error::Error for ParseColorError {}
+
+impl FromStr for Color {
+    type Err = ParseColorError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bad = || ParseColorError(s.to_string());
+        if s == "default" {
+            return Ok(Color::Default);
+        }
+        if let Some(n) = s.strip_prefix("idx:") {
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
+            return n.parse::<u8>().map(Color::Indexed).map_err(|_| bad());
+        }
+        if let Some(hex) = s.strip_prefix("rgb:#") {
+            if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(bad());
+            }
+            let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad());
+            return Ok(Color::Rgb(channel(0)?, channel(2)?, channel(4)?));
+        }
+        Err(bad())
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(de::Error::custom)
+    }
 }
 
 /// `alacritty_terminal` stores a literal TAB in the cell where a tab stop movement started; a
@@ -337,6 +403,43 @@ fn build_scrollback(term: &Term<ObserverListener>) -> Vec<String> {
 mod tests {
     use super::*;
     use vte::ansi::NamedColor;
+
+    #[test]
+    fn colours_are_strings_in_json() {
+        for (color, text) in [
+            (Color::Default, "default"),
+            (Color::Indexed(0), "idx:0"),
+            (Color::Indexed(255), "idx:255"),
+            (Color::Rgb(0xc8, 0x0a, 0x14), "rgb:#c80a14"),
+            (Color::Rgb(0, 0, 0), "rgb:#000000"),
+        ] {
+            assert_eq!(color.to_string(), text);
+            assert_eq!(serde_json::to_value(color).unwrap(), text);
+            assert_eq!(serde_json::from_value::<Color>(text.into()).unwrap(), color);
+        }
+    }
+
+    #[test]
+    fn colour_strings_are_parsed_strictly() {
+        assert_eq!("rgb:#C80A14".parse::<Color>(), Ok(Color::Rgb(0xc8, 0x0a, 0x14)), "upper-case hex is read");
+        for bad in [
+            "",
+            "Default",
+            "idx:",
+            "idx:256",
+            "idx:-1",
+            "idx:+1",
+            "idx: 1",
+            "rgb:c80a14",
+            "rgb:#c80a1",
+            "rgb:#c80a14f",
+            "red",
+        ] {
+            assert!(bad.parse::<Color>().is_err(), "{bad:?} should not parse");
+        }
+        assert!(serde_json::from_str::<Color>("{\"Indexed\":1}").is_err(), "the pre-0.1.0 shape is not read");
+        assert!(serde_json::from_str::<Color>("\"Default\"").is_err());
+    }
 
     #[test]
     fn named_colors_map_to_palette_indices() {
