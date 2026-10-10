@@ -109,7 +109,7 @@ A script's `snapshot` can carry a `name`, which the golden records and a later r
 A `wait_for` that times out is a problem of the run; if it may time out, say so on its line with `"optional":true`.
 
 The report is on standard output, `PASS`, `FAIL` or `REFUSED` on its first line; `--format json` prints one JSON
-object instead. The golden file format and the report are specified in the
+object instead. The golden file format is described in [golden-format.md](golden-format.md); the report is specified in the
 [snapshot and golden contract](../design/snapshot-and-golden-contract.md) (sections 6.1 to 6.9).
 
 **Exit codes of a run with `--expect`:**

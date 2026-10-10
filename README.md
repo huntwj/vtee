@@ -79,7 +79,7 @@ vtee kill demo
 
 To test a program's screens, record them once into a golden file and then check against it (the script is the
 JSON commands to type; each `snapshot` in it is a checkpoint). The check exits 0 on a pass, 1 on a difference and 2
-when the golden was recorded under other version numbers; see [testing TUIs](docs/guide/testing-tuis.md#golden-files):
+when the golden was recorded under other version numbers; see [testing TUIs](docs/guide/testing-tuis.md#golden-files) and the [golden file format](docs/guide/golden-format.md):
 
 ```
 vtee --script flow.ndjson --expect flow.golden --update -- tf     # CREATED flow.golden: 3 screens
@@ -131,7 +131,7 @@ Start where your use is:
   [Windows](docs/guide/windows.md), [security](docs/guide/security.md) (and [SECURITY.md](SECURITY.md) for
   reporting), [troubleshooting](docs/guide/troubleshooting.md).
 - **I write a TUI and want a test harness:** [testing TUIs](docs/guide/testing-tuis.md) (a determinism and test
-  recipe), [JSON protocol](docs/guide/protocol.md) (every command and the snapshot format),
+  recipe), the [golden file format](docs/guide/golden-format.md), [JSON protocol](docs/guide/protocol.md) (every command and the snapshot format),
   [CLI reference](docs/guide/cli-reference.md), runnable [examples](examples/README.md) in Python, shell and
   PowerShell, [versioning and stability](docs/guide/versioning.md).
 - **I want to contribute:** [CONTRIBUTING.md](CONTRIBUTING.md), [extending vtee](docs/development/extending.md),

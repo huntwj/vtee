@@ -13,6 +13,7 @@ query and drive it at the same time. The project front page is the [README](../R
 | [JSON protocol](guide/protocol.md) | Drive a session from your own code: every command, the snapshot format, errors, limits |
 | [Driving a session as an AI agent](guide/agents.md) | Use the send, wait, read loop well and avoid its traps |
 | [Testing a TUI](guide/testing-tuis.md) | Make a screen repeatable, wait correctly, compare snapshots and fail a test |
+| [Golden file format](guide/golden-format.md) | Write and maintain the expected-screen files that `--expect` checks |
 | [Examples](../examples/README.md) | Copy a working client or script in Python, shell or PowerShell |
 | [Versioning and stability](guide/versioning.md) | Know what you can rely on across versions, and how to pin one |
 | [Windows](guide/windows.md) | Know what works on Windows and what does not |
