@@ -836,3 +836,18 @@ output present) and three consecutive clean runs of all the Windows test suites.
 
 **Consequence:** the escape hatch is gone, and the vendored crate no longer blocks publishing to crates.io, which
 does not allow `[patch]` entries to carry the build. Earlier entries are kept as history.
+
+## 2026-10-10: releases publish to crates.io through Trusted Publishing
+
+`vtee 0.0.1` was uploaded by hand (crates.io requires a token for a crate's first upload), the token was revoked, and a
+Trusted Publisher was configured on crates.io (repository `huntwj/vtee`, workflow `release-plz.yml`, no environment).
+The `release` job now has `id-token: write`, and `release-plz.toml` no longer sets `publish = false` or
+`git_only = true`.
+
+**Finding:** release-plz's documentation says it performs the OIDC exchange itself, so the separate
+`rust-lang/crates-io-auth-action` step and a `CARGO_REGISTRY_TOKEN` secret are both unnecessary and should be left out.
+`git_only = true` makes release-plz skip `cargo publish`, so it cannot stay.
+
+**Evidence:** release-plz 0.3.171 `update` on a clone computes `0.0.1 -> 0.1.0` with and without `git_only`; without it
+the registry's `vtee 0.0.1` is found. **Not tested:** the OIDC exchange and `release-plz release`; the first real run
+is the `0.1.0` release merge. See `docs/releasing.md`.
