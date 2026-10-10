@@ -25,6 +25,12 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+impl Color {
+    fn is_default(&self) -> bool {
+        *self == Color::Default
+    }
+}
+
 impl fmt::Display for Color {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -104,6 +110,12 @@ pub enum UnderlineStyle {
     Dashed,
 }
 
+impl UnderlineStyle {
+    fn is_none(&self) -> bool {
+        *self == UnderlineStyle::None
+    }
+}
+
 fn underline_style(flags: Flags) -> UnderlineStyle {
     if flags.contains(Flags::UNDERCURL) {
         UnderlineStyle::Curly
@@ -136,28 +148,71 @@ fn convert_color(c: AnsiColor) -> Color {
 
 /// One screen cell. `ch` already includes any combining marks `alacritty_terminal` stores
 /// separately via `Cell::zerowidth()` - callers never need to know about that split.
+///
+/// In JSON a cell is sparse: a field equal to its default is omitted when writing and read as
+/// that default when absent, so a blank cell is `{}`. The defaults are `ch` = `" "`, colours
+/// `default`, flags `false`, no underline and no hyperlink.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Cell {
+    #[serde(skip_serializing_if = "is_blank")]
     pub ch: String,
+    #[serde(skip_serializing_if = "Color::is_default")]
     pub fg: Color,
+    #[serde(skip_serializing_if = "Color::is_default")]
     pub bg: Color,
+    #[serde(skip_serializing_if = "is_false")]
     pub bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub dim: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub italic: bool,
     /// True for any underline style; see `underline_style` for which one.
+    #[serde(skip_serializing_if = "is_false")]
     pub underline: bool,
-    /// Absent in older JSON, where it reads as `none`.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "UnderlineStyle::is_none")]
     pub underline_style: UnderlineStyle,
-    /// SGR 58 underline colour; `Default` when none was set. Absent in older JSON.
-    #[serde(default)]
+    /// SGR 58 underline colour; `Default` when none was set.
+    #[serde(skip_serializing_if = "Color::is_default")]
     pub underline_color: Color,
     /// Always false: `alacritty_terminal` has no blink flag at all (a known, accepted gap -
     /// see docs/decisions.md).
+    #[serde(skip_serializing_if = "is_false")]
     pub blink: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub reverse: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub strike: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hyperlink: Option<String>,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell {
+            ch: " ".to_string(),
+            fg: Color::Default,
+            bg: Color::Default,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            underline_style: UnderlineStyle::None,
+            underline_color: Color::Default,
+            blink: false,
+            reverse: false,
+            strike: false,
+            hyperlink: None,
+        }
+    }
+}
+
+fn is_blank(ch: &str) -> bool {
+    ch == " "
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +645,44 @@ mod emulator_tests {
         assert_eq!(c[0].underline_color, Color::Rgb(1, 2, 3));
         assert_eq!(c[1].underline_color, Color::Indexed(9));
         assert_eq!(c[2].underline_color, Color::Default);
+    }
+
+    #[test]
+    fn cells_are_sparse_and_defaults_are_never_written() {
+        assert_eq!(serde_json::to_string(&Cell::default()).unwrap(), "{}");
+        let s = snap(b"\x1b[1;31mR \x1b[0m\x1b[4m\x1b[58;2;1;2;3mU\x1b[0m", 6, 2);
+        let cell = |i: usize| serde_json::to_value(&s.cells[0][i]).unwrap();
+        assert_eq!(cell(0), serde_json::json!({"ch": "R", "fg": "idx:1", "bold": true}));
+        assert_eq!(cell(1), serde_json::json!({"fg": "idx:1", "bold": true}), "a blank cell keeps its attributes only");
+        assert_eq!(
+            cell(2),
+            serde_json::json!({"ch": "U", "underline": true, "underline_style": "single", "underline_color": "rgb:#010203"})
+        );
+        assert_eq!(cell(5), serde_json::json!({}));
+        assert_eq!(cell(3), serde_json::json!({}));
+    }
+
+    #[test]
+    fn absent_fields_read_as_defaults_and_explicit_defaults_are_accepted() {
+        assert_eq!(serde_json::from_str::<Cell>("{}").unwrap(), Cell::default());
+        let dense = r#"{"ch":" ","fg":"default","bg":"default","bold":false,"dim":false,"italic":false,"underline":false,
+            "underline_style":"none","underline_color":"default","blink":false,"reverse":false,"strike":false,"hyperlink":null}"#;
+        assert_eq!(serde_json::from_str::<Cell>(dense).unwrap(), Cell::default());
+        let continuation: Cell = serde_json::from_str(r#"{"ch":""}"#).unwrap();
+        assert_eq!(continuation.ch, "", "an empty ch is a wide character's continuation cell, not a default");
+        assert_eq!(serde_json::to_string(&continuation).unwrap(), r#"{"ch":""}"#);
+    }
+
+    #[test]
+    fn a_whole_snapshot_round_trips_through_sparse_json() {
+        let s = snap(
+            "\x1b[1;38;2;1;2;3mbold rgb\x1b[0m \x1b[4:3;48;5;9mcurly\x1b[0m\r\n你好\x1b]8;;http://x.example\x07link\x1b]8;;\x07".as_bytes(),
+            30,
+            4,
+        );
+        let back: Snapshot = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.cells, s.cells);
+        assert_eq!(back.lines, s.lines);
     }
 
     #[test]
