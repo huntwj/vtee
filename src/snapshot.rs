@@ -105,11 +105,23 @@ pub struct Cursor {
     pub shape: CursorShape,
 }
 
+/// Bumped only when an existing field is renamed, removed or changes meaning. Adding a field
+/// does not bump it. See `docs/guide/protocol.md`.
+pub const SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    1
+}
+
 /// The full state of a tap's screen as of `byte_offset` bytes of child output. Two snapshots
 /// built from the same byte offset (e.g. one live, one replayed from the raw log) should be
 /// identical - that's what makes a golden test out of this stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// The JSON schema version this snapshot follows (`SCHEMA_VERSION`). Absent in JSON written
+    /// before the field existed, which reads as 1.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub byte_offset: u64,
     pub cols: usize,
     pub rows: usize,
@@ -201,6 +213,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
     };
 
     Snapshot {
+        schema_version: SCHEMA_VERSION,
         byte_offset,
         cols,
         rows,
@@ -453,6 +466,24 @@ mod emulator_tests {
         assert_eq!(c[0].underline_color, Color::Rgb(1, 2, 3));
         assert_eq!(c[1].underline_color, Color::Indexed(9));
         assert_eq!(c[2].underline_color, Color::Default);
+    }
+
+    #[test]
+    fn the_schema_version_comes_first_and_older_json_reads_as_version_one() {
+        let s = snap(b"x", 5, 2);
+        assert_eq!(s.schema_version, SCHEMA_VERSION);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.starts_with("{\"schema_version\":1,\"byte_offset\":"), "{}", &json[..60]);
+
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("schema_version");
+        let old: Snapshot = serde_json::from_value(v).unwrap();
+        assert_eq!(old.schema_version, 1);
+
+        let mut v = serde_json::to_value(&s).unwrap();
+        v["schema_version"] = 7.into();
+        let newer: Snapshot = serde_json::from_value(v).unwrap();
+        assert_eq!(newer.schema_version, 7, "a newer version is kept, not rewritten");
     }
 
     #[test]
