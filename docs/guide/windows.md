@@ -29,11 +29,32 @@ library. Named pipes were not used because the protocol relies on half-closing a
 | Session files | `<name>.sock`, `<name>.tty.sock`, `<name>.pid` |
 | Config file | `%APPDATA%\vtee\config\default-config.toml` |
 
-The user profile's own permissions are the access control; `vtee` refuses a session directory that is a
-junction, symbolic link or other reparse point, or is not a directory.
+The user profile's own permissions are the main access control; `vtee` refuses a session directory that is a
+junction, symbolic link or other reparse point, or is not a directory. It also checks the user behind every
+connection to a socket: only your account (or SYSTEM) is let in. See [security](security.md) for what that does and
+does not protect.
 
 Unix-domain socket paths are limited to 107 bytes. The longest file is `<name>.tty.sock`, so a long profile path
-plus a long name can exceed it; `vtee` then reports an error that names the length.
+plus a long name can exceed it. `vtee` reports which of the two is the problem. With a name that is too long for
+the room there is (here `%LOCALAPPDATA%` is 87 characters and the name is 70):
+
+```
+> vtee --headless --name nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn -- cmd /c exit
+vtee: couldn't check for an existing session named "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn": session name "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn" is too long: its socket path would be 174 bytes (limit 107); with this session directory a name can be at most 3 bytes
+```
+
+and with a `%LOCALAPPDATA%` so long that no name fits (here 132 characters):
+
+```
+> vtee --headless --name demo -- cmd /c exit
+vtee: couldn't check for an existing session named "demo": the session directory path is 139 bytes, which leaves no room for a socket: sessions need <directory>\<name>.tty.sock to fit in 107 bytes. Shorten %LOCALAPPDATA%
+> vtee kill demo
+vtee: no session named "demo": the session directory path is 139 bytes, which leaves no room for a socket: sessions need <directory>\<name>.tty.sock to fit in 107 bytes. Shorten %LOCALAPPDATA%
+```
+
+Starting a session exits 71 in both cases. `kill` exits 68, the same as for a session that does not exist, because
+no session with that name can exist. `vtee ls` still works and prints `no sessions`. The fix is a shorter
+`%LOCALAPPDATA%`, set for the `vtee` process, or a shorter name.
 
 ```
 $ vtee ls
@@ -112,6 +133,45 @@ the original modes back when it exits, including when the console is closed or C
 
 Nothing is changed if the handle is not a console, for example when output is redirected to a file.
 
+## PowerShell and the byte-order mark
+
+A UTF-8 byte-order mark (BOM) in front of a JSON command makes it unreadable. `vtee --connect` and `--script`
+remove one leading BOM from each input line, which covers a `--script` file saved by Windows PowerShell 5.1 with
+`Set-Content -Encoding UTF8` (it starts `EF-BB-BF`; this works). Piping to `--connect` is the case that needs
+care, because Windows PowerShell 5.1 builds the bytes from `$OutputEncoding`:
+
+- In a clean `powershell.exe -NoProfile`, `$OutputEncoding` is US-ASCII with no BOM, and piping works:
+
+  ```
+  PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
+  --- exit_status running ---
+  ```
+
+- If a profile or script sets `$OutputEncoding` to a UTF-8 encoding that has a BOM, PowerShell sends **two** BOMs
+  (measured: the bytes arrive as `ef bb bf ef bb bf 7b 22 63 ...`). `vtee` removes one and the command still
+  fails. The reply is an error line, and `--connect` still exits 0:
+
+  ```
+  PS> $OutputEncoding = New-Object System.Text.UTF8Encoding $true
+  PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
+  --- error: bad command: expected value at line 1 column 1 ---
+  ```
+
+  The same happens when `$OutputEncoding` is `[Console]::OutputEncoding` on a console set to UTF-8. Check with
+  `$OutputEncoding.GetPreamble().Length`: anything other than `0` sends a BOM.
+
+- The fix is an encoding without a BOM for the pipe:
+
+  ```
+  PS> $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+  PS> '{"cmd":"exit_status"}' | vtee --connect $sock --text
+  --- exit_status running ---
+  ```
+
+What was tested, all on Windows PowerShell 5.1 (5.1.26100): a `--script` file written with `Set-Content -Encoding
+UTF8`, and one written with `>` (which on that machine also produced UTF-8 with a BOM, `EF-BB-BF`); both run.
+Files saved as UTF-16 and PowerShell 7 were not tested.
+
 ## Known gaps
 
 - **No terminal-restore watchdog.** On Linux a helper process restores the terminal mode if the holder is
@@ -120,6 +180,8 @@ Nothing is changed if the handle is not a console, for example when output is re
   refuses to terminate a process that was created after the session record was last written, since that process
   cannot be the holder. A reused process id is therefore left alone; the check relies on file and process times.
 - **Mouse modes are not visible in snapshots.** See the section above.
+- **A doubled BOM from PowerShell 5.1 is not handled.** One leading BOM is removed; the two that PowerShell sends
+  when `$OutputEncoding` has a BOM are not. See [PowerShell and the byte-order mark](#powershell-and-the-byte-order-mark).
 - **Windows must be 1803 or later**, for AF_UNIX sockets.
 - **Antivirus** products might interfere with socket files. No problem has been seen.
 - **The tests rely on tools that are not guaranteed to be installed**, such as Git for Windows' `vim` and `less`.

@@ -18,13 +18,26 @@ name can never point outside the session directory:
 
 ```
 $ vtee --name ../x -- true
-vtee: couldn't check for an existing session named "../x": "../x" isn't a valid session name - no "/", no "."/"..", not empty
+vtee: couldn't check for an existing session named "../x": "../x" isn't a valid session name: no "/", no "."/"..", not empty
 $ echo $?
 71
 ```
 
-On Windows a name is also limited in length so that the socket path stays under the 107-byte limit for Unix-domain
-sockets (see [Windows](windows.md#sessions)). Other characters Windows forbids in file names are also unsuitable.
+On Windows a name is also refused if it contains a control character or one of `< > : " | ? *` (a colon would open
+an NTFS alternate data stream), starts or ends with a space or a dot, or is a reserved device name (`CON`, `PRN`,
+`AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with or without an extension). The reason follows the same
+pattern:
+
+```
+> vtee --headless --name CON -- cmd /c exit
+vtee: couldn't check for an existing session named "CON": "CON" isn't a valid session name: is a reserved Windows device name
+> vtee --headless --name ab:c -- cmd /c exit
+vtee: couldn't check for an existing session named "ab:c": "ab:c" isn't a valid session name: contains a control character or one of < > : " | ? *
+```
+
+Both exit 71. A Windows name is also limited in length so that the socket path stays under the 107-byte limit for
+Unix-domain sockets, and a very long `%LOCALAPPDATA%` can leave no room at all. Both cases name their real cause;
+see [Windows](windows.md#sessions).
 
 ## Duplicate names
 
@@ -124,8 +137,10 @@ $ vtee ls
 demo	pid=2221	live
 ```
 
-`ls` reports a session `live` only if its socket accepts a connection, not merely because the files exist. After a
-holder is killed with `SIGKILL` the files stay behind and show as `stale`. For a session started with
+`ls` reports a session `live` only if its socket accepts a connection, not merely because the files exist. On Linux
+a `SIGTERM` to the holder (`kill <pid>`) ends the session and removes its files. A `SIGKILL` gives the holder no
+chance to, so the files stay behind and show as `stale`, and so does ending the holder from Task Manager on
+Windows. For a session started with
 `--listen=<path>`, `ls` adds the socket path:
 
 ```

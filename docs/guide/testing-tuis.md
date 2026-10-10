@@ -165,9 +165,18 @@ file. The first lines of a real one:
 [0.012827626,"o","hello from vtee\r\n$ "]
 ```
 
-A recording attached to a bug report makes a screen reproducible. There is no command-line replayer; the library
-function `vtee::replay` feeds a recording into the emulator and returns the snapshot, and the repository's own
-tests use it.
+A recording attached to a bug report makes a screen reproducible. `vtee replay run.cast` feeds it into a fresh
+emulator and prints the final screen as text (`--json` prints the full snapshot):
+
+```
+$ vtee replay run.cast
+--- snapshot (byte_offset=10) ---
+one
+two
+```
+
+The library function `vtee::replay` does the same from Rust, and the repository's own tests use it. See the
+[CLI reference](cli-reference.md#vtee-replay-file---json).
 
 ## Planned: golden files
 

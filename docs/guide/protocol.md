@@ -127,7 +127,8 @@ for those. Insert, Delete and `Shift-` combinations do not exist yet either.
 ```
 
 Changes the terminal size seen by the program and by the emulator together. No reply. Each side must be between 1
-and 1000; `0` is raised to `1`, and anything over 1000 is an error.
+and 1000; `0` is raised to `1`, and anything over 1000 is an error. The same 1 to 1000 range applies to `--cols`
+and `--rows` at startup, where a value outside it (including `0`) is refused with exit status 64 instead.
 
 A resize is also refused whenever a real terminal controls the size (an interactive session with a terminal on
 stdin; see [Sessions](sessions.md)), because a remote resize would fight with the terminal's own.
@@ -261,7 +262,7 @@ Messages you will see:
 | Limit | Value |
 | --- | --- |
 | Length of one command line | 1 MiB. A longer line closes the connection. |
-| Terminal size | 1 to 1000 on each side. |
+| Terminal size | 1 to 1000 on each side, for `--cols`/`--rows` at startup and for `resize`. |
 | Simultaneous connections per socket | 64. Extra connections are dropped. |
 
 ## Using the socket without `vtee --connect`
