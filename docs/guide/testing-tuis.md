@@ -147,7 +147,7 @@ this: a Python client and shell and PowerShell scripts.
 
 - **Linux.** Any image with the program under test. The full-screen tests in this repository also need `less`, `vim`
   and `procps`; see [CI](../development/ci.md).
-- **Windows.** ConPTY works on hosted runners. The terminal modes `?1000`, `?1006` and `?1` never appear in a
+- **Windows.** ConPTY works on hosted runners. The terminal modes `?1`, `?1000`, `?1002` and `?1006` never appear in a
   Windows snapshot, so a golden recorded on Linux can differ there. See [Windows](windows.md).
 - Keep per-test state apart: a separate `TMPDIR` on Linux or `LOCALAPPDATA` on Windows per test (the session
   directory) and a separate `XDG_CONFIG_HOME` or `APPDATA` (the config file), so tests do not see each other's
