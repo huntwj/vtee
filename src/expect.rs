@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use vtee::golden::{
-    Build, CheckError, CheckOptions, CompareOptions, DEFAULT_MAX_MISMATCHES, Golden, Invocation, LoadError, Report,
-    check_saved, refuse_golden, refuse_unread,
+    Build, CheckError, CheckOptions, CompareOptions, DEFAULT_MAX_MISMATCHES, Golden, Invocation, LoadError,
+    RecordOptions, Refusal, Report, Run, RunError, Semantics, Verdict, check_saved, describe_wait, display_name,
+    plan_record, plan_screen, read_run_for_build, refuse_golden, refuse_unread, restamped,
 };
 
-use crate::output::{exit_code, fail};
+use crate::output::{exit_code, fail, print_error};
 use crate::script::{self, Failure, Flow, ReadError, Reply, Script, ScriptLine, Sink, SocketDriver, TapDriver};
 
 /// `--format`.
@@ -165,7 +166,6 @@ pub fn plan(args: &Args, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<
         if set("CI") && env("VTEE_ALLOW_UPDATE").as_deref() != Some("1") {
             return Err("--update is refused when CI is set (it would make a pipeline pass by rewriting its expectations); set VTEE_ALLOW_UPDATE=1 to allow it".to_string());
         }
-        return Err("--update is not available yet".to_string());
     }
 
     let source = match &args.snapshot {
@@ -176,7 +176,7 @@ pub fn plan(args: &Args, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<
     };
     Ok(Some(Plan {
         golden: golden.clone(),
-        mode: Mode::Check,
+        mode: mode.unwrap_or(Mode::Check),
         source,
         screen: args.screen,
         format: args.format.unwrap_or(Format::Text),
@@ -404,7 +404,15 @@ fn load_golden(plan: &Plan, inv: &Invocation) -> Loaded {
 /// Runs a valid request.
 pub fn run(plan: &Plan, ctx: &Context) -> ExitCode {
     let inv = invocation(plan, ctx);
-    let golden = match load_golden(plan, &inv) {
+    match plan.mode {
+        Mode::Check => run_check(plan, ctx, &inv),
+        Mode::Record => run_record(plan, ctx, &inv),
+        Mode::Restamp => run_restamp(plan, ctx, &inv),
+    }
+}
+
+fn run_check(plan: &Plan, ctx: &Context, inv: &Invocation) -> ExitCode {
+    let golden = match load_golden(plan, inv) {
         Loaded::Golden(golden) => golden,
         Loaded::Done(code) => return code,
     };
@@ -412,13 +420,327 @@ pub fn run(plan: &Plan, ctx: &Context) -> ExitCode {
         Ok(saved) => saved,
         Err(code) => return code,
     };
-    match check_saved(&golden, &inv, &saved, &check_options(plan)) {
+    match check_saved(&golden, inv, &saved, &check_options(plan)) {
         Ok(report) => {
             print_report(&report, plan.format);
             exit_code(report.exit_code())
         }
         Err(CheckError::Run(message)) => data_error(exitcode::DATAERR, message),
         Err(CheckError::Usage(usage)) => fail(exitcode::USAGE, usage.to_string()),
+    }
+}
+
+// ---- --update ----------------------------------------------------------------------------------------------------
+
+/// The report name of the golden: its file name.
+fn name_of(plan: &Plan) -> String {
+    display_name(&plan.golden.display().to_string())
+}
+
+fn print_line(plan: &Plan, text: &str, json: &str) {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = match plan.format {
+        Format::Text => write!(out, "{text}"),
+        Format::Json => writeln!(out, "{json}"),
+    };
+    let _ = out.flush();
+}
+
+/// A JSON string literal.
+fn json_str(text: &str) -> String {
+    vtee::ndjson::to_line(text).expect("a string serializes")
+}
+
+/// Replaces the golden's file with `text` in one step, so a crash cannot leave half a golden.
+fn write_golden(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".vtee-new");
+    let temp = PathBuf::from(temp);
+    let written = std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+fn cannot_write(path: &Path, e: std::io::Error) -> ExitCode {
+    fail(exitcode::IOERR, format!("cannot write {}: {e}", path.display()))
+}
+
+/// The `vtee-golden 0` draft is the one malformed golden that `--update` replaces: the message that rejects it says to
+/// record it again.
+fn is_draft(bytes: &[u8]) -> bool {
+    bytes.split(|b| *b == b'\n').next().is_some_and(|first| first.trim_ascii_end() == b"vtee-golden 0")
+}
+
+/// The golden that `--update` starts from.
+enum Existing {
+    /// There is no file, or it is the unsupported `vtee-golden 0` draft (`true`), which is replaced.
+    Fresh {
+        replaces_draft: bool,
+    },
+    Golden(Box<Golden>, Vec<u8>),
+}
+
+fn load_existing(plan: &Plan, inv: &Invocation) -> Result<Existing, ExitCode> {
+    let path = &plan.golden;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(n) = plan.screen {
+                return Err(fail(
+                    exitcode::USAGE,
+                    format!("--screen {n} updates one screen of an existing golden; {} does not exist", path.display()),
+                ));
+            }
+            return Ok(Existing::Fresh { replaces_draft: false });
+        }
+        Err(e) => return Err(fail(exitcode::NOINPUT, format!("{}: {e}", path.display()))),
+    };
+    match Golden::parse(&bytes) {
+        Ok(golden) => Ok(Existing::Golden(Box::new(golden), bytes)),
+        Err(LoadError::Malformed(_)) if is_draft(&bytes) && plan.screen.is_none() => {
+            Ok(Existing::Fresh { replaces_draft: true })
+        }
+        Err(LoadError::Malformed(e)) => {
+            let code = data_error(exitcode::DATAERR, format!("{}: {e}", path.display()));
+            print_error(&format!(
+                "{} cannot be updated while it is malformed; fix it or delete it first",
+                path.display()
+            ));
+            Err(code)
+        }
+        Err(LoadError::Refused(refusal)) => {
+            let report = refuse_unread(inv, refusal, &check_options(plan));
+            print_report(&report, plan.format);
+            Err(exit_code(report.exit_code()))
+        }
+    }
+}
+
+/// The run of an update, with its snapshots required to be this build's own: a golden made from other numbers could
+/// not be read back by this build (exit 2, nothing written).
+fn read_run_for_update(plan: &Plan, saved: &str) -> Result<Run, ExitCode> {
+    match read_run_for_build(saved, Build::current()) {
+        Ok(run) => Ok(run),
+        Err(RunError::Malformed(message)) => Err(data_error(exitcode::DATAERR, message)),
+        Err(RunError::Refused(refusal)) => {
+            let build = Build::current();
+            let what = match refusal {
+                Refusal::SnapshotSchema { snapshot, .. } => {
+                    format!("schema {snapshot}, this vtee has schema {}", build.schema)
+                }
+                Refusal::SnapshotSemantics { snapshot, .. } => {
+                    format!("semantics {snapshot}, this vtee has semantics {}", build.semantics)
+                }
+                _ => refusal.reason(),
+            };
+            Err(fail(
+                2,
+                format!(
+                    "the snapshots carry {what}; {} was not written. Record with the vtee that produced them",
+                    plan.golden.display()
+                ),
+            ))
+        }
+    }
+}
+
+/// `--update` found the run unfit to record: nothing is written (design section 6.11).
+fn not_written(plan: &Plan, run: &Run) -> ExitCode {
+    let name = name_of(plan);
+    let reason = if run.problems.is_empty() { "the run produced no screens" } else { "a wait_for timed out" };
+    let mut text = format!("NOT WRITTEN {name}: {reason}; the golden was left as it was\n");
+    for problem in &run.problems {
+        text.push_str(&format!("  wait       {}\n", describe_wait(problem)));
+    }
+    let problems: Vec<String> = run
+        .problems
+        .iter()
+        .map(|p| {
+            format!(
+                "{{\"kind\":\"wait\",\"line\":{},\"text\":{},\"timeout_ms\":{}}}",
+                p.line,
+                p.text.as_deref().map_or("null".to_string(), json_str),
+                p.timeout_ms.map_or("null".to_string(), |ms| ms.to_string())
+            )
+        })
+        .collect();
+    let json = format!(
+        "{{\"golden\":{},\"result\":\"not_written\",\"reason\":{},\"run\":[{}]}}",
+        json_str(&name),
+        json_str(reason),
+        problems.join(",")
+    );
+    print_line(plan, &text, &json);
+    exit_code(1)
+}
+
+fn run_record(plan: &Plan, ctx: &Context, inv: &Invocation) -> ExitCode {
+    let existing = match load_existing(plan, inv) {
+        Ok(existing) => existing,
+        Err(code) => return code,
+    };
+    let saved = match collect(plan, ctx) {
+        Ok(saved) => saved,
+        Err(code) => return code,
+    };
+    let run = match read_run_for_update(plan, &saved) {
+        Ok(run) => run,
+        Err(code) => return code,
+    };
+    if !run.problems.is_empty() || run.screens.is_empty() {
+        return not_written(plan, &run);
+    }
+
+    let (old, old_bytes) = match &existing {
+        Existing::Golden(golden, bytes) => (Some(golden.as_ref()), Some(bytes.as_slice())),
+        Existing::Fresh { .. } => (None, None),
+    };
+    let mut update = match (plan.screen, old) {
+        (Some(n), Some(golden)) => {
+            if run.screens.len() != 1 {
+                return fail(
+                    exitcode::USAGE,
+                    format!("--screen {n} selects one screen, but the run produced {}", run.screens.len()),
+                );
+            }
+            if n == 0 || n > golden.screens.len() {
+                return fail(
+                    exitcode::USAGE,
+                    format!("--screen {n} selects one screen, but the golden has {} screens", golden.screens.len()),
+                );
+            }
+            let snapshot = &run.screens[0];
+            if golden.schema != snapshot.schema_version
+                || golden.semantics != Semantics::Number(snapshot.semantics_version)
+            {
+                return fail(
+                    2,
+                    format!(
+                        "{} was recorded under schema {} semantics {} and the run carries schema {} semantics {}; \
+                         one screen cannot be re-recorded into it. Re-record every screen with --update",
+                        plan.golden.display(),
+                        golden.schema,
+                        golden.semantics,
+                        snapshot.schema_version,
+                        snapshot.semantics_version
+                    ),
+                );
+            }
+            plan_screen(golden, n, snapshot, run.names.first().cloned().flatten())
+        }
+        _ => plan_record(old, &run, RecordOptions { portable: plan.portable }),
+    };
+    if let Existing::Fresh { replaces_draft: true } = existing {
+        update.notes.push(
+            "replaced a vtee-golden 0 draft; the masks and assertions it may have had are not carried over".to_string(),
+        );
+    }
+
+    let text = update.golden.to_text();
+    let canonical_on_disk = old_bytes == Some(text.as_bytes());
+    if update.unchanged && !canonical_on_disk {
+        update.notes.push("rewrote the file in canonical form (nothing it says changed)".to_string());
+    }
+    if !canonical_on_disk && let Err(e) = write_golden(&plan.golden, &text) {
+        return cannot_write(&plan.golden, e);
+    }
+    let name = name_of(plan);
+    print_line(plan, &update.to_text(&name), &update.to_json(&name));
+    ExitCode::SUCCESS
+}
+
+fn run_restamp(plan: &Plan, ctx: &Context, inv: &Invocation) -> ExitCode {
+    let build = Build::current();
+    let name = name_of(plan);
+    let bytes = match std::fs::read(&plan.golden) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return fail(exitcode::NOINPUT, format!("{}: no such file", plan.golden.display()));
+        }
+        Err(e) => return fail(exitcode::NOINPUT, format!("{}: {e}", plan.golden.display())),
+    };
+    let golden = match Golden::parse(&bytes) {
+        Ok(golden) => golden,
+        Err(LoadError::Malformed(e)) => {
+            return data_error(exitcode::DATAERR, format!("{}: {e}", plan.golden.display()));
+        }
+        Err(LoadError::Refused(refusal)) => {
+            let report = refuse_unread(inv, refusal, &check_options(plan));
+            print_report(&report, plan.format);
+            return exit_code(report.exit_code());
+        }
+    };
+    // A different layout needs a migration or a re-record, not a new stamp.
+    if golden.schema != build.schema {
+        let refusal = Refusal::Schema { golden: golden.schema, tool: build.schema };
+        let report = refuse_golden(&golden, inv, refusal, &check_options(plan));
+        print_report(&report, plan.format);
+        return exit_code(report.exit_code());
+    }
+    if golden.semantics == Semantics::Number(build.semantics) {
+        let text = format!("UNCHANGED {name}: semantics {} is already the number of this vtee\n", build.semantics);
+        let json =
+            format!("{{\"golden\":{},\"result\":\"unchanged\",\"semantics\":{}}}", json_str(&name), build.semantics);
+        print_line(plan, &text, &json);
+        return ExitCode::SUCCESS;
+    }
+
+    // The check, with the version numbers set aside: does the golden still say what a run produces?
+    let probe = Golden { semantics: Semantics::Number(build.semantics), ..golden.clone() };
+    let saved = match collect(plan, ctx) {
+        Ok(saved) => saved,
+        Err(code) => return code,
+    };
+    let report = match check_saved(&probe, inv, &saved, &check_options(plan)) {
+        Ok(report) => report,
+        Err(CheckError::Run(message)) => return data_error(exitcode::DATAERR, message),
+        Err(CheckError::Usage(usage)) => return fail(exitcode::USAGE, usage.to_string()),
+    };
+    match report.verdict {
+        Verdict::Refused => {
+            print_report(&report, plan.format);
+            exit_code(report.exit_code())
+        }
+        Verdict::Fail => {
+            let differences = report.comparison.as_ref().map_or(0, |c| c.total());
+            let text = format!(
+                "NOT RESTAMPED {name}: {} that would change what the golden checks; it was left as it was\n{}",
+                if differences == 1 { "1 difference".to_string() } else { format!("{differences} differences") },
+                report.to_text()
+            );
+            let json = format!(
+                "{{\"golden\":{},\"result\":\"not_restamped\",\"differences\":{differences},\"report\":{}}}",
+                json_str(&name),
+                report.to_json()
+            );
+            print_line(plan, &text, &json);
+            exit_code(1)
+        }
+        Verdict::Pass => {
+            let first = match read_run_for_update(plan, &saved) {
+                Ok(run) => run.screens.into_iter().next(),
+                Err(code) => return code,
+            };
+            let out = restamped(&golden, build.semantics, first.as_ref());
+            if let Err(e) = write_golden(&plan.golden, &out.to_text()) {
+                return cannot_write(&plan.golden, e);
+            }
+            let text = format!("RESTAMPED {name}: semantics {} -> {}\n", golden.semantics, build.semantics);
+            let from = match golden.semantics {
+                Semantics::Number(n) => n.to_string(),
+                Semantics::Unknown => "\"unknown\"".to_string(),
+            };
+            let json = format!(
+                "{{\"golden\":{},\"result\":\"restamped\",\"from\":{from},\"to\":{}}}",
+                json_str(&name),
+                build.semantics
+            );
+            print_line(plan, &text, &json);
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -536,9 +858,9 @@ mod tests {
             "VTEE_ALLOW_UPDATE" => Some("1".to_string()),
             _ => None,
         };
-        assert_eq!(plan(&update, &allowed).unwrap_err(), "--update is not available yet");
+        assert_eq!(plan(&update, &allowed).unwrap().unwrap().mode, Mode::Record);
         let empty = |name: &str| (name == "CI").then(String::new);
-        assert_eq!(plan(&update, &empty).unwrap_err(), "--update is not available yet");
+        assert_eq!(plan(&update, &empty).unwrap().unwrap().mode, Mode::Record);
         // A check is never guarded.
         assert!(plan(&base(), &ci).unwrap().is_some());
     }
