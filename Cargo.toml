@@ -1,6 +1,6 @@
 [package]
 name = "vtee"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 description = "A tee for terminal programs: watch, share, drive and test any TUI's screen."
 repository = "https://github.com/huntwj/vtee"
@@ -9,7 +9,13 @@ license = "MIT OR Apache-2.0"
 keywords = ["terminal", "pty", "tmux", "testing", "ai"]
 categories = ["command-line-utilities", "development-tools::testing"]
 rust-version = "1.89"
-publish = false
+exclude = [
+    ".github/**",
+    "docker/**",
+    "HANDOFF.md",
+    "release-plz.toml",
+    "tests/differential/oracle/**",
+]
 
 [dependencies]
 alacritty_terminal = "0.26.0"
