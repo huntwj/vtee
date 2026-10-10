@@ -14,7 +14,10 @@ are easier to review than large ones.
 ## Commit messages
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/). The message decides the next version
-number, so the prefix matters.
+number, so the prefix matters. **A pull request's title must be a Conventional Commit too**, because pull requests
+are squash-merged and the title becomes the commit on `main`. CI checks both: the type must be one of `feat`, `fix`,
+`perf`, `refactor`, `test`, `docs`, `chore`, `ci`, `style`, `build`, `revert`, and the whole header line (type, scope
+and summary) at most 100 characters (`.commitlintrc.yml`, `.github/workflows/pr-title.yml`).
 
 ```
 <type>(<optional scope>): <short summary in the imperative>
@@ -26,15 +29,18 @@ number, so the prefix matters.
 | --- | --- | --- |
 | `feat` | A new user-visible capability | Minor bump |
 | `fix` | A bug fix | Patch bump |
-| `feat!`, `fix!`, or a `BREAKING CHANGE:` footer | An incompatible change to the CLI, the JSON protocol or the library API | Major bump (see [releasing](docs/releasing.md) for how this is treated before 1.0) |
-| `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`, `style` | Everything else | No release by themselves |
+| `perf` | A performance improvement | Patch bump |
+| `feat!`, `fix!`, or a `BREAKING CHANGE:` footer | An incompatible change to the CLI, the JSON protocol or the library API | Major bump (minor while the version is `0.x`; see [releasing](docs/releasing.md)) |
+| `docs`, `test`, `refactor`, `build`, `ci`, `chore`, `style`, `revert` | Everything else | No release by themselves |
 
 Releases are cut automatically from these messages; see [docs/releasing.md](docs/releasing.md) for the exact
-rules. Write the summary so it reads well in a changelog.
+rules and the [stability policy](docs/guide/versioning.md) for what each kind of change promises. Write the summary
+so it reads well in a changelog.
 
 ## Setup
 
-You need a current stable Rust (edition 2024, so 1.85 or newer) with `rustfmt` and `clippy`:
+You need a current stable Rust, at least the version in `rust-version` in `Cargo.toml` (1.89), with `rustfmt` and
+`clippy`:
 
 ```
 rustup component add rustfmt clippy
@@ -68,38 +74,45 @@ Run the platform's whole suite with `cargo test`. Some suites only exist on one 
 | Command | Platform | What it covers |
 | --- | --- | --- |
 | `cargo test --lib --test cli --test replay` | both | Unit tests, CLI behaviour, replay against probe recordings |
+| `cargo test --test differential` | both | 80 escape-sequence cases compared with two independent emulators ([how it works](docs/development/testing.md#differential-emulator-tests)) |
 | `cargo test --test linux_sessions` | Linux | Sessions, multi-client, full-screen programs, lifecycle, stress |
 | `cargo test --test windows_conpty --test windows_behavior --test windows_sessions` | Windows | ConPTY, signals, resize, sessions over AF_UNIX |
+| `cargo test --test windows_console` | Windows | The console VT flags and that arrow keys arrive as escape sequences |
 
-Test files are gated by platform, so on the wrong platform they compile to nothing.
+Test files are gated by platform, so on the wrong platform they compile to nothing. A plain `cargo test` runs all
+of them for your platform. CI does not run `differential` or `windows_console` yet, so run them yourself when you
+touch the emulator, the snapshot or the console code.
 
 ### The Linux test image
 
-Several Linux tests drive `less` and `vim`, and one checks process cleanup through `/proc`. A Docker image with
-those tools is the easiest consistent environment, and the only way to run the Linux suite from a Windows machine.
-Build it from `docker/Dockerfile.test` if that file is present, or equivalently:
+Several Linux tests drive `less`, `vim` and `python3`, and one checks process cleanup through `/proc`. A Docker image
+with those tools is the easiest consistent environment, and the only way to run the Linux suite from a Windows
+machine. There is no Dockerfile in the repository root; the image is defined in `docker/Dockerfile.test`:
 
 ```
-FROM rust:slim
-RUN apt-get update && apt-get install -y --no-install-recommends less vim-tiny procps \
-    && rm -rf /var/lib/apt/lists/* && rustup component add clippy rustfmt
-```
-
-```
-docker build -t vtee-test .
-docker run --rm -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target vtee-test cargo test
+docker build -f docker/Dockerfile.test -t vtee-test .
+docker run --rm -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target -e VTEE_REQUIRE_TOOLS=1 vtee-test cargo test
 ```
 
 Setting `CARGO_TARGET_DIR` inside the container keeps its build output out of your checkout. Under Git Bash on
 Windows, set `MSYS_NO_PATHCONV=1` so the volume path is not rewritten, and use a path like `C:\path\to\vtee:/work`.
 
+`VTEE_REQUIRE_TOOLS=1` makes a missing `less`, `vim` or `python3` fail the test instead of printing `skipping` and
+passing. Without it, a green run in a bare image does not prove the full-screen tests ran. The image installs
+`vim-tiny`, which provides `vi` and `vim.tiny`; it has no command named `vim`.
+
 ## Continuous integration
 
-GitHub Actions runs the checks on Ubuntu and Windows for every push to `main` and every pull request. See
-[docs/development/ci.md](docs/development/ci.md). The workflow has not yet run on real runners, so expect to fix
-runner-specific problems when it first does.
+GitHub Actions runs the checks on Ubuntu and Windows for every push to `main` and every pull request: formatting,
+clippy with warnings denied, the documentation build, the fast suites on both platforms, the pty suites on both
+(with the Linux tools required), and a build on the minimum Rust version. It has run on real runners and is green.
+See [docs/development/ci.md](docs/development/ci.md). A failure that only happens on a runner is most likely a
+timing assumption; see [flakiness](docs/development/testing.md#hunting-flakiness).
 
-## Adding a test
+## Adding a feature or a test
+
+[Extending vtee](docs/development/extending.md) lists the files, tests and docs that move together when you add a
+protocol command, a snapshot field, a command-line flag or an emulation case. For tests:
 
 - Prefer the existing helpers. `tests/cli.rs` (the `unix_behavior` module) and `tests/linux_sessions.rs` have
   helpers that start a session in an isolated `TMPDIR` and wait for it. `tests/linux_sessions.rs` wraps a session
@@ -127,6 +140,7 @@ runner-specific problems when it first does.
 | `src/net.rs` | Unix sockets on both platforms |
 | `vendor/portable-pty/` | A patched copy of `portable-pty` (see its README) |
 | `tests/` | Integration tests |
+| `examples/` | Runnable examples of driving a session |
 | `docs/` | Documentation; `docs/decisions.md` is the dated record of why things are the way they are |
 
 ## Reporting problems

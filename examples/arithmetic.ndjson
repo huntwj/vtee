@@ -1,0 +1,5 @@
+{"cmd":"wait_for","text":"$ ","timeout_ms":5000}
+{"cmd":"send","text":"echo $((40+2))\r"}
+{"cmd":"wait_for","text":"42","timeout_ms":5000}
+{"cmd":"send","text":"exit 7\r"}
+{"cmd":"wait_exit","timeout_ms":5000}

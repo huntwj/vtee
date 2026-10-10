@@ -66,7 +66,10 @@ information: look at the snapshot to see what the program is actually showing.
   {"cmd":"wait_for","text":"DONE","timeout_ms":5000}
   ```
 
-  The typed line contains `DO''NE`, the output contains `DONE`.
+  The typed line contains `DO''NE`, the output contains `DONE`. The trick is for POSIX shells. In `cmd.exe` the
+  quotes are printed, so the output is `DO''NE` too and the wait would time out; there `echo DO^NE` works (`^`
+  escapes the `N`, so the typed line has `DO^NE` and the output `DONE`). In PowerShell, send `"DO"+"NE"`. Each of
+  these was run for real on Windows.
 - **Text that wraps across two lines does not match.** Keep waited-for text short, or widen the screen with
   `--cols`.
 - **Padding.** Every line in a snapshot is padded with spaces to the screen width. Trim before comparing, or match
@@ -96,10 +99,14 @@ succeeded. Ask for the code, and read it before you disconnect, since the sessio
 Use `lines` for text and `cells` when you need colour or attributes (for example, to find the highlighted menu
 entry by its `reverse` flag). `cursor` tells you where the program is waiting for input.
 
-`byte_offset` counts all output processed so far. It is how you tell whether anything has happened since an earlier
-snapshot: equal offsets mean no new output. To see that a busy program has gone quiet, take snapshots a short
-`wait_ms` apart until `byte_offset` stops changing. Prefer a `wait_for` on a marker when you can; quiet is a weak
-signal for a program that updates a clock.
+`byte_offset` counts all output processed so far. Use it to confirm freshness: if a snapshot has the same offset as
+an earlier one, nothing was drawn in between, so you are not looking at a screen from before your input took effect.
+
+Do not use "the offset stopped changing" as the signal that a program is ready. A program that updates a clock,
+a progress bar or a status line never goes quiet, and one that is busy computing may pause and then draw more. Wait
+for a condition instead: `wait_for` on text that proves the state you want, then check `byte_offset` if you need to be
+sure the snapshot is newer than your input. The design rule behind this is requirement 4 in
+[requirements](../requirements.md): synchronisation must not rely on the screen going quiet.
 
 `title` holds the window title if the program set one, a cheap way to read a program's own status line.
 
@@ -138,6 +145,19 @@ $
 ```
 
 Switch to JSON when you need cell attributes, the cursor, or the title.
+
+The other replies print as one line in text mode. These are the real forms:
+
+```
+--- exit_status running ---
+--- exit_status exited code=7 ---
+--- exit_status exited signal=Terminated ---
+--- wait_exit running timed_out=true ---
+--- wait_exit exited code=7 timed_out=false ---
+--- wait_exit exited signal=Terminated timed_out=false ---
+--- write_access acquired=true ---
+--- error: write commands aren't allowed on this connection - start the server with --writable ---
+```
 
 ## Pitfalls
 

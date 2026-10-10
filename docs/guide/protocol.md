@@ -149,7 +149,7 @@ The policy is fixed when the session starts with `--writable`. It applies to the
 
 | Policy | How to start | What it allows |
 | --- | --- | --- |
-| Read-only | no `--writable` | `snapshot`, `wait_for`, `wait_ms`. `send`, `send_key` and `resize` are errors. |
+| Read-only | no `--writable` | `snapshot`, `wait_for`, `wait_ms`, `exit_status`, `wait_exit`. `send`, `send_key` and `resize` are errors. |
 | Open | `--writable` or `--writable=open` | Everything. Any connection may write at any time, with no arbitration. |
 | Exclusive | `--writable=exclusive` | One connection at a time may write, after `acquire_write`. A human typing in the session's own terminal never loses the ability to type and does not revoke the holder. |
 | Exclusive-shared | `--writable=exclusive-shared` | As exclusive, but each keystroke from a human at the session's own terminal revokes the current holder. The holder finds out when its next write is refused and may acquire again. |

@@ -18,16 +18,17 @@ It started as a way to test TinyFugue, whose display code cannot be tested witho
 
 ## Status
 
-Pre-1.0. The core feature set works on Linux and Windows and is covered by automated tests, but the project has
-not had a release yet, the CI workflow has not run on real runners, and the interface may still change. Version
-numbers follow semantic versioning driven by commit messages: see [docs/releasing.md](docs/releasing.md).
+Pre-1.0. The core feature set works on Linux and Windows and is covered by automated tests that run in CI on
+Ubuntu and Windows runners. There has not been a release yet, and the interface may still change. Version numbers
+follow semantic versioning driven by commit messages: see [docs/releasing.md](docs/releasing.md) and the
+[stability policy](docs/guide/versioning.md).
 
 License: not yet chosen.
 
 ## Install
 
-There are no binary releases yet. Build from source with a current stable Rust toolchain (edition 2024, so Rust
-1.85 or newer):
+There are no binary releases yet. Build from source with a current stable Rust toolchain (the minimum is Rust
+1.89, set as `rust-version` in `Cargo.toml`):
 
 ```
 cargo build --release
@@ -37,22 +38,26 @@ The binary is `target/release/vtee` (`vtee.exe` on Windows).
 
 ## Quick start
 
-Start a session that an agent will drive (no human terminal, JSON socket open for writing):
+Start a session that an agent will drive (no human terminal, JSON socket open for writing). The `--env` gives
+the shell a short fixed prompt, which makes the screen small and easy to wait on:
 
 ```
-vtee --headless --name demo --writable -- bash --norc
+vtee --headless --name demo --writable --env PS1='$ ' -- bash --norc
 ```
 
-From another shell, list it, read the screen, and type into it:
+From another shell, list it and read the screen (the 23 blank screen lines after the prompt are left out):
 
 ```
 $ vtee ls
-demo	pid=2221	live
+demo	pid=23	live
 
 $ echo '{"cmd":"snapshot"}' | vtee --connect "${TMPDIR:-/tmp}/vtee-$(id -u)/demo.sock" --text
 --- snapshot (byte_offset=2) ---
 $
 ```
+
+To type into it, send `send` and `wait_for` commands on the same socket; the
+[agents guide](docs/guide/agents.md) shows the loop and its traps.
 
 Attach a terminal to the same session (closing the window detaches; the session keeps running):
 
@@ -67,8 +72,9 @@ vtee kill demo
 ```
 
 To run a program with your own terminal as usual while still exposing it to other tools, leave out `--headless`:
-`vtee -- vim notes.txt`. To drive a program from a script file without any interactive session, use
-`--script`. See [Getting started](docs/guide/getting-started.md).
+`vtee -- vi notes.txt` on Linux, or `vtee -- powershell` on Windows (any program works). To drive a program
+from a script file without any interactive session, use `--script`. See
+[Getting started](docs/guide/getting-started.md).
 
 ## Platforms
 
@@ -93,12 +99,19 @@ The roadmap has the full list: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
 
-- User guide: [getting started](docs/guide/getting-started.md), [CLI reference](docs/guide/cli-reference.md),
-  [sessions](docs/guide/sessions.md), [JSON protocol](docs/guide/protocol.md),
-  [driving a session as an AI agent](docs/guide/agents.md), [Windows](docs/guide/windows.md),
-  [security](docs/guide/security.md) (and [SECURITY.md](SECURITY.md) for reporting),
-  [troubleshooting](docs/guide/troubleshooting.md).
-- Development: [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
-  [testing](docs/development/testing.md), [CI](docs/development/ci.md),
-  [platform internals](docs/development/internals.md).
+Start where your use is:
+
+- **I run a TUI and want an AI (or a colleague) to watch or help:**
+  [getting started](docs/guide/getting-started.md), [sessions](docs/guide/sessions.md) (naming, attach, detach,
+  several clients), [driving a session as an AI agent](docs/guide/agents.md),
+  [Windows](docs/guide/windows.md), [security](docs/guide/security.md) (and [SECURITY.md](SECURITY.md) for
+  reporting), [troubleshooting](docs/guide/troubleshooting.md).
+- **I write a TUI and want a test harness:** [testing TUIs](docs/guide/testing-tuis.md) (a determinism and test
+  recipe), [JSON protocol](docs/guide/protocol.md) (every command and the snapshot format),
+  [CLI reference](docs/guide/cli-reference.md), runnable [examples](examples/README.md) in Python, shell and
+  PowerShell, [versioning and stability](docs/guide/versioning.md).
+- **I want to contribute:** [CONTRIBUTING.md](CONTRIBUTING.md), [extending vtee](docs/development/extending.md),
+  [architecture](docs/architecture.md), [testing](docs/development/testing.md), [CI](docs/development/ci.md),
+  [platform internals](docs/development/internals.md), [releasing](docs/releasing.md).
+- **Questions and terms:** [FAQ and glossary](docs/guide/faq.md).
 - History: [decisions](docs/decisions.md), [requirements](docs/requirements.md), [roadmap](docs/roadmap.md).

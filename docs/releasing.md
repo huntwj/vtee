@@ -2,7 +2,11 @@
 
 Versions, `CHANGELOG.md`, git tags and GitHub Releases are generated from [Conventional Commits](https://www.conventionalcommits.org/)
 on `main` by [release-plz](https://release-plz.dev/). Nothing is published to crates.io (`publish = false`).
-The workflows have not run on GitHub yet; treat the first release as the test of this setup.
+Status: the `CI` workflow has run on GitHub and is green. The `Release` workflow has run once, on a push to `main`:
+it failed at the step that opens the release PR with "GitHub Actions is not permitted to create or approve pull
+requests", which is the repository setting in the [checklist](#one-time-repository-setup-maintainer-checklist) below.
+The rest of the release path (the pull request itself, the tag, the GitHub Release and the binary archives) has not
+run yet; treat the first release as the test of it.
 
 ## How the version is computed
 
