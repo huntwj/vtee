@@ -1,0 +1,9 @@
+# The reported vocabulary at semantics 1 (design section 3.8), measured from the emulator.
+# A name that appears or disappears is a SEMANTICS_VERSION bump; see tests/conformance.rs.
+cell-fields: bg bold ch conceal dim fg hyperlink italic reverse strike underline underline_color
+colour-forms: default idx:0..255 rgb:#rrggbb
+cursor-fields: col hidden row shape
+cursor-shapes: bar block underline
+modes: ?1 ?1000 ?1002 ?1003 ?1005 ?1006 ?2004 DECKPAM
+snapshot-fields: alt_screen byte_offset cells cols cursor lines modes producer rows schema_version scrollback semantics_version title wrapped_rows
+underline-values: curly dashed dotted double single

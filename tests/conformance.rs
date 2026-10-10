@@ -188,3 +188,163 @@ fn the_width_sample_is_what_the_emulator_measures() {
         wrong.iter().take(20).cloned().collect::<Vec<_>>().join("\n  ")
     );
 }
+
+// ---- the reported vocabulary ---------------------------------------------------------------------------------
+
+/// Everything a snapshot can report, measured from the real emulator rather than listed by hand: the field names,
+/// the mode tokens, the attribute names, the values of the enumerations and the colour forms. A new name is a
+/// `SEMANTICS_VERSION` bump (design section 4.1), because it changes what a stored golden finds. The frozen list is
+/// `tests/fixtures/conformance/vocabulary.txt`; a name that appears or disappears fails the test.
+mod vocabulary {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    struct Prober {
+        dir: PathBuf,
+    }
+
+    impl Prober {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("vtee-vocabulary-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            Prober { dir }
+        }
+
+        /// The snapshot of a 10 by 2 screen after `input`, as the JSON a client would see.
+        fn json(&self, input: &str) -> Value {
+            serde_json::to_value(run_vtee(&self.dir, "probe", 10, 2, input)).unwrap()
+        }
+    }
+
+    impl Drop for Prober {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn keys(v: &Value) -> BTreeSet<String> {
+        v.as_object().unwrap().keys().cloned().collect()
+    }
+
+    /// Private modes by number, then names alphabetically: the order `modes` is written in.
+    fn mode_order(token: &str) -> (bool, u32, String) {
+        match token.strip_prefix('?').and_then(|n| n.parse::<u32>().ok()) {
+            Some(n) => (false, n, String::new()),
+            None => (true, 0, token.to_string()),
+        }
+    }
+
+    pub fn measure() -> BTreeMap<&'static str, Vec<String>> {
+        let p = Prober::new();
+        let base = p.json("");
+        let mut cell_fields = BTreeSet::new();
+        let mut colours = BTreeSet::new();
+        let mut underline = BTreeSet::new();
+        let mut shapes = BTreeSet::new();
+        let mut modes = BTreeSet::new();
+        let mut idx_range: Option<(u32, u32)> = None;
+
+        let mut note_cells = |snap: &Value| {
+            for row in snap["cells"].as_array().unwrap() {
+                for cell in row.as_array().unwrap() {
+                    let cell = cell.as_object().unwrap();
+                    cell_fields.extend(cell.keys().cloned());
+                    for key in ["fg", "bg", "underline_color"] {
+                        if let Some(c) = cell.get(key).and_then(Value::as_str) {
+                            let kind = match c.split_once(':') {
+                                Some(("idx", n)) => {
+                                    let n: u32 = n.parse().unwrap();
+                                    let (lo, hi) = idx_range.unwrap_or((n, n));
+                                    idx_range = Some((lo.min(n), hi.max(n)));
+                                    "idx".to_string()
+                                }
+                                Some(("rgb", _)) => "rgb:#rrggbb".to_string(),
+                                _ => c.to_string(),
+                            };
+                            colours.insert(kind);
+                        }
+                    }
+                    if let Some(u) = cell.get("underline").and_then(Value::as_str) {
+                        underline.insert(u.to_string());
+                    }
+                }
+            }
+        };
+
+        // Every SGR parameter on its own, the colour forms, the underline sub-parameters and a hyperlink.
+        for n in 0..=110 {
+            note_cells(&p.json(&format!("\x1b[{n}mX")));
+        }
+        for n in 0..=255 {
+            note_cells(&p.json(&format!("\x1b[38;5;{n}m\x1b[48;5;{n}m\x1b[58;5;{n}m\x1b[4mX")));
+        }
+        for sgr in
+            ["38;2;1;2;3", "48;2;250;251;252", "58;2;9;8;7", "4:0", "4:1", "4:2", "4:3", "4:4", "4:5", "4:9", "21"]
+        {
+            note_cells(&p.json(&format!("\x1b[{sgr}mX")));
+        }
+        note_cells(&p.json("\x1b]8;;http://example.com\x07X\x1b]8;;\x07"));
+
+        for n in 0..=9 {
+            let cursor = &p.json(&format!("\x1b[{n} q"))["cursor"];
+            shapes.insert(cursor["shape"].as_str().unwrap().to_string());
+        }
+        let mut tokens = |input: &str| {
+            for m in p.json(input)["modes"].as_array().unwrap() {
+                modes.insert(m.as_str().unwrap().to_string());
+            }
+        };
+        tokens("\x1b=");
+        tokens("\x1b>");
+        for n in (1..=1100).chain(2000..=2100) {
+            tokens(&format!("\x1b[?{n}h"));
+        }
+
+        let mut out = BTreeMap::new();
+        out.insert("snapshot-fields", keys(&base).into_iter().collect());
+        out.insert("cursor-fields", keys(&base["cursor"]).into_iter().collect());
+        out.insert("cell-fields", cell_fields.into_iter().collect());
+        let mut modes: Vec<String> = modes.into_iter().collect();
+        modes.sort_by_key(|token| mode_order(token));
+        out.insert("modes", modes);
+        out.insert("underline-values", underline.into_iter().filter(|u| u != "none").collect());
+        out.insert("cursor-shapes", shapes.into_iter().collect());
+        // A default colour is never written (an absent field is the default), so it is listed unconditionally.
+        colours.insert("default".to_string());
+        let mut forms: Vec<String> = colours.into_iter().filter(|c| c != "idx").collect();
+        let (lo, hi) = idx_range.expect("no indexed colour was reported");
+        forms.push(format!("idx:{lo}..{hi}"));
+        forms.sort();
+        out.insert("colour-forms", forms);
+        out
+    }
+
+    pub fn render(measured: &BTreeMap<&'static str, Vec<String>>) -> String {
+        let mut text = String::from(
+            "# The reported vocabulary at semantics 1 (design section 3.8), measured from the emulator.\n\
+             # A name that appears or disappears is a SEMANTICS_VERSION bump; see tests/conformance.rs.\n",
+        );
+        for (kind, names) in measured {
+            text.push_str(&format!("{kind}: {}\n", names.join(" ")));
+        }
+        text
+    }
+}
+
+#[test]
+fn the_reported_vocabulary_has_not_changed() {
+    let measured = vocabulary::measure();
+    let text = vocabulary::render(&measured);
+    let path = root().join("conformance/vocabulary.txt");
+    if blessing() {
+        fs::write(&path, &text).unwrap();
+        return;
+    }
+    let frozen = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).replace("\r\n", "\n");
+    assert!(
+        frozen == text,
+        "the reported vocabulary changed. A new or removed name changes what a stored golden finds, so it is a \
+         semantics change: bump SEMANTICS_VERSION, add an entry to docs/guide/snapshot-semantics.md, regenerate with \
+         VTEE_BLESS_CONFORMANCE=1 and commit with the `snapshot` scope.\n--- frozen\n{frozen}--- measured\n{text}"
+    );
+}
