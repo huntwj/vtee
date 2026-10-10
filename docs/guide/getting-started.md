@@ -101,7 +101,7 @@ cannot count on that. See [choosing what to wait for](agents.md#choosing-what-to
 Without `--text` each result is one JSON line. The last line is the final snapshot; its start was:
 
 ```
-{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":47,"cols":80,"rows":24,"lines":["$ echo hello from vtee                                                        ","hello from vtee                                                               ", ...
+{"cmd":"snapshot","snapshot":{"schema_version":1,"semantics_version":1,"byte_offset":47,"cols":80,"rows":24,"lines":["$ echo hello from vtee                                                        ","hello from vtee                                                               ", ...
 ```
 
 Every line in `lines` is padded with spaces to the screen width.

@@ -206,7 +206,7 @@ There are two version numbers, and both are required.
 - `semantics_version` is the **meaning**: what a cell, a mode or a position denotes for given program output, and
   which names are reported at all. An emulation fix, an emulator upgrade, or a newly reported mode, attribute or
   attribute value changes it, because any of those can change what a stored comparison finds. Every change is
-  recorded in the semantics changelog. It starts at `1`.
+  recorded in the [semantics changelog](snapshot-semantics.md). It starts at `1`.
 
 A snapshot without either number is refused: there is no unnumbered form. That includes every snapshot written
 before 0.1.0, which has no `semantics_version` and an older cell layout; those are not supported.

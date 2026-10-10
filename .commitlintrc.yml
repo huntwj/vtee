@@ -5,3 +5,6 @@ rules:
   header-max-length: [2, always, 100]
   body-max-line-length: [0]
   footer-max-line-length: [0]
+  # Scopes in use. `snapshot` is reserved for changes to what a snapshot reports or means (docs/guide/versioning.md);
+  # it is what puts a commit under "Snapshot output changes" in the changelog. Other scopes are allowed, with a warning.
+  scope-enum: [1, always, [snapshot, session, windows, wait_for, probe, design]]

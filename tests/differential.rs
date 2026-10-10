@@ -17,6 +17,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use vtee::{Color, Snapshot, UnderlineStyle};
 
+mod common;
+#[cfg(unix)]
+use common::run_vtee_resized;
+use common::{decode, run_vtee};
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/differential")
 }
@@ -25,29 +30,6 @@ fn load(name: &str) -> Value {
     let path = fixtures().join(name);
     serde_json::from_str(&fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// `\e` is ESC and `\\` is a backslash; the JSON already carries CR, LF and BEL. The oracle
-/// generator has the same function.
-fn decode(input: &str) -> String {
-    let mut out = String::new();
-    let mut chars = input.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('e') => out.push('\x1b'),
-                Some('\\') => out.push('\\'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// One cell's attributes in the fixture vocabulary: colours as `default`, `idx:N`, `rgb:R,G,B`; flags
@@ -194,40 +176,6 @@ fn first_difference(a: &Screen, a_name: &str, b: &Screen, b_name: &str) -> Optio
         return Some(format!("cursor (row, col, hidden): {a_name}={:?} {b_name}={:?}", a.cursor, b.cursor));
     }
     None
-}
-
-fn run_vtee(dir: &Path, name: &str, cols: u16, rows: u16, input: &str) -> Snapshot {
-    let path = dir.join(format!("{name}.cast"));
-    let header = format!("{{\"version\":2,\"width\":{cols},\"height\":{rows}}}");
-    let event = serde_json::json!([0.0, "o", input]);
-    fs::write(&path, format!("{header}\n{event}\n")).unwrap();
-    vtee::replay(&path, cols, rows).unwrap_or_else(|e| panic!("{name}: replay failed: {e}"))
-}
-
-/// Live resize needs a running pty (replay has no resize event), so these cases go through `Tap`,
-/// on Unix only. The child prints the case input byte for byte (`stty -onlcr` keeps the pty from
-/// rewriting newlines), the test waits until every byte has been seen, then resizes.
-#[cfg(unix)]
-fn run_vtee_resized(cols: u16, rows: u16, input: &str, resize: (u16, u16)) -> Snapshot {
-    use std::time::{Duration, Instant};
-    let octal: String = input.bytes().map(|b| format!("\\0{b:03o}")).collect();
-    let script = format!("stty -onlcr; printf '%b' '{octal}'; sleep 30");
-    let opts = vtee::SpawnOptions { cols, rows, log_path: None, forward_input: false, forward_output: false, env: &[] };
-    let tap = vtee::Tap::spawn("sh", &["-c".to_string(), script], opts).expect("spawn sh");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while tap.bytes_seen() < input.len() as u64 {
-        assert!(
-            Instant::now() < deadline,
-            "child output never arrived ({} of {} bytes)",
-            tap.bytes_seen(),
-            input.len()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    tap.resize(resize.0, resize.1).expect("resize");
-    let snap = tap.snapshot();
-    tap.kill();
-    snap
 }
 
 /// Checks that only vtee can answer: title, hyperlinks, cursor shape.

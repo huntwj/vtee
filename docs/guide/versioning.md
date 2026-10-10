@@ -26,26 +26,46 @@ in [releasing](../releasing.md). Every release gets a changelog entry generated 
 | --- | --- | --- |
 | **Command line**: flags, subcommands, exit codes | May change in any minor release. A change is announced in the changelog and marked breaking in the commit. | Semantic versioning. |
 | **JSON protocol**: commands and replies | Additive changes (a new command, a new field in a reply) keep old clients working if they ignore fields they do not know. Renaming or removing a command or field, or changing what it means, is a breaking change. | Semantic versioning. |
-| **Snapshot schema** | The `schema_version` field says which layout you have. See below. | Semantic versioning, with `schema_version` as the contract. |
+| **Snapshot** | `schema_version` says which layout you have and `semantics_version` what it means. See below. | Semantic versioning, with both numbers as the contract. |
 | **Rust library** (`vtee`) | No stability promise. The crate is `publish = false`, so it is not on crates.io; depend on it by git revision. Any release may change it. | To be decided before 1.0. |
 | **Session files and the config file** | Internal. Do not parse `<name>.pid` or the socket paths yourself; use `vtee ls` and the CLI. The config file is read only for the options documented in [Sessions](sessions.md). | Same. |
 
-## The snapshot schema
+## The snapshot: two numbers
 
-A snapshot carries `schema_version`, currently `1`. It changes only when an existing field is renamed, removed or
-changes meaning. Adding a field never changes it, so write readers that ignore fields they do not know. If you
-store snapshots or expected screens, store the version with them; when a snapshot arrives with a higher number
-than the one you recorded, regenerate and review instead of trusting a comparison across versions. The field list
-and the fields added so far are in the [protocol reference](protocol.md#schema-versioning).
+A snapshot carries two version numbers, `schema_version` and `semantics_version`, both required and both first in
+the JSON. Each answers a different question.
 
-A fix to wrong output is not a schema change. For example, tab-stop cells used to contain a literal TAB character
-and now contain a space; the layout is the same, so `schema_version` stayed at `1`. Such fixes appear in the
-changelog as `fix`. If you recorded a screen before a fix, you may need to record it again.
+| Number | Question | Changes when |
+| --- | --- | --- |
+| `schema_version` (currently `1`) | Can I read this JSON? | A field is renamed, removed or changes type. Adding an optional field never changes it, so write readers that ignore fields they do not know. |
+| `semantics_version` (currently `1`) | Does it mean what I recorded? | What a cell, mode or position denotes for given program output changes, or a name is reported that was not before. |
+
+A fix to wrong output changes the meaning but not the layout. For example, if tab-stop cells used to contain a
+literal TAB and now contain a space, the layout is the same and `semantics_version` goes up. So does upgrading the
+terminal emulator when it changes any frozen output, and so does reporting a new mode, attribute or attribute value:
+a stored screen compared against the new build could find something it did not find before. If you store snapshots or
+expected screens, store both numbers with them. When either differs from the one you recorded, regenerate and review
+instead of trusting a comparison across versions. Snapshots recorded before 0.1.0 have no `semantics_version` and an
+older cell layout; they are not supported.
+
+Each change to `semantics_version` is an entry in the [snapshot semantics changelog](snapshot-semantics.md), and the
+commit that makes it has the `snapshot` scope (`fix(snapshot): ...`, or `feat(snapshot): ...`), which puts it under
+"Snapshot output changes" in the release changelog. The field list and the layout are in the
+[protocol reference](protocol.md#schema-versioning).
+
+### What is frozen
+
+`tests/fixtures/conformance/` holds what 0.1.0 promises: vtee's own snapshot for each of the 80 escape-sequence cases,
+the width of 1,062 sample scalars, and the list of every field, mode, attribute and value a snapshot can report.
+Behaviour that none of them exercises is not promised. When output that matters turns out to be uncovered, a case is
+added and from then on it is frozen; adding a case or a scalar is not a version bump, changing or removing one is.
+Tests fail if any of it changes without `SEMANTICS_VERSION` going up; see
+[Conformance tests](../development/testing.md#conformance-tests).
 
 ## Pinning
 
 Until there are releases, pin a commit: build that revision from source, and name it in your test configuration.
-Once releases exist, pin the tag (`v0.1.0` and so on). Either way, keep the pinned version and `schema_version`
+Once releases exist, pin the tag (`v0.1.0` and so on). Either way, keep the pinned version and both snapshot version numbers
 next to anything you store.
 
 ## Platforms and toolchain

@@ -9,14 +9,15 @@ Counts and timings are from a run on 2026-10-09 and will drift. Windows timings 
 
 | Suite | Platform | Tests | Time | What it covers |
 | --- | --- | --- | --- | --- |
-| Unit tests in `src/` | both | 37 | under 1 s | Named-key tables (`keys.rs`), write-policy authorization (`command.rs`), snapshot fields, colour mapping, TAB cells and the redraw round trip (`snapshot.rs`), session-record parsing |
-| `tests/cli.rs` | both (some Unix-only) | 44 on Linux, 16 on Windows | about 1 s | Flag parsing and conflicts, exit codes, the session directory and its permissions, duplicate and invalid session names, `ls` and `kill`, `--attach-if-exists`, script-mode terminal queries, hostile input to the JSON socket, a stalled attach client |
+| Unit tests in `src/` | both | about 70 | under 1 s | Named-key tables (`keys.rs`), write-policy authorization (`command.rs`), snapshot fields, colour mapping, TAB cells and the redraw round trip (`snapshot.rs`), session-record parsing |
+| `tests/cli.rs` | both (some Unix-only) | 54 on Linux, 21 on Windows | about 1 s | Flag parsing and conflicts, exit codes, the session directory and its permissions, duplicate and invalid session names, `ls` and `kill`, `--attach-if-exists`, script-mode terminal queries, hostile input to the JSON socket, a stalled attach client |
 | `tests/replay.rs` | both | 1 | about 9 s on Windows | Replays 15 recorded byte streams into the emulator and compares the result with the live snapshot, byte for byte |
 | `tests/linux_sessions.rs` | Linux | 23 | about 6 s | Terminal-query replies with and without an attach client, many clients of both kinds, exclusive-write handoff, `less` and `vim` using the alternate screen and repainting on resize, `kill`/`SIGTERM`/`SIGKILL` lifecycle and orphan checks, attach and detach during a flood, garbage input, random escape-sequence input |
 | `tests/windows_conpty.rs` | Windows | 2 | about 1 s | A real ConPTY playing the terminal for `vtee.exe`: interactive completion, and script mode answering ConPTY's startup query |
 | `tests/windows_behavior.rs` | Windows | 16 | about 57 s | Size overrides and live resize, Ctrl-C, force-kill outcome, exit codes, `more`, Edit, `vim`/`less`, 20 repeated script runs, multi-line paste, output floods |
 | `tests/windows_sessions.rs` | Windows | 18 | about 21 s | Sessions, `ls`, `kill`, duplicate names, both sockets, two clients, stale-file cleanup, and that the child does not inherit socket handles |
 | `tests/differential.rs` | both (4 resize cases Unix-only) | 1 test over 80 cases | under 1 s | Runs each escape-sequence case through vtee's emulator and compares every cell with two independent emulators; see [Differential emulator tests](#differential-emulator-tests) |
+| `tests/conformance.rs` | both (4 resize cases Unix-only) | 6, plus the ignored `bless` step on Unix | about 3 s | Whether vtee's own output moved: its snapshot for each of the 80 cases, the width sample, the reported vocabulary, the manifest that guards the files and the semantics changelog; see [Conformance tests](#conformance-tests) |
 | `tests/windows_console.rs` | Windows | 2 | under 1 s | The console VT flags `RawModeGuard` sets and restores, and that an Up-arrow reaches the program as `ESC [ A` |
 
 The CLI tests run the real binary through `assert_cmd` and check what a user sees (exit code, output, files), not
@@ -142,6 +143,32 @@ and kitty do, where xterm truncates.
    majority.
 4. Add an entry to `adjudications.json` with `verdict`, `reason` and the `problems` list from the report. A case
    where all three agree needs no entry.
+
+## Conformance tests
+
+The differential tests ask whether vtee is right. `tests/conformance.rs` asks whether vtee **changed**, because a
+stored golden depends on what a snapshot means, not only on how it is laid out. Everything it checks is frozen data in
+`tests/fixtures/conformance/`, and changing any of it is a `SEMANTICS_VERSION` bump ([versioning](../guide/versioning.md)):
+
+| Data | What fails when it changes |
+| --- | --- |
+| `expected/<case>.json`, one per differential case | vtee's snapshot for that input (without `byte_offset` and `producer`), compared as parsed values. |
+| `width-sample.txt` | The width of 1,062 scalars. The test writes one row per scalar through the real emulator and reads the column of the following character; an upgrade of `unicode-width`, `vte` or `alacritty_terminal` that moves a width fails here. |
+| `vocabulary.txt` | Every field, mode token, attribute, underline value, cursor shape and colour form a snapshot can report, measured from the emulator (each SGR parameter, every indexed colour, the cursor styles, 1,200 private modes, a hyperlink). A new or removed name fails. |
+| `MANIFEST` | The `SEMANTICS_VERSION` the files were written under and a hash of each one (each width-sample line on its own). It is what notices a file that changed, was deleted or was added. |
+
+Adding a case or a width-sample line is not a bump; changing or removing one is. A failure prints what to do. After
+adding a case, or after a deliberate change with `SEMANTICS_VERSION` bumped and an entry added to
+[snapshot semantics](../guide/snapshot-semantics.md), regenerate on Linux (Docker works), because only there do the
+resize cases run:
+
+```
+cargo test --test conformance -- --ignored bless
+```
+
+`bless` rewrites the expected files, the vocabulary and the manifest. It refuses to change a file the manifest records
+while `SEMANTICS_VERSION` is unchanged, so the bump cannot be skipped by regenerating. Review the diff of the fixtures
+like any other: it is the change in meaning you are about to ship. Commit it with the `snapshot` scope.
 
 ## Reading a failure
 
