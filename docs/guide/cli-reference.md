@@ -177,7 +177,7 @@ runs to completion, `vtee` exits with the program's own exit status (low 8 bits)
 | --- | --- | --- |
 | 0 | OK | Success, or the program exited 0. |
 | 64 | USAGE | Bad flags, no program given (`a command is required`), `--cols` or `--rows` outside 1 to 1000, duplicate session name, `attach` with no live session, `attach` without a terminal. |
-| 65 | DATAERR | `--script` line that is not a valid command, a script `send_key` with an unknown key, or a `replay` file that is not an asciicast v2 recording. |
+| 65 | DATAERR | `--script` line that is not a valid command, a `--connect` input line the session could not parse, a script `send_key` with an unknown key, or a `replay` file that is not an asciicast v2 recording. |
 | 66 | NOINPUT | `--script` file or `replay` file could not be opened. |
 | 68 | NOHOST | `kill` or `attach` for a session that does not exist (or whose name cannot be a session), `--connect` to a socket that is not there. |
 | 70 | SOFTWARE | A script command failed while running, or its result could not be serialised. |
@@ -185,7 +185,8 @@ runs to completion, `vtee` exits with the program's own exit status (low 8 bits)
 | 74 | IOERR | A script file could not be read. |
 
 A write that is refused on a connection (for example `send` on a read-only socket) is not an exit code: the error
-comes back as a result line and `--connect` still exits 0. See [error messages](protocol.md#errors).
+comes back as a result line and `--connect` still exits 0. Only a line the session could not parse at all (not
+valid JSON, or an unknown command) makes `--connect` exit 65. See [error messages](protocol.md#errors).
 
 ## Environment
 

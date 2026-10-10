@@ -349,6 +349,39 @@ fn connect_returns_a_snapshot_of_the_live_session() {
     assert!(text.contains("\"matched\":true"), "wait_for output: {text}");
 }
 
+/// Windows PowerShell 5.1 can send the UTF-8 byte order mark twice; and a line the server cannot
+/// parse must make `--connect` exit non-zero (65, DATAERR) instead of looking like success.
+#[test]
+fn connect_strips_a_doubled_mark_and_fails_on_unparseable_input() {
+    let _guard = serial();
+    let env = Env::new();
+    let _holder = Holder::start(&env, "bom2");
+    let sock = env.sock("bom2");
+    let run = |input: &[u8]| {
+        let mut child = env
+            .cmd()
+            .args(["--connect"])
+            .arg(&sock)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input).unwrap();
+        drop(stdin);
+        child.wait_with_output().unwrap()
+    };
+
+    let out = run(b"\xef\xbb\xbf\xef\xbb\xbf{\"cmd\":\"wait_for\",\"text\":\"ready?\",\"timeout_ms\":15000}\n");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains("\"matched\":true"), "doubled mark: {text}");
+
+    let out = run(b"this is not json\n");
+    assert_eq!(out.status.code(), Some(65), "unparseable input must exit DATAERR");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("bad command"));
+}
+
 #[test]
 fn a_raw_tty_client_gets_a_redraw_sees_live_output_and_can_type() {
     let _guard = serial();

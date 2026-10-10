@@ -760,3 +760,27 @@ SID. The accept loop refuses a SID that is neither this user's nor SYSTEM (`S-1-
   refusing would break every connection on such a system. A peer whose process or token cannot be opened is refused.
 - Not testable here: a connection from a second user account, and from a process running elevated as the same user
   (expected to be allowed; unverified). The decision itself (same SID or SYSTEM) is unit-tested with byte-string SIDs.
+
+## 2026-10-10: a slow attached terminal is resynchronised, not dropped
+
+**Found:** `a_stalled_tty_client_does_not_block_other_clients_or_snapshots` timed out once on a hosted Ubuntu
+runner while waiting for the healthy client to receive 4 MiB. Cause, measured: each attached terminal had a
+bounded channel of 256 chunks (about 2 MiB) and the output thread used `try_send`; a full channel meant the sink was
+dropped for good. A client that was merely not scheduled for a moment under a fast producer (`yes` writes faster
+than the emulator parses) filled its channel and was cut off. Worse, its socket stayed open, so it simply never
+received anything again: a frozen screen with no error. Reproduced two ways: a client that reads nothing for
+1.5 s under a flood never receives more than about 2.3 MiB afterwards (new test
+`a_client_that_is_slow_for_a_while_keeps_receiving_afterwards` fails on the old code, in 11 s), and the whole `cli`
+suite run 25 times on one CPU with four busy loops failed the stall test 5 times (20%); with the fix it failed once
+in 90 such runs (the one failure was not captured; it is likely the 10 s wait starving, which now has 30 s).
+
+**Decision:** keep the guarantee that no client can block the session, but replace "drop" with "resynchronise".
+Each sink has a queue bounded in bytes (2 MiB, or twice the size of one redraw on a very large screen). When a
+push would pass the limit, the whole backlog is replaced by one redraw of the current screen, built under the same
+lock that applied the chunk, so the client skips the output in between and continues from a correct picture. A
+client that never reads costs at most the limit in memory, and the redraw is rebuilt only when the limit is hit.
+A sink is removed only when its writer thread has exited (a write failed or the client disconnected).
+
+**Not changed:** the original guarantee. The stall test still fails (after 10 s) if the producer is made to wait
+for a full queue, checked by temporarily doing exactly that in a scratch copy. The cost of resynchronising is the
+lines that scrolled by during the gap, which that client does not see; every other client and the emulator do.

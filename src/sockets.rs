@@ -2,17 +2,13 @@
 
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
 use std::thread;
 
 use crate::net::{UnixListener, UnixStream, bind_private, peer_is_trusted};
-use crate::tap::LockExt;
+use crate::tap::{LockExt, SinkQueue};
 use crate::{Command, CommandResult, HumanPriority, ServeOptions, Tap, WritePolicy, snapshot};
-
-/// Chunks, not bytes: at the 8 KiB read size `forward_output` uses, this bounds a stalled sink
-/// to ~2 MiB of buffered output before it is dropped rather than allowed to block everyone.
-const TTY_SINK_QUEUE_CAPACITY: usize = 256;
 
 /// One NDJSON command line; a client that never sends a newline would otherwise grow the
 /// holder's memory without bound.
@@ -87,28 +83,35 @@ fn accept_loop(
 impl Tap {
     /// Queues a redraw of the current screen and registers the sink for every later chunk, both
     /// under the lock `forward_output` holds while applying and broadcasting a chunk. The redraw
-    /// is the first item in a fresh channel, so it always precedes live output. The blocking
-    /// writes happen on a dedicated thread, never under that lock.
+    /// is the first item in a fresh queue, so it always precedes live output. The blocking
+    /// writes happen on a dedicated thread, never under that lock; a client that falls behind is
+    /// resynchronised with a redraw (`SinkQueue`).
     fn attach_tty_sink(&self, id: u64, sink: Box<dyn Write + Send>) {
-        let (tx, rx) = mpsc::sync_channel::<Arc<[u8]>>(TTY_SINK_QUEUE_CAPACITY);
-        {
+        let queue = {
             let mut state = self.shared.state.lock_unpoisoned();
             let snap = snapshot::build(&state.term, state.bytes_seen, self.title.current_title());
-            let _ = tx.try_send(snapshot::redraw_sequence(&snap).into());
-            state.tty_sinks.push((id, tx));
-        }
+            let queue = SinkQueue::new(snapshot::redraw_sequence(&snap));
+            state.tty_sinks.push((id, queue.clone()));
+            queue
+        };
         thread::spawn(move || {
             let mut sink = sink;
-            for chunk in rx {
+            while let Some(chunk) = queue.pop() {
                 if sink.write_all(&chunk).is_err() || sink.flush().is_err() {
                     break;
                 }
             }
+            queue.close();
         });
     }
 
     fn detach_tty_sink(&self, id: u64) {
-        self.shared.state.lock_unpoisoned().tty_sinks.retain(|(sink_id, _)| *sink_id != id);
+        self.shared.state.lock_unpoisoned().tty_sinks.retain(|(sink_id, queue)| {
+            if *sink_id == id {
+                queue.close();
+            }
+            *sink_id != id
+        });
     }
 }
 
@@ -168,6 +171,9 @@ fn serve_connection(tap: &Tap, stream: UnixStream, opts: ServeOptions) {
 /// Parses, authorizes and executes one command line; `None` means there is nothing to report.
 fn handle_line(tap: &Tap, id: u64, opts: ServeOptions, line: &str) -> Option<CommandResult> {
     let error = |message: String| Some(CommandResult::Error { message });
+    // A client that is not `vtee --connect` (PowerShell 5.1 writing straight to the socket)
+    // may still start its first line with byte order marks.
+    let line = line.trim_start_matches('\u{feff}');
     let cmd = match serde_json::from_str::<Command>(line) {
         Ok(cmd) => cmd,
         Err(e) => return error(format!("bad command: {e}")),

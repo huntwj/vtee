@@ -126,9 +126,9 @@ for those. Insert, Delete and `Shift-` combinations do not exist yet either.
 {"cmd":"resize","cols":100,"rows":30}
 ```
 
-Changes the terminal size seen by the program and by the emulator together. No reply. Each side must be between 1
-and 1000; `0` is raised to `1`, and anything over 1000 is an error. The same 1 to 1000 range applies to `--cols`
-and `--rows` at startup, where a value outside it (including `0`) is refused with exit status 64 instead.
+Changes the terminal size seen by the program and by the emulator together. No reply on success. Each side must be between 1
+and 1000. A `0` or anything over 1000 is refused with an error reply and nothing changes. The same 1 to 1000 range
+applies to `--cols` and `--rows` at startup, where a value outside it is refused with exit status 64 instead.
 
 A resize is also refused whenever a real terminal controls the size (an interactive session with a terminal on
 stdin; see [Sessions](sessions.md)), because a remote resize would fight with the terminal's own.
@@ -255,6 +255,7 @@ Messages you will see:
 | `acquire_write/release_write only mean something under the exclusive write policy` | Used without `--writable=exclusive` or `exclusive-shared`. |
 | `write access not held - send acquire_write first` | A write under an exclusive policy without holding access. |
 | `terminal size 5000x30 exceeds the 1000x1000 limit` | `resize` too large. |
+| `terminal size 0x24 is below the 1x1 minimum` | `resize` with a `0` on either side. |
 | `resize is controlled by the real terminal on this session - a remote resize would fight with it` | `resize` on a session whose terminal owns the size. |
 
 ## Limits

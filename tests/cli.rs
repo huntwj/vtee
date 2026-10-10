@@ -538,8 +538,12 @@ mod unix_behavior {
 
     /// Polls instead of sleeping a fixed time, so tests neither flake on a loaded machine nor
     /// wait longer than they need to.
-    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    fn wait_until(what: &str, ready: impl FnMut() -> bool) {
+        wait_until_within(Duration::from_secs(10), what, ready);
+    }
+
+    fn wait_until_within(limit: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + limit;
         while !ready() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
@@ -882,6 +886,74 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
+    /// `--cols 0` is refused at startup, so `resize` must refuse 0 too instead of quietly raising
+    /// it to 1; a refused resize changes nothing, and a valid one afterwards still works.
+    #[test]
+    fn resize_rejects_zero_and_leaves_the_size_alone() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "zero", &["--writable"]);
+        wait_for_session(&tmpdir, "zero");
+        let sock = dir.join("zero.sock");
+
+        let out = vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"resize\",\"cols\":0,\"rows\":24}\n{\"cmd\":\"resize\",\"cols\":80,\"rows\":0}\n{\"cmd\":\"snapshot\"}\n")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout.matches("below the 1x1 minimum").count(), 2, "both zero sizes refused: {stdout}");
+        assert!(stdout.contains("\"cols\":80") && stdout.contains("\"rows\":24"), "size unchanged: {stdout}");
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("{\"cmd\":\"resize\",\"cols\":100,\"rows\":30}\n{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":100"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Windows PowerShell 5.1 sends the mark twice when `$OutputEncoding` already has one, and a
+    /// line the server cannot parse must not look like success.
+    #[test]
+    fn connect_strips_a_doubled_mark_and_fails_on_unparseable_input() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "bom2", &[]);
+        wait_for_session(&tmpdir, "bom2");
+        let sock = dir.join("bom2.sock");
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("\u{feff}\u{feff}{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":80"));
+
+        vtee()
+            .arg("--connect")
+            .arg(&sock)
+            .timeout(Duration::from_secs(5))
+            .write_stdin("this is not json\n")
+            .assert()
+            .code(exitcode::DATAERR)
+            .stdout(predicate::str::contains("bad command"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
     /// Regression test for a real, adversarially-found bug: broadcasting to raw-TTY sinks used
     /// to do a blocking `write_all` to *every* sink under the one lock that also gates `term`,
     /// `bytes_seen`, and `snapshot()` - so one attach client that simply stops reading (a
@@ -933,9 +1005,10 @@ mod unix_behavior {
             });
         }
 
-        // 4 MiB is well past client A's queue capacity (~2 MiB), so A is stalled and dropped by
-        // the time B has seen this much.
-        wait_until("client B to receive 4 MiB while client A is stalled", || {
+        // 4 MiB is well past the 2 MiB a client may have queued, so client A has been
+        // resynchronised (its backlog replaced by a redraw) more than once by the time B has
+        // seen this much - and B was never held up by it.
+        wait_until_within(Duration::from_secs(30), "client B to receive 4 MiB while client A is stalled", || {
             bytes_received.load(Ordering::Relaxed) >= 4 * 1024 * 1024
         });
 
@@ -950,6 +1023,55 @@ mod unix_behavior {
             .assert()
             .success()
             .stdout(predicate::str::contains("\"cols\""));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// The product bug behind a flaky CI run: a client the scheduler starves for a moment fell
+    /// behind the producer, its queue filled, and it was dropped for good - its connection stayed
+    /// open but nothing more ever arrived. A client that is merely slow must be resynchronised and
+    /// keep receiving. Client C reads nothing for a while under a flood (many queue overflows),
+    /// then reads; it must get a fresh stream of output, starting with a redraw.
+    #[test]
+    fn a_client_that_is_slow_for_a_while_keeps_receiving_afterwards() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = Proc(Some(
+            vtee_process(&tmpdir).arg("--headless").args(["--name", "slowtty", "--", "yes"]).spawn().unwrap(),
+        ));
+        wait_for_session(&tmpdir, "slowtty");
+
+        let mut client = UnixStream::connect(dir.join("slowtty.tty.sock")).unwrap();
+        // Long enough for `yes` to push far more than the 2 MiB queue limit past an unread client.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let received = Arc::new(AtomicU64::new(0));
+        {
+            let received = received.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = client.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    received.fetch_add(n as u64, Ordering::Relaxed);
+                }
+            });
+        }
+
+        // A client that was dropped for good could still drain what was already queued and
+        // buffered in the socket (about 2.3 MiB); 6 MiB can only come from a live stream.
+        wait_until_within(
+            Duration::from_secs(30),
+            "a client that was slow to keep receiving after it caught up",
+            || received.load(Ordering::Relaxed) >= 6 * 1024 * 1024,
+        );
 
         let _ = child.kill();
         let _ = child.wait();
