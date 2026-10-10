@@ -68,8 +68,8 @@ impl From<WritableMode> for vtee::WritePolicy {
 /// path can never contain NUL.
 const BARE_LISTEN: &str = "\0";
 
-/// A terminal multiplexer for AI and testing: run a program in a virtual terminal that people and
-/// programs can watch, type into and read back as structured data.
+/// A tee for terminal programs: watch, share, drive and test any TUI's screen. Run a program in a
+/// virtual terminal that people and programs can watch, type into and read back as structured data.
 ///
 /// `vtee [OPTIONS] [--] PROGRAM [ARGS]...` starts a session. `--script PATH` runs a batch of
 /// JSON commands and exits; `--connect PATH` talks to a running session's command socket.
