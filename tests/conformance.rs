@@ -140,3 +140,51 @@ fn every_expected_file_belongs_to_a_case_and_every_case_has_one() {
         .unwrap_or_default();
     assert_eq!(files, names, "tests/fixtures/conformance/expected/ and cases.json must list the same cases");
 }
+
+/// The width sample: how many cells each of 1,062 scalars occupies. The 80 cases hold almost no Unicode data, so an
+/// upgrade of `unicode-width`, `vte` or `alacritty_terminal` that changed a width would pass them and silently
+/// change what stored goldens mean. Run-length lines: `U+0020..U+007E 1` is every scalar in the range occupying one
+/// cell, `0` is zero-width (it joins the previous cell), `2` is wide.
+fn width_sample() -> Vec<(char, usize)> {
+    let path = root().join("conformance/width-sample.txt");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let scalar = |s: &str| char::from_u32(u32::from_str_radix(s.strip_prefix("U+").unwrap(), 16).unwrap()).unwrap();
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let (range, class) = line.split_once(' ').unwrap_or_else(|| panic!("bad width sample line {line:?}"));
+        let class: usize = class.trim().parse().unwrap();
+        let (first, last) = range.split_once("..").map_or((range, range), |(a, b)| (a, b));
+        out.extend((scalar(first) as u32..=scalar(last) as u32).map(|n| (char::from_u32(n).unwrap(), class)));
+    }
+    out
+}
+
+/// Writes `A<scalar>œ` on one row per scalar through the real emulator and reads the column of `œ`: column 1 means
+/// the scalar joined the `A` (width 0), 2 means one cell, 3 means two.
+#[test]
+fn the_width_sample_is_what_the_emulator_measures() {
+    let sample = width_sample();
+    assert_eq!(sample.len(), 1062, "the width sample holds 1,062 scalars");
+
+    let input: String = sample.iter().map(|(ch, _)| format!("A{ch}\u{153}\r\n")).collect();
+    let rows = sample.len() as u16 + 1;
+    let dir = std::env::temp_dir().join(format!("vtee-width-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let snap = run_vtee(&dir, "width", 12, rows, &input);
+    let _ = fs::remove_dir_all(&dir);
+
+    let mut wrong = Vec::new();
+    for (row, (ch, class)) in snap.cells.iter().zip(&sample) {
+        let measured = row.iter().position(|c| c.ch.contains('\u{153}')).map(|col| col - 1);
+        if measured != Some(*class) {
+            wrong.push(format!("U+{:04X}: sample says {class}, the emulator gives {measured:?}", *ch as u32));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} scalar(s) changed width. That changes what stored goldens mean: bump SEMANTICS_VERSION and add an \
+         entry to docs/guide/snapshot-semantics.md.\n  {}",
+        wrong.len(),
+        wrong.iter().take(20).cloned().collect::<Vec<_>>().join("\n  ")
+    );
+}
