@@ -151,3 +151,9 @@ Open an issue with the command you ran, what you expected, what happened, your O
 `vtee --version`. For a hang or a screen that looks wrong, `vtee --log run.cast ...` records the raw output,
 which makes it reproducible; `vtee replay run.cast` prints the screen the recording ends with, so you can check
 it shows the problem before attaching it.
+
+## Licensing of contributions
+
+vtee is dual-licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Unless you
+explicitly state otherwise, any contribution you intentionally submit for inclusion is licensed the same way,
+without any additional terms or conditions. The vendored `portable-pty` copy keeps its own upstream license.

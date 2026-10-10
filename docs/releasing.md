@@ -65,8 +65,8 @@ because the locked `uuid 1.27.0` requires 1.89. Windows was only built on curren
       opened by `GITHUB_TOKEN`, and GitHub does not run CI on PRs created that way.
 - [ ] Settings > General > Pull Requests: allow squash merging (and make "Default to PR title" the squash message).
 - [ ] Settings > Branches: protect `main` and require the `Conventional Commits` and CI checks if you want enforcement.
-- [ ] Add a `LICENSE` file and a `license` field in `Cargo.toml`: none exists yet, and that choice is the maintainer's
-      (for example `MIT`, `Apache-2.0`, or `MIT OR Apache-2.0`, the Rust convention).
+- [x] License: `MIT OR Apache-2.0` (the Rust convention), as `LICENSE-MIT`, `LICENSE-APACHE` and the `license` field
+      in `Cargo.toml`. `publish = false` stays until publishing to crates.io is a separate decision.
 
 ## Files
 

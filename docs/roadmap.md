@@ -10,7 +10,7 @@ State as of 2026-10-09. The core feature set works on Linux and Windows. What is
 
 - [x] **First CI run.** `.github/workflows/ci.yml` ran on real runners on 2026-10-09 and all six jobs passed
   (lint, MSRV, and the fast and pty jobs on `ubuntu-latest` and `windows-latest`). See `development/ci.md`.
-- [ ] **A license.** None is chosen yet.
+- [x] **A license.** `MIT OR Apache-2.0`, in `LICENSE-MIT` and `LICENSE-APACHE`.
 - [ ] **Release automation.** Versions follow commit messages; the automation is described in `releasing.md`. Its
   first run failed with "GitHub Actions is not permitted to create or approve pull requests", so the repository
   setting listed in `releasing.md` must be turned on before the first release PR can open.
@@ -339,5 +339,7 @@ concrete needs it" question rather than a near-term one.
 - **One process per session, or a daemon managing several?** Not decided. Leaning toward "not decided" staying
   fine for a while longer - `Tap::serve` already lets one process accept several concurrent observers, so the
   pressure to also multiplex several *sessions* behind one daemon hasn't shown up yet.
-- **Licence.** Not chosen. `publish = false` in `Cargo.toml` until it is.
-- **Whether the name `vtee` is free to use.** Not checked.
+- **Licence.** `MIT OR Apache-2.0`, chosen 2026-10-10. `publish = false` stays in `Cargo.toml` until publishing to
+  crates.io is decided separately.
+- **Whether the name `vtee` is free to use.** Checked 2026-10-10: the crate name is free on crates.io and no GitHub
+  project uses it for a terminal tool (searches turned up only empty or unrelated repositories).
