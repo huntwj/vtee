@@ -9,9 +9,10 @@
 //!
 //! These files are frozen reference data. Changing one changes what a stored golden means, so it needs a
 //! `SEMANTICS_VERSION` bump and an entry in `docs/guide/snapshot-semantics.md` (`docs/guide/versioning.md`).
-//! Adding a case is not a bump. After adding a case, or after a deliberate change, regenerate with
-//! `VTEE_BLESS_CONFORMANCE=1 cargo test --test conformance` on Linux (the resize cases need a live pty and run
-//! on Unix only, so a run on Windows leaves their files alone).
+//! Adding a case is not a bump. After adding a case, or after a deliberate change, regenerate the files with
+//! `cargo test --test conformance -- --ignored bless` on Linux (the resize cases need a live pty and run on Unix
+//! only, which is why blessing is Unix only). The bless step rewrites the expected files, the vocabulary and the
+//! manifest that guards them, and refuses to change a frozen file unless `SEMANTICS_VERSION` was bumped first.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -30,10 +31,6 @@ fn root() -> PathBuf {
 
 fn expected_dir() -> PathBuf {
     root().join("conformance/expected")
-}
-
-fn blessing() -> bool {
-    std::env::var_os("VTEE_BLESS_CONFORMANCE").is_some()
 }
 
 fn cases() -> Vec<Value> {
@@ -77,13 +74,10 @@ fn first_difference(expected: &Value, actual: &Value) -> String {
     "no difference".to_string()
 }
 
-#[test]
-fn vtees_own_output_for_the_cases_has_not_changed() {
+/// Runs every case this platform can run and hands vtee's canonical output to `each`.
+fn for_each_case(mut each: impl FnMut(&str, Value)) {
     let dir = std::env::temp_dir().join(format!("vtee-conformance-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    fs::create_dir_all(expected_dir()).unwrap();
-
-    let mut failures = Vec::new();
     for case in cases() {
         let name = case["name"].as_str().unwrap();
         let cols = case["cols"].as_u64().unwrap() as u16;
@@ -97,16 +91,25 @@ fn vtees_own_output_for_the_cases_has_not_changed() {
             #[cfg(not(unix))]
             Some(_) => continue, // live resize is covered on Unix only
         };
-        let actual = canonical(&snap);
+        each(name, canonical(&snap));
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+const CHANGED: &str = concat!(
+    "If the change is deliberate it is a semantics change: bump SEMANTICS_VERSION in src/snapshot.rs, ",
+    "add an entry to docs/guide/snapshot-semantics.md, run `cargo test --test conformance -- --ignored bless` ",
+    "on Linux and commit with the `snapshot` scope (docs/guide/versioning.md)."
+);
+
+#[test]
+fn vtees_own_output_for_the_cases_has_not_changed() {
+    let mut failures = Vec::new();
+    for_each_case(|name, actual| {
         let path = expected_dir().join(format!("{name}.json"));
-        if blessing() {
-            fs::write(&path, format!("{}\n", serde_json::to_string(&actual).unwrap())).unwrap();
-            continue;
-        }
         match fs::read_to_string(&path) {
-            Err(_) => failures.push(format!(
-                "{name}: no expected file. A new case is not a semantics change; run with VTEE_BLESS_CONFORMANCE=1."
-            )),
+            Err(_) => failures
+                .push(format!("{name}: no expected file. A new case is not a semantics change; run the bless step.")),
             Ok(text) => {
                 let expected: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 if expected != actual {
@@ -114,13 +117,10 @@ fn vtees_own_output_for_the_cases_has_not_changed() {
                 }
             }
         }
-    }
-    let _ = fs::remove_dir_all(&dir);
+    });
     assert!(
         failures.is_empty(),
-        "vtee's output changed for {} case(s). If the change is deliberate it is a semantics change: bump \
-         SEMANTICS_VERSION, add an entry to docs/guide/snapshot-semantics.md, regenerate with \
-         VTEE_BLESS_CONFORMANCE=1 and commit with the `snapshot` scope.\n  {}",
+        "vtee's output changed for {} case(s). {CHANGED}\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -182,8 +182,7 @@ fn the_width_sample_is_what_the_emulator_measures() {
     }
     assert!(
         wrong.is_empty(),
-        "{} scalar(s) changed width. That changes what stored goldens mean: bump SEMANTICS_VERSION and add an \
-         entry to docs/guide/snapshot-semantics.md.\n  {}",
+        "{} scalar(s) changed width. That changes what stored goldens mean. {CHANGED}\n  {}",
         wrong.len(),
         wrong.iter().take(20).cloned().collect::<Vec<_>>().join("\n  ")
     );
@@ -333,18 +332,174 @@ mod vocabulary {
 
 #[test]
 fn the_reported_vocabulary_has_not_changed() {
-    let measured = vocabulary::measure();
-    let text = vocabulary::render(&measured);
-    let path = root().join("conformance/vocabulary.txt");
-    if blessing() {
-        fs::write(&path, &text).unwrap();
-        return;
-    }
-    let frozen = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).replace("\r\n", "\n");
+    let text = vocabulary::render(&vocabulary::measure());
+    let frozen = read_frozen("vocabulary.txt");
     assert!(
         frozen == text,
-        "the reported vocabulary changed. A new or removed name changes what a stored golden finds, so it is a \
-         semantics change: bump SEMANTICS_VERSION, add an entry to docs/guide/snapshot-semantics.md, regenerate with \
-         VTEE_BLESS_CONFORMANCE=1 and commit with the `snapshot` scope.\n--- frozen\n{frozen}--- measured\n{text}"
+        "the reported vocabulary changed. A new or removed name changes what a stored golden finds. {CHANGED}\n\
+         --- frozen\n{frozen}--- measured\n{text}"
     );
+}
+
+fn read_frozen(name: &str) -> String {
+    let path = root().join("conformance").join(name);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).replace("\r\n", "\n")
+}
+
+// ---- the manifest that guards the frozen files -----------------------------------------------------------------
+
+/// `tests/fixtures/conformance/MANIFEST` records the `SEMANTICS_VERSION` the frozen files were written under and a
+/// hash of each one. The files cannot change unnoticed: a change makes the hashes disagree, and the only way to make
+/// them agree again is the bless step, which refuses to rewrite a frozen file until `SEMANTICS_VERSION` was bumped.
+/// The hash is FNV-1a 64: it only has to notice a change, and it keeps the test free of a dependency.
+mod manifest {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    pub fn path() -> PathBuf {
+        root().join("conformance/MANIFEST")
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    /// The hash of a file's text, whatever its line endings.
+    pub fn hash(text: &str) -> String {
+        format!("{:016x}", fnv1a64(text.replace("\r\n", "\n").as_bytes()))
+    }
+
+    /// Every frozen file under `tests/fixtures/conformance`, by path relative to it, with the hash of its text.
+    pub fn on_disk() -> BTreeMap<String, String> {
+        fn walk(dir: &Path, base: &Path, out: &mut BTreeMap<String, String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, base, out);
+                    continue;
+                }
+                let relative = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+                let text = fs::read_to_string(&path).unwrap();
+                if relative == "width-sample.txt" {
+                    // One entry per range line, so adding a scalar on a line of its own is an addition, which is
+                    // not a semantics change, while changing a recorded range or its width class is.
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        let (range, _) = line.split_once(' ').expect("bad width sample line");
+                        out.insert(format!("{relative}#{range}"), hash(line));
+                    }
+                } else if relative != "MANIFEST" {
+                    out.insert(relative, hash(&text));
+                }
+            }
+        }
+        let base = root().join("conformance");
+        let mut out = BTreeMap::new();
+        walk(&base, &base, &mut out);
+        out
+    }
+
+    /// The recorded semantics version and hashes, or `None` before the first bless.
+    pub fn recorded() -> Option<(u32, BTreeMap<String, String>)> {
+        let text = fs::read_to_string(path()).ok()?;
+        let mut version = None;
+        let mut files = BTreeMap::new();
+        for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+            match line.split_once(' ') {
+                Some(("semantics_version", n)) => version = Some(n.trim().parse().expect("bad semantics_version")),
+                Some((hash, file)) => {
+                    files.insert(file.trim().to_string(), hash.to_string());
+                }
+                None => panic!("bad MANIFEST line {line:?}"),
+            }
+        }
+        Some((version.expect("MANIFEST has no semantics_version line"), files))
+    }
+
+    #[cfg(unix)]
+    pub fn render(version: u32, files: &BTreeMap<String, String>) -> String {
+        let mut text = String::from(concat!(
+            "# The frozen conformance files and the SEMANTICS_VERSION they were written under (docs/guide/versioning.md).\n",
+            "# Do not edit by hand: `cargo test --test conformance -- --ignored bless` rewrites it.\n",
+        ));
+        text.push_str(&format!("semantics_version {version}\n"));
+        for (file, hash) in files {
+            text.push_str(&format!("{hash} {file}\n"));
+        }
+        text
+    }
+}
+
+#[test]
+fn the_frozen_files_match_the_manifest() {
+    let (recorded_version, recorded) = manifest::recorded().expect("tests/fixtures/conformance/MANIFEST is missing");
+    let actual = manifest::on_disk();
+    let changed: Vec<_> =
+        recorded.iter().filter(|(file, hash)| actual.get(*file).is_some_and(|h| h != *hash)).map(|(f, _)| f).collect();
+    let removed: Vec<_> = recorded.keys().filter(|file| !actual.contains_key(*file)).collect();
+    let added: Vec<_> = actual.keys().filter(|file| !recorded.contains_key(*file)).collect();
+
+    assert!(
+        changed.is_empty() && removed.is_empty(),
+        "frozen conformance files changed (changed: {changed:?}, removed: {removed:?}). They define what a stored \
+         golden means, so changing them needs a SEMANTICS_VERSION bump. {CHANGED}"
+    );
+    assert!(
+        added.is_empty(),
+        "new conformance files {added:?} are not in the MANIFEST. Adding a case or a width sample scalar is not a \
+         semantics change: run `cargo test --test conformance -- --ignored bless` on Linux and commit the MANIFEST."
+    );
+    assert_eq!(
+        recorded_version,
+        vtee::SEMANTICS_VERSION,
+        "SEMANTICS_VERSION is {} but the MANIFEST was written under {recorded_version}. After a bump, run the bless \
+         step so the frozen files and the MANIFEST are rewritten under the new number.",
+        vtee::SEMANTICS_VERSION
+    );
+}
+
+#[test]
+fn the_semantics_changelog_has_an_entry_for_this_version() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/guide/snapshot-semantics.md");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let heading = format!("## Semantics {}", vtee::SEMANTICS_VERSION);
+    assert!(
+        text.lines().any(|l| l == heading || l.starts_with(&format!("{heading} "))),
+        "docs/guide/snapshot-semantics.md has no `{heading}` entry. Every SEMANTICS_VERSION bump is recorded there: \
+         the number, the release, the input that changed, the old and new cells and the cases that moved."
+    );
+}
+
+/// Regenerates the frozen files this test owns and the MANIFEST. Run it by hand after adding a case or after a
+/// deliberate change: `cargo test --test conformance -- --ignored bless`, on Linux so the resize cases are included.
+/// It refuses to change a file the MANIFEST already records unless `SEMANTICS_VERSION` differs from the recorded one.
+#[cfg(unix)]
+#[test]
+#[ignore = "rewrites the frozen conformance files; run by hand"]
+fn bless() {
+    let mut new_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for_each_case(|name, actual| {
+        new_files.insert(format!("expected/{name}.json"), format!("{}\n", serde_json::to_string(&actual).unwrap()));
+    });
+    new_files.insert("vocabulary.txt".to_string(), vocabulary::render(&vocabulary::measure()));
+
+    if let Some((recorded_version, recorded)) = manifest::recorded() {
+        let changed: Vec<_> = new_files
+            .iter()
+            .filter(|(file, text)| recorded.get(*file).is_some_and(|h| *h != manifest::hash(text)))
+            .map(|(file, _)| file.as_str())
+            .collect();
+        assert!(
+            changed.is_empty() || recorded_version != vtee::SEMANTICS_VERSION,
+            "refusing to rewrite frozen files {changed:?}: SEMANTICS_VERSION is still {recorded_version}. {CHANGED}"
+        );
+    }
+
+    let base = root().join("conformance");
+    for (file, text) in &new_files {
+        let path = base.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let hashes = manifest::on_disk();
+    fs::write(manifest::path(), manifest::render(vtee::SEMANTICS_VERSION, &hashes)).unwrap();
 }
