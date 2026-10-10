@@ -960,3 +960,74 @@ fn a_session_with_no_clients_ends_as_soon_as_the_child_exits() {
     wait_until("the holder to end", || s.child.try_wait().ok().flatten().is_some());
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
 }
+
+// ---- --connect with --script ---------------------------------------------------------------------
+
+fn script_file(lines: &[&str]) -> PathBuf {
+    let path = unique("vtee-connect-script");
+    let mut text = lines.join("\n");
+    text.push('\n');
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn reply_lines(stdout: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(stdout).lines().map(|l| serde_json::from_str(l).expect("a JSON reply line")).collect()
+}
+
+/// The script goes to a live session instead of a new program: typing reaches it, replies come back in order, and the
+/// session is still there afterwards.
+#[test]
+fn a_script_can_be_run_against_a_live_session() {
+    let s = Session::start("scripted", &["--writable"], &["sh", "-c", "echo ready; read x; echo got:$x; sleep 60"]);
+    let script = script_file(&[
+        r#"{"cmd":"wait_for","text":"ready","timeout_ms":8000}"#,
+        r#"{"cmd":"send","text":"hi\r"}"#,
+        r#"{"cmd":"wait_for","text":"got:hi","timeout_ms":8000}"#,
+        r#"{"cmd":"snapshot"}"#,
+    ]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let replies = reply_lines(&out.stdout);
+    assert_eq!(replies.len(), 3, "{replies:?}");
+    assert_eq!(replies[0]["matched"], true);
+    assert_eq!(replies[1]["matched"], true);
+    assert!(screen(&replies[2]["snapshot"]).contains("got:hi"));
+    assert_eq!(s.nd().request(json!({"cmd": "exit_status"}))["running"], true, "the session was left running");
+    let _ = std::fs::remove_file(script);
+}
+
+/// A read-only session refuses `send`; the script run stops there with the refusal, not silently.
+#[test]
+fn a_script_run_against_a_read_only_session_stops_at_a_refused_write() {
+    let s = Session::start("scripted-ro", &[], &["sh", "-c", "echo ready; sleep 60"]);
+    let script = script_file(&[r#"{"cmd":"send","text":"x"}"#, r#"{"cmd":"snapshot"}"#]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::NOPERM), "{out:?}");
+    assert!(out.stdout.is_empty(), "the snapshot after the refused send must not have run: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("the session refused script line 1") && stderr.contains("--writable"), "{stderr}");
+    let _ = std::fs::remove_file(script);
+}
+
+#[test]
+fn a_timed_out_wait_fails_a_script_run_against_a_live_session_too() {
+    let s = Session::start("scripted-wait", &[], &["sh", "-c", "echo ready; sleep 60"]);
+    let script = script_file(&[r#"{"cmd":"wait_for","text":"never","timeout_ms":300}"#]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(reply_lines(&out.stdout)[0]["matched"], false);
+    assert!(String::from_utf8_lossy(&out.stderr).contains(r#"script line 1: wait_for "never" timed out after 300 ms"#));
+    let _ = std::fs::remove_file(script);
+}
+
+#[test]
+fn a_script_cannot_reach_a_session_that_is_not_there() {
+    let tmp = unique("vtee-connect-none");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let script = script_file(&[r#"{"cmd":"snapshot"}"#]);
+    let out = vtee_in(&tmp).arg("--connect").arg(tmp.join("none.sock")).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::UNAVAILABLE), "{out:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(script);
+}

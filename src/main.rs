@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use clap_verbosity_flag::InfoLevel;
 use serde::{Deserialize, Serialize};
 
-use client::{ScriptOpts, run_connect, run_replay, run_script};
+use client::{ScriptOpts, run_connect, run_connect_script, run_replay, run_script};
 use output::{exit_code, fail, print_error, print_info};
 use session_cmds::{run_attach, run_kill, run_ls};
 
@@ -73,7 +73,8 @@ const BARE_LISTEN: &str = "\0";
 /// virtual terminal that people and programs can watch, type into and read back as structured data.
 ///
 /// `vtee [OPTIONS] [--] PROGRAM [ARGS]...` starts a session. `--script PATH` runs a batch of
-/// JSON commands and exits; `--connect PATH` talks to a running session's command socket.
+/// JSON commands against the program and exits; with `--connect PATH` it runs them against a
+/// running session's command socket instead, and without `--script` `--connect` relays stdin.
 #[derive(Parser)]
 #[command(name = "vtee", version)]
 struct Cli {
@@ -89,7 +90,8 @@ struct Cli {
     text: bool,
 
     /// Talk to a running session's command socket instead of starting a program: read JSON
-    /// commands from stdin, one per line, and print the replies.
+    /// commands from stdin, one per line, and print the replies. With `--script`, run that
+    /// script against the session instead of reading stdin; the session is left running.
     #[arg(long, value_name = "PATH")]
     connect: Option<PathBuf>,
 
@@ -99,7 +101,8 @@ struct Cli {
     log: Option<PathBuf>,
 
     /// Run the JSON commands in PATH (one per line) against the program, print each result, then
-    /// stop the program. Cannot be combined with the session options below.
+    /// stop the program. A `wait_for` that times out makes the run exit 1 unless its line says
+    /// `"optional":true`. Cannot be combined with the session options below.
     #[arg(
         long,
         value_name = "PATH",
@@ -214,7 +217,17 @@ fn main() -> ExitCode {
     init_logging(&cli);
 
     if let Some(path) = &cli.connect {
-        return run_connect(path, cli.text);
+        if !cli.command.is_empty() {
+            return fail(exitcode::USAGE, "--connect talks to a running session; it cannot be combined with a program");
+        }
+        return match &cli.script {
+            Some(script) => run_connect_script(path, script, cli.text),
+            None => run_connect(path, cli.text),
+        };
+    }
+
+    if cli.script.is_some() && cli.command.is_empty() {
+        return fail(exitcode::USAGE, "--script needs a program to run or --connect SOCK");
     }
 
     // The same bound `resize` enforces: the emulator allocates cols x rows cells.
