@@ -145,6 +145,11 @@ pub fn run_ls() -> ExitCode {
 pub fn run_kill(name: &str) -> ExitCode {
     let paths = match vtee::session_paths(name) {
         Ok(p) => p,
+        // A name that can't be a session here (invalid, or too long for the socket path) can't be
+        // a live one: the same answer as any other session that doesn't exist.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            return fail(exitcode::NOHOST, format!("no session named {name:?}: {e}"));
+        }
         Err(e) => return fail(exitcode::OSERR, format!("couldn't resolve session {name:?}: {e}")),
     };
     let record = match vtee::session_record(name) {

@@ -120,21 +120,42 @@ fn valid_session_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The longest AF_UNIX address Windows accepts, in bytes.
+const SOCKET_PATH_LIMIT: usize = 107;
+/// The longest file in a session directory is `<name>.tty.sock`, plus the path separator.
+const SOCKET_SUFFIX_LEN: usize = ".tty.sock".len() + 1;
+
+/// Why `<dir>\<name>.tty.sock` would not fit in an AF_UNIX address, if it wouldn't, naming the
+/// real cause: a session directory that leaves no room for any name, or a name that is too long
+/// for the room there is. Pure so it is tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn socket_path_problem(dir_len: usize, name: &str) -> Option<String> {
+    let longest = dir_len + SOCKET_SUFFIX_LEN + name.len();
+    if longest <= SOCKET_PATH_LIMIT {
+        return None;
+    }
+    let room = SOCKET_PATH_LIMIT.saturating_sub(dir_len + SOCKET_SUFFIX_LEN);
+    Some(if room == 0 {
+        format!(
+            "the session directory path is {dir_len} bytes, which leaves no room for a socket: sessions need \
+             <directory>\\<name>.tty.sock to fit in {SOCKET_PATH_LIMIT} bytes. Shorten %LOCALAPPDATA%"
+        )
+    } else {
+        format!(
+            "session name {name:?} is too long: its socket path would be {longest} bytes (limit \
+             {SOCKET_PATH_LIMIT}); with this session directory a name can be at most {room} bytes"
+        )
+    })
+}
+
 pub fn session_paths(name: &str) -> io::Result<SessionPaths> {
     if let Err(why) = valid_session_name(name) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{name:?} isn't a valid session name: {why}")));
     }
     let dir = default_session_dir()?;
     #[cfg(windows)]
-    {
-        // The longest file is `<name>.tty.sock`; AF_UNIX addresses cap at 107 bytes.
-        let longest = dir.join(format!("{name}.tty.sock")).as_os_str().len();
-        if longest > 107 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("session name {name:?} is too long: the socket path would be {longest} bytes (limit 107)"),
-            ));
-        }
+    if let Some(problem) = socket_path_problem(dir.as_os_str().len(), name) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, problem));
     }
     Ok(SessionPaths {
         sock: dir.join(format!("{name}.sock")),
@@ -252,6 +273,21 @@ mod tests {
         for bad in ["ab:c", "a*b", "a?b", "a<b", "a>b", "a\"b", "a|b", "a\u{1}b", "a\tb"] {
             assert!(windows_name_problem(bad).is_some(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_directory_that_leaves_no_room_is_blamed_not_the_name() {
+        let problem = socket_path_problem(100, "x").expect("100 + 10 + 1 > 107");
+        assert!(problem.contains("session directory") && problem.contains("100 bytes"), "{problem}");
+        assert!(!problem.contains("session name"), "{problem}");
+    }
+
+    #[test]
+    fn a_name_too_long_for_the_room_there_is_says_how_long_it_may_be() {
+        // 80 + 10 leaves 17 bytes of room.
+        assert_eq!(socket_path_problem(80, &"x".repeat(17)), None);
+        let problem = socket_path_problem(80, &"x".repeat(18)).expect("one byte over");
+        assert!(problem.contains("at most 17 bytes"), "{problem}");
     }
 
     #[test]

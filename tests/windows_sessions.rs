@@ -300,6 +300,32 @@ fn a_missing_localappdata_is_an_error_not_a_fallback() {
     assert!(err.contains("LOCALAPPDATA"), "stderr: {err}");
 }
 
+/// A session directory that already uses up the 107-byte socket address: the error must blame the
+/// directory (not the name), and `kill` must answer like it does for any session that isn't there.
+#[test]
+fn a_localappdata_too_long_for_a_socket_path_is_blamed_not_the_name() {
+    let _guard = serial();
+    let env = Env::new();
+    let long = env.local.join("x".repeat(90));
+    std::fs::create_dir_all(&long).unwrap();
+
+    let out = env.cmd().env("LOCALAPPDATA", &long).args(["kill", "a"]).stdin(Stdio::null()).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(68), "stderr: {err}");
+    assert!(err.contains("session directory") && err.contains("LOCALAPPDATA"), "stderr: {err}");
+    assert!(!err.contains("session name \"a\" is too long"), "stderr: {err}");
+
+    let out = env
+        .cmd()
+        .env("LOCALAPPDATA", &long)
+        .args(["--headless", "--name", "a", "--", "cmd", "/c", "exit"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("session directory"));
+}
+
 #[test]
 fn connect_returns_a_snapshot_of_the_live_session() {
     let _guard = serial();
