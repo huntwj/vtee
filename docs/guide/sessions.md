@@ -179,8 +179,13 @@ terminals. The JSON socket can arbitrate its own writers with the [exclusive wri
 
 Limits: 64 simultaneous connections per socket. A connection beyond that is dropped immediately.
 
-An attached terminal that stops reading is dropped from the broadcast once its buffer fills (about 2 MiB). It does
-not slow down the program or the other clients. Reattach to get a fresh view.
+An attached terminal that falls behind (it stopped reading, or was simply slow for a while, for example on a
+loaded machine) does not slow down the program or the other clients. The session keeps at most about 2 MiB of
+unread output for it. When that fills, the backlog is thrown away and replaced by one redraw of the current
+screen, so the terminal skips the output in between and carries on from a correct picture. It is never cut off:
+a terminal that starts reading again keeps receiving. A scrolling program's lines that went by during
+the gap are not shown on that terminal, though the program itself and any other client saw them. A terminal
+that never reads costs the session its 2 MiB and nothing more.
 
 ## Terminal queries and attach clients
 

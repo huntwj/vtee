@@ -538,8 +538,12 @@ mod unix_behavior {
 
     /// Polls instead of sleeping a fixed time, so tests neither flake on a loaded machine nor
     /// wait longer than they need to.
-    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    fn wait_until(what: &str, ready: impl FnMut() -> bool) {
+        wait_until_within(Duration::from_secs(10), what, ready);
+    }
+
+    fn wait_until_within(limit: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + limit;
         while !ready() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
@@ -966,9 +970,10 @@ mod unix_behavior {
             });
         }
 
-        // 4 MiB is well past client A's queue capacity (~2 MiB), so A is stalled and dropped by
-        // the time B has seen this much.
-        wait_until("client B to receive 4 MiB while client A is stalled", || {
+        // 4 MiB is well past the 2 MiB a client may have queued, so client A has been
+        // resynchronised (its backlog replaced by a redraw) more than once by the time B has
+        // seen this much - and B was never held up by it.
+        wait_until_within(Duration::from_secs(30), "client B to receive 4 MiB while client A is stalled", || {
             bytes_received.load(Ordering::Relaxed) >= 4 * 1024 * 1024
         });
 
@@ -983,6 +988,55 @@ mod unix_behavior {
             .assert()
             .success()
             .stdout(predicate::str::contains("\"cols\""));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// The product bug behind a flaky CI run: a client the scheduler starves for a moment fell
+    /// behind the producer, its queue filled, and it was dropped for good - its connection stayed
+    /// open but nothing more ever arrived. A client that is merely slow must be resynchronised and
+    /// keep receiving. Client C reads nothing for a while under a flood (many queue overflows),
+    /// then reads; it must get a fresh stream of output, starting with a redraw.
+    #[test]
+    fn a_client_that_is_slow_for_a_while_keeps_receiving_afterwards() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = Proc(Some(
+            vtee_process(&tmpdir).arg("--headless").args(["--name", "slowtty", "--", "yes"]).spawn().unwrap(),
+        ));
+        wait_for_session(&tmpdir, "slowtty");
+
+        let mut client = UnixStream::connect(dir.join("slowtty.tty.sock")).unwrap();
+        // Long enough for `yes` to push far more than the 2 MiB queue limit past an unread client.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let received = Arc::new(AtomicU64::new(0));
+        {
+            let received = received.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = client.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    received.fetch_add(n as u64, Ordering::Relaxed);
+                }
+            });
+        }
+
+        // A client that was dropped for good could still drain what was already queued and
+        // buffered in the socket (about 2.3 MiB); 6 MiB can only come from a live stream.
+        wait_until_within(
+            Duration::from_secs(30),
+            "a client that was slow to keep receiving after it caught up",
+            || received.load(Ordering::Relaxed) >= 6 * 1024 * 1024,
+        );
 
         let _ = child.kill();
         let _ = child.wait();

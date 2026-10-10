@@ -17,7 +17,7 @@ pseudo-terminal and runs for as long as the program does. Everything else is a c
   emulator, and broadcasts them to attached terminals;
 - an *input thread* (interactive only) copies our stdin to the program;
 - one accept loop per socket, and a thread per connection;
-- a *writer thread* per attached terminal, so a slow terminal cannot block the output thread;
+- a *writer thread* per attached terminal, fed by a byte-bounded queue (`SinkQueue`, `src/tap.rs`), so a slow terminal cannot block the output thread; a terminal that falls behind gets one redraw in place of its backlog;
 - a resize watcher (`SIGWINCH` on Unix, console-size polling on Windows).
 
 **One lock for the screen.** The emulator, the byte counter and the list of attached terminals sit behind a single

@@ -1,10 +1,11 @@
 //! `Tap`: a child spawned in a pty, its output forwarded raw to our stdout (requirement 7) while
 //! a copy feeds an `alacritty_terminal` emulator that stays a passive observer.
 
+use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -116,13 +117,93 @@ impl Dimensions for Size {
 /// "snapshot the screen and register for future chunks" is atomic against `forward_output`'s
 /// "apply a chunk and broadcast it".
 ///
-/// Each TTY sink is a bounded channel drained by its own writer thread: writing to the sink
+/// Each TTY sink is a [`SinkQueue`] drained by its own writer thread: writing to the sink
 /// directly under this lock would let one client that stops reading block every other client,
-/// `snapshot()`, and the pty. A sink whose queue fills up is dropped instead.
+/// `snapshot()`, and the pty. A client that falls behind gets a redraw instead (see `SinkQueue`).
 pub(crate) struct TapState {
     pub(crate) term: Term<ObserverListener>,
     pub(crate) bytes_seen: u64,
-    pub(crate) tty_sinks: Vec<(u64, SyncSender<Arc<[u8]>>)>,
+    pub(crate) tty_sinks: Vec<(u64, Arc<SinkQueue>)>,
+}
+
+/// How much unread output one attached client may have queued before it is resynchronised.
+const SINK_QUEUE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Output waiting to be written to one attached terminal client, bounded in bytes.
+///
+/// A client that falls behind must neither block the session nor be left with a frozen screen. A
+/// stalled reader and a client the scheduler starved for a few milliseconds look the same from
+/// here, and the second is common on a loaded machine. So when the backlog would pass the limit it is
+/// thrown away and replaced by one redraw of the current screen: the client skips the output in
+/// between and carries on from a correct picture, whichever of the two it is. A client that never
+/// reads costs at most the limit in memory.
+pub(crate) struct SinkQueue {
+    state: Mutex<SinkQueueState>,
+    ready: Condvar,
+}
+
+struct SinkQueueState {
+    chunks: VecDeque<Arc<[u8]>>,
+    bytes: usize,
+    /// Length of the last redraw queued: a huge screen's redraw must not itself keep tripping the limit.
+    redraw_len: usize,
+    resyncs: u64,
+    closed: bool,
+}
+
+impl SinkQueue {
+    /// A queue whose first item is `redraw`, the screen as of attaching.
+    pub(crate) fn new(redraw: Vec<u8>) -> Arc<SinkQueue> {
+        let redraw_len = redraw.len();
+        let chunks = VecDeque::from([Arc::<[u8]>::from(redraw)]);
+        let state = SinkQueueState { chunks, bytes: redraw_len, redraw_len, resyncs: 0, closed: false };
+        Arc::new(SinkQueue { state: Mutex::new(state), ready: Condvar::new() })
+    }
+
+    /// Queues `chunk`, or, if that would pass the limit, replaces the whole backlog with
+    /// `redraw()` (which must reflect the screen after `chunk`). Never blocks. Returns `false` once
+    /// the writer has gone away, so the caller can drop the sink.
+    pub(crate) fn push(&self, chunk: &Arc<[u8]>, redraw: impl FnOnce() -> Vec<u8>) -> bool {
+        let mut q = self.state.lock_unpoisoned();
+        if q.closed {
+            return false;
+        }
+        if q.bytes + chunk.len() > SINK_QUEUE_BYTES.max(2 * q.redraw_len) {
+            let redraw: Arc<[u8]> = redraw().into();
+            q.chunks.clear();
+            q.bytes = redraw.len();
+            q.redraw_len = redraw.len();
+            q.chunks.push_back(redraw);
+            q.resyncs += 1;
+            ::log::debug!("a terminal client fell behind; resynchronised it ({} so far)", q.resyncs);
+        } else {
+            q.bytes += chunk.len();
+            q.chunks.push_back(chunk.clone());
+        }
+        self.ready.notify_one();
+        true
+    }
+
+    /// The next item, waiting for one; `None` once the queue is closed and empty.
+    pub(crate) fn pop(&self) -> Option<Arc<[u8]>> {
+        let mut q = self.state.lock_unpoisoned();
+        loop {
+            if let Some(chunk) = q.chunks.pop_front() {
+                q.bytes -= chunk.len();
+                return Some(chunk);
+            }
+            if q.closed {
+                return None;
+            }
+            q = self.ready.wait(q).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Wakes the writer so it can exit, and makes later pushes report that the sink is gone.
+    pub(crate) fn close(&self) {
+        self.state.lock_unpoisoned().closed = true;
+        self.ready.notify_all();
+    }
 }
 
 /// Paired with the `Mutex` so `wait_for_text` can block instead of polling: `forward_output`
@@ -577,11 +658,14 @@ fn forward_output(
             let mut state = shared.state.lock_unpoisoned();
             parser.advance(&mut state.term, chunk);
             state.bytes_seen += n as u64;
-            // `try_send` never blocks: a sink with a full queue (stalled reader) or a gone
-            // writer thread is dropped here.
+            // `push` never blocks. A client that fell behind is resynchronised with a redraw
+            // (built only then); a sink whose writer thread is gone is dropped here.
             if !state.tty_sinks.is_empty() {
                 let shared_chunk: Arc<[u8]> = chunk.into();
-                state.tty_sinks.retain(|(_, tx)| tx.try_send(shared_chunk.clone()).is_ok());
+                let TapState { term, bytes_seen, tty_sinks } = &mut *state;
+                tty_sinks.retain(|(_, queue)| {
+                    queue.push(&shared_chunk, || snapshot::redraw_sequence(&snapshot::build(term, *bytes_seen, None)))
+                });
             }
             shared.changed.notify_all();
             !state.tty_sinks.is_empty()
@@ -655,4 +739,75 @@ pub fn restore_default_ctrl_c() {
 
 fn to_io_error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::other(e)
+}
+
+#[cfg(test)]
+mod sink_queue_tests {
+    use super::*;
+
+    fn chunk(bytes: &[u8]) -> Arc<[u8]> {
+        Arc::from(bytes)
+    }
+
+    fn drain(queue: &SinkQueue) -> Vec<Vec<u8>> {
+        queue.close();
+        std::iter::from_fn(|| queue.pop()).map(|c| c.to_vec()).collect()
+    }
+
+    #[test]
+    fn output_within_the_limit_keeps_its_order_after_the_first_redraw() {
+        let queue = SinkQueue::new(b"R0".to_vec());
+        assert!(queue.push(&chunk(b"a"), || unreachable!("no resync below the limit")));
+        assert!(queue.push(&chunk(b"b"), || unreachable!("no resync below the limit")));
+        assert_eq!(drain(&queue), vec![b"R0".to_vec(), b"a".to_vec(), b"b".to_vec()]);
+    }
+
+    #[test]
+    fn a_client_that_falls_behind_gets_one_redraw_instead_of_the_backlog() {
+        let queue = SinkQueue::new(b"R0".to_vec());
+        let big = Arc::<[u8]>::from(vec![b'x'; SINK_QUEUE_BYTES]);
+        assert!(queue.push(&big, || b"R1".to_vec()), "overflow resyncs, it does not drop the sink");
+        assert!(queue.push(&chunk(b"after"), || unreachable!("the queue is small again")));
+        assert_eq!(drain(&queue), vec![b"R1".to_vec(), b"after".to_vec()]);
+    }
+
+    #[test]
+    fn a_stalled_reader_costs_bounded_memory_and_never_blocks_the_producer() {
+        let queue = SinkQueue::new(Vec::new());
+        let piece = chunk(&[b'y'; 8192]);
+        for _ in 0..10_000 {
+            assert!(queue.push(&piece, || b"R".to_vec()));
+        }
+        let queued: usize = drain(&queue).iter().map(Vec::len).sum();
+        assert!(queued <= SINK_QUEUE_BYTES, "queued {queued} bytes, limit {SINK_QUEUE_BYTES}");
+    }
+
+    #[test]
+    fn a_redraw_larger_than_the_limit_does_not_resync_on_every_chunk() {
+        let queue = SinkQueue::new(Vec::new());
+        let big = Arc::<[u8]>::from(vec![b'x'; SINK_QUEUE_BYTES + 1]);
+        assert!(queue.push(&big, || vec![b'R'; 3 * SINK_QUEUE_BYTES]));
+        let mut calls = 0;
+        for _ in 0..100 {
+            assert!(queue.push(&chunk(b"z"), || {
+                calls += 1;
+                Vec::new()
+            }));
+        }
+        assert_eq!(calls, 0, "small chunks after a large redraw must not trigger more redraws");
+    }
+
+    #[test]
+    fn a_closed_queue_reports_the_sink_gone_and_wakes_a_waiting_writer() {
+        let queue = SinkQueue::new(Vec::new());
+        assert!(queue.pop().is_some(), "the initial (empty) redraw");
+        let waiter = {
+            let queue = queue.clone();
+            thread::spawn(move || queue.pop())
+        };
+        thread::sleep(Duration::from_millis(50));
+        queue.close();
+        assert!(waiter.join().unwrap().is_none(), "close wakes a blocked pop with nothing left");
+        assert!(!queue.push(&chunk(b"late"), Vec::new));
+    }
 }
