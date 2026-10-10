@@ -1,0 +1,535 @@
+[
+ {
+  "name": "sgr_bold",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[1mbold\\e[0m plain"
+ },
+ {
+  "name": "sgr_dim",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[2mdim\\e[0m plain"
+ },
+ {
+  "name": "sgr_italic",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[3mital\\e[0m plain"
+ },
+ {
+  "name": "sgr_underline",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[4mundr\\e[0m plain"
+ },
+ {
+  "name": "sgr_reverse",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[7mrev\\e[0m plain"
+ },
+ {
+  "name": "sgr_strike",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[9mstrk\\e[0m plain"
+ },
+ {
+  "name": "sgr_combined",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[1;3;4;9mall\\e[0m none"
+ },
+ {
+  "name": "sgr_selective_off",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[1;2;3;4;7;9mX\\e[22mY\\e[23mZ\\e[24mW\\e[27mV\\e[29mU"
+ },
+ {
+  "name": "sgr_bold_and_dim",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[1mB\\e[2mD\\e[22mN"
+ },
+ {
+  "name": "fg_16",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[30m0\\e[31m1\\e[32m2\\e[33m3\\e[34m4\\e[35m5\\e[36m6\\e[37m7\\e[0m"
+ },
+ {
+  "name": "bg_16",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[40m0\\e[41m1\\e[42m2\\e[43m3\\e[44m4\\e[45m5\\e[46m6\\e[47m7\\e[0m"
+ },
+ {
+  "name": "fg_bright_16",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[90m0\\e[91m1\\e[92m2\\e[93m3\\e[94m4\\e[95m5\\e[96m6\\e[97m7\\e[0m"
+ },
+ {
+  "name": "bg_bright_16",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[100m0\\e[101m1\\e[102m2\\e[103m3\\e[104m4\\e[105m5\\e[106m6\\e[107m7\\e[0m"
+ },
+ {
+  "name": "fg_256",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[38;5;196mR\\e[38;5;21mB\\e[38;5;232mG\\e[38;5;15mW\\e[0m"
+ },
+ {
+  "name": "bg_256",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[48;5;196mR\\e[48;5;21mB\\e[48;5;240mG\\e[0m"
+ },
+ {
+  "name": "truecolor",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[38;2;10;200;30mf\\e[48;2;200;10;30mb\\e[0m"
+ },
+ {
+  "name": "truecolor_colon_form",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[38:2::10:200:30mf\\e[0m",
+  "note": "ITU colon-separated form"
+ },
+ {
+  "name": "default_colors_reset",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[31;44mA\\e[39mB\\e[49mC"
+ },
+ {
+  "name": "fg_and_bold",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[1;31mbold-red\\e[0m"
+ },
+ {
+  "name": "fg_reverse",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[31;7mrev-red\\e[0m"
+ },
+ {
+  "name": "underline_double",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[21mdbl\\e[0m"
+ },
+ {
+  "name": "underline_curly",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[4:3mcurl\\e[0m"
+ },
+ {
+  "name": "underline_off_variants",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[4mA\\e[4:0mB"
+ },
+ {
+  "name": "cup_basic",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[3;5HX\\e[1;1HY"
+ },
+ {
+  "name": "cursor_up_down",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[3;3H\\e[AU\\e[2BD"
+ },
+ {
+  "name": "cursor_left_right",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[1;10H\\e[3DL\\e[5CR"
+ },
+ {
+  "name": "cursor_next_prev_line",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[2;5H\\e[2EN\\e[1FP"
+ },
+ {
+  "name": "cursor_column_abs",
+  "cols": 20,
+  "rows": 6,
+  "input": "abc\\e[10Gx\\e[1Gy"
+ },
+ {
+  "name": "cursor_row_abs",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[5dZ\\e[2dY"
+ },
+ {
+  "name": "hvp",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[4;6fH"
+ },
+ {
+  "name": "save_restore_cursor",
+  "cols": 20,
+  "rows": 6,
+  "input": "ab\\e7\\e[5;5Hzz\\e8cd"
+ },
+ {
+  "name": "save_restore_cursor_csi",
+  "cols": 20,
+  "rows": 6,
+  "input": "ab\\e[s\\e[5;5Hzz\\e[ucd"
+ },
+ {
+  "name": "cursor_clamps_at_edges",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[100;100HE\\e[0;0HS"
+ },
+ {
+  "name": "erase_display_below",
+  "cols": 20,
+  "rows": 6,
+  "input": "AAAA\r\nBBBB\r\nCCCC\\e[2;3H\\e[0J"
+ },
+ {
+  "name": "erase_display_above",
+  "cols": 20,
+  "rows": 6,
+  "input": "AAAA\r\nBBBB\r\nCCCC\\e[2;3H\\e[1J"
+ },
+ {
+  "name": "erase_display_all",
+  "cols": 20,
+  "rows": 6,
+  "input": "AAAA\r\nBBBB\\e[2J"
+ },
+ {
+  "name": "erase_line_right",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;4H\\e[0K"
+ },
+ {
+  "name": "erase_line_left",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;4H\\e[1K"
+ },
+ {
+  "name": "erase_line_all",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;4H\\e[2K"
+ },
+ {
+  "name": "erase_chars",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;2H\\e[3X"
+ },
+ {
+  "name": "erase_keeps_background",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[44mABCDEF\\e[1;3H\\e[0K\\e[0m"
+ },
+ {
+  "name": "linefeed_scrolls",
+  "cols": 20,
+  "rows": 5,
+  "input": "1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8"
+ },
+ {
+  "name": "scroll_region",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[2;4r\\e[2;1H1\r\n2\r\n3\r\n4\r\n5"
+ },
+ {
+  "name": "scroll_region_outside_untouched",
+  "cols": 20,
+  "rows": 6,
+  "input": "T\r\n\\e[3;5r\\e[5;1Ha\r\nb\r\nc"
+ },
+ {
+  "name": "reverse_index_scrolls_down",
+  "cols": 20,
+  "rows": 4,
+  "input": "A\r\nB\r\nC\\e[1;1H\\eM\\eM"
+ },
+ {
+  "name": "scroll_up_csi",
+  "cols": 20,
+  "rows": 4,
+  "input": "1\r\n2\r\n3\r\n4\\e[2S"
+ },
+ {
+  "name": "scroll_down_csi",
+  "cols": 20,
+  "rows": 4,
+  "input": "1\r\n2\r\n3\r\n4\\e[2T"
+ },
+ {
+  "name": "index_and_nel",
+  "cols": 20,
+  "rows": 4,
+  "input": "A\\eDB\\eEC"
+ },
+ {
+  "name": "insert_lines",
+  "cols": 20,
+  "rows": 5,
+  "input": "1\r\n2\r\n3\r\n4\\e[2;1H\\e[2L"
+ },
+ {
+  "name": "delete_lines",
+  "cols": 20,
+  "rows": 5,
+  "input": "1\r\n2\r\n3\r\n4\\e[2;1H\\e[2M"
+ },
+ {
+  "name": "insert_chars",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;3H\\e[2@"
+ },
+ {
+  "name": "delete_chars",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;3H\\e[2P"
+ },
+ {
+  "name": "insert_mode",
+  "cols": 20,
+  "rows": 6,
+  "input": "ABCDEF\\e[1;3H\\e[4hxy\\e[4l"
+ },
+ {
+  "name": "repeat_char",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\\e[5b"
+ },
+ {
+  "name": "wide_cjk",
+  "cols": 20,
+  "rows": 6,
+  "input": "ab\u4f60\u597dcd"
+ },
+ {
+  "name": "wide_wraps_at_edge",
+  "cols": 19,
+  "rows": 6,
+  "input": "123456789012345678\u4f60X",
+  "note": "wide char that does not fit on the first line"
+ },
+ {
+  "name": "combining_mark",
+  "cols": 20,
+  "rows": 6,
+  "input": "e\u0301x"
+ },
+ {
+  "name": "emoji_wide",
+  "cols": 20,
+  "rows": 6,
+  "input": "a\ud83d\ude00b"
+ },
+ {
+  "name": "autowrap",
+  "cols": 20,
+  "rows": 6,
+  "input": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+ },
+ {
+  "name": "pending_wrap_then_cr",
+  "cols": 20,
+  "rows": 6,
+  "input": "xxxxxxxxxxxxxxxxxxxx\rY",
+  "note": "writing the last column then CR must not wrap"
+ },
+ {
+  "name": "autowrap_off",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[?7lxxxxxxxxxxxxxxxxxxxxxxxxx\\e[?7h"
+ },
+ {
+  "name": "origin_mode",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[2;4r\\e[?6h\\e[1;1HO\\e[?6l"
+ },
+ {
+  "name": "tab_default_stops",
+  "cols": 30,
+  "rows": 6,
+  "input": "a\tb\tc"
+ },
+ {
+  "name": "tab_set_and_clear",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[3g\\e[1;5H\\eH\\e[1;1Ha\tb",
+  "note": "clear all stops, set one at col 5"
+ },
+ {
+  "name": "tab_forward_backward",
+  "cols": 30,
+  "rows": 6,
+  "input": "\\e[2Ia\\e[1Zb"
+ },
+ {
+  "name": "alt_screen_1049",
+  "cols": 20,
+  "rows": 4,
+  "input": "main\r\n\\e[?1049halt\\e[?1049l"
+ },
+ {
+  "name": "alt_screen_stays",
+  "cols": 20,
+  "rows": 4,
+  "input": "main\r\n\\e[?1049halt"
+ },
+ {
+  "name": "alt_screen_47",
+  "cols": 20,
+  "rows": 4,
+  "input": "main\\e[?47halt\\e[?47l"
+ },
+ {
+  "name": "dec_special_graphics",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e(0lqqk\r\nx  x\r\nmqqj\\e(B",
+  "note": "line drawing"
+ },
+ {
+  "name": "shift_out_in",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e)0a\u000eq\u000fq"
+ },
+ {
+  "name": "cursor_hidden",
+  "cols": 20,
+  "rows": 6,
+  "input": "ab\\e[?25l",
+  "check": {
+   "cursor_hidden": true
+  }
+ },
+ {
+  "name": "cursor_shape_bar",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[5 q",
+  "check": {
+   "cursor_shape": "Bar"
+  }
+ },
+ {
+  "name": "cursor_shape_underline",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e[3 q",
+  "check": {
+   "cursor_shape": "Underline"
+  }
+ },
+ {
+  "name": "osc_title",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e]0;my title\u0007",
+  "check": {
+   "title": "my title"
+  }
+ },
+ {
+  "name": "osc_title_st",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e]2;second\\e\\\\",
+  "check": {
+   "title": "second"
+  }
+ },
+ {
+  "name": "osc8_hyperlink",
+  "cols": 20,
+  "rows": 6,
+  "input": "\\e]8;;http://example.com\\e\\link\\e]8;;\\e\\ x",
+  "check": {
+   "hyperlink_at": [
+    [
+     0,
+     0,
+     "http://example.com"
+    ],
+    [
+     0,
+     3,
+     "http://example.com"
+    ]
+   ]
+  }
+ },
+ {
+  "name": "resize_grow_cols",
+  "cols": 10,
+  "rows": 4,
+  "input": "abcdefghij\r\nsecond",
+  "resize": [
+   20,
+   4
+  ],
+  "note": "live resize; runs through Tap on Unix only"
+ },
+ {
+  "name": "resize_shrink_cols",
+  "cols": 20,
+  "rows": 4,
+  "input": "abcdefghijklmnopqrst\r\nsecond",
+  "resize": [
+   10,
+   4
+  ],
+  "note": "whether a long line reflows is terminal-dependent"
+ },
+ {
+  "name": "resize_grow_rows",
+  "cols": 10,
+  "rows": 3,
+  "input": "1\r\n2\r\n3\r\n4\r\n5",
+  "resize": [
+   10,
+   6
+  ],
+  "note": "scrolled-off lines are not pulled back by every emulator"
+ },
+ {
+  "name": "resize_shrink_rows",
+  "cols": 10,
+  "rows": 6,
+  "input": "1\r\n2\r\n3",
+  "resize": [
+   10,
+   3
+  ]
+ }
+]
