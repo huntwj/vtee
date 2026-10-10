@@ -34,16 +34,6 @@ pub enum ReadError {
     },
 }
 
-impl ReadError {
-    /// The exit code (design section 6.10): data errors are 65, read errors 74.
-    pub fn code(&self) -> exitcode::ExitCode {
-        match self {
-            ReadError::Io { .. } => exitcode::IOERR,
-            ReadError::Bad { .. } => exitcode::DATAERR,
-        }
-    }
-}
-
 /// The lines of a script up to the first one that is not a command, and that problem if there is one. A plain
 /// `--script` run executes the lines before the problem and then stops with it; a run with `--expect` refuses to start.
 #[derive(Debug)]

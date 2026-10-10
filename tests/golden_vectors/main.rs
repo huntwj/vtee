@@ -119,6 +119,56 @@ fn every_run_vector_gives_its_recorded_verdict() {
     }
 }
 
+/// The command line of a run vector: `--expect golden.golden --snapshot run.ndjson` and the vector's own options, run
+/// in the vector's directory so the golden's name in the report is the vector's.
+fn vtee_on(dir: &Path, extra: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_vtee"))
+        .current_dir(dir)
+        .env_remove("CI")
+        .env_remove("FORCE_COLOR")
+        .env("NO_COLOR", "1")
+        .args(["--expect", "golden.golden", "--snapshot", "run.ndjson"])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+/// The same vectors, through the command: the options, the report on standard output, the message on standard error
+/// and the exit code are what a second implementation of the runner has to match.
+#[test]
+fn every_run_vector_gives_its_verdict_through_the_command() {
+    for dir in dirs("runs") {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let args = lines(&dir.join("args"));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let exit: i32 = read(&dir.join("exit")).trim().parse().unwrap();
+
+        let text = vtee_on(&dir, &args);
+        assert_eq!(
+            text.status.code(),
+            Some(exit),
+            "{name}: exit code
+{}",
+            String::from_utf8_lossy(&text.stderr)
+        );
+        if dir.join("expected.txt").exists() {
+            assert_eq!(String::from_utf8_lossy(&text.stdout), read(&dir.join("expected.txt")), "{name}: text report");
+            assert!(text.stderr.is_empty(), "{name}: standard error is not empty");
+            let mut json_args = args.clone();
+            json_args.extend(["--format", "json"]);
+            let json = vtee_on(&dir, &json_args);
+            assert_eq!(json.status.code(), Some(exit), "{name}: exit code with --format json");
+            // A refusal suggests the command that was typed, which here includes `--format json`.
+            let json_out = String::from_utf8_lossy(&json.stdout).replace(" --format json", "");
+            assert_eq!(json_out, read(&dir.join("expected.json")), "{name}: JSON report");
+        } else {
+            let want = read(&dir.join("error"));
+            assert_eq!(String::from_utf8_lossy(&text.stderr).trim_end(), want.trim_end(), "{name}: message");
+            assert!(text.stdout.is_empty(), "{name}: standard output is not empty");
+        }
+    }
+}
+
 #[test]
 fn every_reject_vector_is_malformed() {
     let mut count = 0;

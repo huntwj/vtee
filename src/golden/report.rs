@@ -105,6 +105,13 @@ fn refused(
     }
 }
 
+/// The report for a golden this build will not compare because of its own numbers (section 6.8, step 2): decided from
+/// the header alone, so the run it would have judged need not start.
+pub fn refuse_golden(golden: &Golden, invocation: &Invocation, refusal: Refusal, options: &CheckOptions) -> Report {
+    let build = Build::current();
+    refused(golden, invocation, refusal, (build.schema, build.semantics), options)
+}
+
 /// The report for a golden that could not even be read because its grammar number is above this build's: nothing about
 /// the file past its first line is known.
 pub fn refuse_unread(invocation: &Invocation, refusal: Refusal, options: &CheckOptions) -> Report {

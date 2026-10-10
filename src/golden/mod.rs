@@ -25,7 +25,7 @@ pub use model::{
 pub use parse::{LoadError, ParseError};
 pub use report::{
     CheckError, CheckOptions, DEFAULT_MAX_MISMATCHES, Report, Verdict, check_run, check_saved, describe_wait,
-    display_name, refuse_unread,
+    display_name, refuse_golden, refuse_unread,
 };
 pub use run::{Run, RunError, RunProblem, read_run, read_run_for_build};
 pub use update::{ScreenChange, Update, plan_record, plan_screen, restamped};
