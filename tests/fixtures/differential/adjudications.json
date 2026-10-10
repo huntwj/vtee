@@ -136,14 +136,6 @@
    "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"a─q                 \" vt100=\"aqq                 \""
   ]
  },
- "tab_default_stops": {
-  "verdict": "vtee BUG (cosmetic)",
-  "reason": "A tab writes a literal TAB character into the cell where it starts, so snapshot text contains TAB where xterm and both oracles have a blank. Positions are right. A mapping fix in snapshot.rs (render TAB as a space) would close it; not fixed here.",
-  "problems": [
-   "vtee vs avt: row 0 text, first difference at col 1: vtee=\"a\\t      b\\t      c             \" avt=\"a       b       c             \"",
-   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"a\\t      b\\t      c             \" vt100=\"a       b       c             \""
-  ]
- },
  "tab_forward_backward": {
   "verdict": "vtee correct",
   "reason": "CSI n I (CHT) and CSI Z (CBT) work; vt100 lacks them.",
@@ -153,12 +145,11 @@
   ]
  },
  "tab_set_and_clear": {
-  "verdict": "vtee BUG (cosmetic)",
-  "reason": "Same TAB-in-cell artifact as tab_default_stops; the tab stop positions are correct (b lands in column 4, as in avt). vt100 ignores TBC/HTS.",
+  "verdict": "vtee correct",
+  "reason": "HTS/TBC move the tab stops (b lands in column 4, as in avt); vt100 ignores TBC/HTS.",
   "problems": [
    "oracles disagree: row 0 text, first difference at col 4: avt=\"a   b               \" vt100=\"a       b           \"",
-   "vtee vs avt: row 0 text, first difference at col 1: vtee=\"a\\t  b               \" avt=\"a   b               \"",
-   "vtee vs vt100: row 0 text, first difference at col 1: vtee=\"a\\t  b               \" vt100=\"a       b           \""
+   "vtee vs vt100: row 0 text, first difference at col 4: vtee=\"a   b               \" vt100=\"a       b           \""
   ]
  },
  "truecolor_colon_form": {

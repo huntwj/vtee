@@ -224,6 +224,21 @@ On Windows, `?1000`, `?1006` and `?1` never appear in `modes`: ConPTY consumes t
 forward them, so the emulator never sees them. `?2004` does appear. See
 [Windows](windows.md#terminal-modes-that-conpty-hides) for the evidence.
 
+## Known terminal-emulation differences
+
+The emulator is `alacritty_terminal` 0.26.0. A differential test compares 80 escape-sequence cases against two
+independent emulators (`avt`, `vt100`); three behaviours differ from xterm and are accepted for 0.1.0 (evidence in
+`docs/decisions.md`):
+
+| Sequence | vtee snapshot | xterm |
+| --- | --- | --- |
+| `CSI 1 J` (erase above) with the cursor on the second row | the first row keeps its text | the first row is erased |
+| `CSI ? 6 l` (reset origin mode) | the cursor stays where it was | the cursor goes home |
+| `CSI ? 47 h` / `CSI ? 47 l` (switch screen without clearing) | ignored: output lands on the main screen | switches screens |
+
+`CSI ? 1049 h` (the usual alternate-screen sequence, used by `vim`, `less` and `top`) works and is not affected. Long
+lines re-wrap when the width shrinks, as in alacritty and VTE; xterm truncates them.
+
 ## Errors
 
 An error is one line: `{"cmd":"error","message":"..."}`. `vtee --connect` still exits 0 when it prints one.
