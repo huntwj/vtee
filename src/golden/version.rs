@@ -34,12 +34,15 @@ pub enum Refusal {
 }
 
 /// The command line of the run that is being reported, so a refusal can say what to type next.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Invocation {
     /// The golden's path as it was given.
     pub golden: String,
-    /// The whole command, for example `vtee --script flow.ndjson --expect flow.golden -- tf -n`.
+    /// The command up to the program, for example `vtee --script flow.ndjson --expect flow.golden`.
     pub command: String,
+    /// What must stay last on the command line, for example `-- tf -n`: an option added to `command` goes before it,
+    /// or it would be given to the program. Empty when there is no program.
+    pub tail: String,
 }
 
 /// One suggested next step after a refusal.
@@ -75,8 +78,9 @@ impl Refusal {
 
     /// What to do about it (section 5.3).
     pub fn way_forward(&self, run: &Invocation) -> Vec<WayForward> {
-        let restamp = format!("{} --update=restamp", run.command);
-        let record = format!("{} --update", run.command);
+        let tail = if run.tail.is_empty() { String::new() } else { format!(" {}", run.tail) };
+        let restamp = format!("{} --update=restamp{tail}", run.command);
+        let record = format!("{} --update{tail}", run.command);
         let semantics = || {
             vec![
                 WayForward {
@@ -135,5 +139,23 @@ impl Golden {
             Semantics::Number(n) => Err(Refusal::SnapshotSemantics { golden: n, snapshot: semantics }),
             Semantics::Unknown => Err(Refusal::Semantics { golden: Semantics::Unknown, tool: semantics }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suggested_option_goes_before_the_program() {
+        let run = Invocation {
+            golden: "flow.golden".to_string(),
+            command: "vtee --script flow.ndjson --expect flow.golden".to_string(),
+            tail: "-- tf -n".to_string(),
+        };
+        let refusal = Refusal::Semantics { golden: Semantics::Number(1), tool: 2 };
+        let steps = refusal.way_forward(&run);
+        assert_eq!(steps[0].commands, ["vtee --script flow.ndjson --expect flow.golden --update=restamp -- tf -n"]);
+        assert_eq!(steps[1].commands, ["vtee --script flow.ndjson --expect flow.golden --update -- tf -n"]);
     }
 }

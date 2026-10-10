@@ -765,6 +765,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
         let invocation = Invocation {
             golden: "dir/g.golden".to_string(),
             command: "vtee --expect dir/g.golden --snapshot run.ndjson".to_string(),
+            ..Invocation::default()
         };
         check_saved(&golden, &invocation, saved, &CheckOptions::default()).unwrap()
     }
@@ -801,6 +802,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
         let invocation = Invocation {
             golden: "g.golden".to_string(),
             command: "vtee --expect g.golden --snapshot run.ndjson".to_string(),
+            ..Invocation::default()
         };
         let r = check_saved(&golden, &invocation, &saved("x7", 1, 1), &CheckOptions::default()).unwrap();
         assert_eq!(r.exit_code(), 2);
@@ -825,7 +827,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
         let provisional =
             "{\"schema_version\":1,\"byte_offset\":1,\"cols\":1,\"rows\":1,\"cells\":[[{\"ch\":\"a\"}]]}\n";
         let golden = Golden::parse_str(A2).unwrap();
-        let invocation = Invocation { golden: "g.golden".to_string(), command: String::new() };
+        let invocation = Invocation { golden: "g.golden".to_string(), ..Invocation::default() };
         let e = check_saved(&golden, &invocation, provisional, &CheckOptions::default()).unwrap_err();
         assert!(e.to_string().starts_with("snapshot: line 1: it has no `semantics_version`"), "{e}");
     }
@@ -843,7 +845,7 @@ mask row=0 cols=3-4 text=/[0-9]+/
             "",
         ))
         .unwrap();
-        let invocation = Invocation { golden: "g.golden".to_string(), command: String::new() };
+        let invocation = Invocation { golden: "g.golden".to_string(), ..Invocation::default() };
         let options = CheckOptions { max_mismatches: 1, ..CheckOptions::default() };
         let r = check_saved(&golden, &invocation, &saved("x7", 1, 1), &options).unwrap();
         let text = r.to_text();

@@ -65,7 +65,7 @@ fn run_vector(golden: &[u8], saved: &str, args: &[String]) -> Outcome {
         "vtee --expect golden.golden --snapshot run.ndjson{}",
         args.iter().map(|a| format!(" {a}")).collect::<String>()
     );
-    let invocation = Invocation { golden: "golden.golden".to_string(), command };
+    let invocation = Invocation { golden: "golden.golden".to_string(), command, tail: String::new() };
     let golden = match Golden::parse(golden) {
         Ok(g) => g,
         Err(LoadError::Malformed(e)) => return Outcome::Error { exit: 65, message: format!("golden.golden: {e}") },
