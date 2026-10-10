@@ -173,14 +173,13 @@ pub struct Cell {
     /// SGR 58 underline colour; `Default` when none was set.
     #[serde(skip_serializing_if = "Color::is_default")]
     pub underline_color: Color,
-    /// Always false: `alacritty_terminal` has no blink flag at all (a known, accepted gap -
-    /// see docs/decisions.md).
-    #[serde(skip_serializing_if = "is_false")]
-    pub blink: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub reverse: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub strike: bool,
+    /// SGR 8: the text stays in `ch`, a terminal just does not show it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub conceal: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hyperlink: Option<String>,
 }
@@ -196,9 +195,9 @@ impl Default for Cell {
             italic: false,
             underline: UnderlineStyle::None,
             underline_color: Color::Default,
-            blink: false,
             reverse: false,
             strike: false,
+            conceal: false,
             hyperlink: None,
         }
     }
@@ -298,9 +297,9 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
                 italic: f.contains(Flags::ITALIC),
                 underline: underline_of(f),
                 underline_color: cell.underline_color().map(convert_color).unwrap_or_default(),
-                blink: false,
                 reverse: f.contains(Flags::INVERSE),
                 strike: f.contains(Flags::STRIKEOUT),
+                conceal: f.contains(Flags::HIDDEN),
                 hyperlink: cell.hyperlink().map(|h| h.uri().to_string()),
             });
         }
@@ -399,6 +398,9 @@ pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
             }
             if cell.strike {
                 codes.push("9".to_string());
+            }
+            if cell.conceal {
+                codes.push("8".to_string());
             }
             push_color_codes(&mut codes, cell.fg, true);
             push_color_codes(&mut codes, cell.bg, false);
@@ -643,6 +645,22 @@ mod emulator_tests {
     }
 
     #[test]
+    fn conceal_is_reported_and_blink_is_not() {
+        let s = snap(b"\x1b[8mh\x1b[0mv\x1b[5mb", 10, 2);
+        let c = &s.cells[0];
+        assert!(c[0].conceal && c[0].ch == "h", "concealed text stays in ch");
+        assert!(!c[1].conceal);
+        let json = serde_json::to_string(&s.cells).unwrap();
+        assert!(!json.contains("blink"), "blink is reserved and never written: {json}");
+        assert_eq!(serde_json::to_value(&c[0]).unwrap(), serde_json::json!({"ch": "h", "conceal": true}));
+    }
+
+    #[test]
+    fn redraw_reproduces_concealed_text() {
+        assert_round_trips(b"\x1b[8msecret\x1b[0m shown", 30, 3);
+    }
+
+    #[test]
     fn cells_are_sparse_and_defaults_are_never_written() {
         assert_eq!(serde_json::to_string(&Cell::default()).unwrap(), "{}");
         let s = snap(b"\x1b[1;31mR \x1b[0m\x1b[4m\x1b[58;2;1;2;3mU\x1b[0m", 6, 2);
@@ -658,7 +676,7 @@ mod emulator_tests {
     fn absent_fields_read_as_defaults_and_explicit_defaults_are_accepted() {
         assert_eq!(serde_json::from_str::<Cell>("{}").unwrap(), Cell::default());
         let dense = r#"{"ch":" ","fg":"default","bg":"default","bold":false,"dim":false,"italic":false,
-            "underline":"none","underline_color":"default","blink":false,"reverse":false,"strike":false,"hyperlink":null}"#;
+            "underline":"none","underline_color":"default","reverse":false,"strike":false,"conceal":false,"hyperlink":null}"#;
         assert_eq!(serde_json::from_str::<Cell>(dense).unwrap(), Cell::default());
         let continuation: Cell = serde_json::from_str(r#"{"ch":""}"#).unwrap();
         assert_eq!(continuation.ch, "", "an empty ch is a wide character's continuation cell, not a default");
