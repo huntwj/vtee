@@ -143,6 +143,51 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `replay`: feed an asciicast v2 recording (written by `--log`) into a fresh emulator and print the
+/// final screen, as text or, with `json`, as the snapshot JSON.
+pub fn run_replay(path: &Path, json: bool) -> ExitCode {
+    let first_line = match std::fs::File::open(path) {
+        Ok(f) => std::io::BufReader::new(f).lines().next(),
+        Err(e) => return fail(exitcode::NOINPUT, format!("failed to open {}: {e}", path.display())),
+    };
+    let header: Option<serde_json::Value> = first_line.and_then(Result::ok).and_then(|l| serde_json::from_str(&l).ok());
+    let dimension = |key: &str| {
+        header
+            .as_ref()
+            .and_then(|h| h.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| (1..=u64::from(vtee::MAX_TERMINAL_DIMENSION)).contains(n))
+            .map(|n| n as u16)
+    };
+    let (Some(cols), Some(rows)) = (dimension("width"), dimension("height")) else {
+        return fail(
+            exitcode::DATAERR,
+            format!(
+                "{} is not an asciicast v2 recording: its first line has no usable width and height",
+                path.display()
+            ),
+        );
+    };
+    let snapshot = match vtee::replay(path, cols, rows) {
+        Ok(s) => s,
+        Err(e) => return fail(exitcode::DATAERR, format!("failed to replay {}: {e}", path.display())),
+    };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        match serde_json::to_string(&snapshot) {
+            Ok(text) => {
+                let _ = writeln!(out, "{text}");
+            }
+            Err(e) => return fail(exitcode::SOFTWARE, format!("failed to serialize the snapshot: {e}")),
+        }
+    } else {
+        print_text(&mut out, &vtee::CommandResult::Snapshot { snapshot });
+    }
+    let _ = out.flush();
+    ExitCode::SUCCESS
+}
+
 /// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark, which is not JSON.
 fn strip_bom(line: &str) -> &str {
     line.strip_prefix('\u{feff}').unwrap_or(line)

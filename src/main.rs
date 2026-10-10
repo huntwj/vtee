@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use clap_verbosity_flag::InfoLevel;
 use serde::{Deserialize, Serialize};
 
-use client::{ScriptOpts, run_connect, run_script};
+use client::{ScriptOpts, run_connect, run_replay, run_script};
 use output::{exit_code, fail, print_error, print_info};
 use session_cmds::{run_attach, run_kill, run_ls};
 
@@ -34,6 +34,14 @@ enum Commands {
     Ls,
     /// End a session: signal its holder process, clean up both its sockets and its pidfile.
     Kill { name: String },
+    /// Replay a recording made with `--log` and print the final screen (text rows by default).
+    Replay {
+        /// The asciicast v2 file to replay.
+        file: PathBuf,
+        /// Print the final snapshot as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `--writable[=<MODE>]`; a `ValueEnum` so an unknown mode gets clap's own error message.
@@ -198,6 +206,7 @@ fn main() -> ExitCode {
             Commands::Attach { name } => run_attach(name.as_deref()),
             Commands::Ls => run_ls(),
             Commands::Kill { name } => run_kill(name),
+            Commands::Replay { file, json } => run_replay(file, *json),
         };
     }
 

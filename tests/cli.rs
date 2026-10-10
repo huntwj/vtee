@@ -298,6 +298,69 @@ fn text_mode_prints_the_exit_status_on_one_line() {
     let _ = std::fs::remove_file(&script);
 }
 
+/// A program that prints `text`, then stays alive long enough to be stopped by the script run.
+fn prints_then_waits(text: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec!["cmd".into(), "/c".into(), format!("echo {text} & ping -n 30 127.0.0.1 >nul")]
+    } else {
+        vec!["sh".into(), "-c".into(), format!("echo {text}; sleep 30")]
+    }
+}
+
+/// `replay` shows the final screen of a `--log` recording, as text or JSON, with the size taken
+/// from the recording's header.
+#[test]
+fn replay_shows_the_final_screen_of_a_log() {
+    let log = std::env::temp_dir().join(format!("vtee-replay-{}.cast", std::process::id()));
+    let script = exit_script(&[r#"{"cmd":"wait_for","text":"replay-me-xyz","timeout_ms":15000}"#]);
+    let out = vtee()
+        .arg("--script")
+        .arg(&script)
+        .args(["--cols", "70", "--rows", "12", "--log"])
+        .arg(&log)
+        .arg("--")
+        .args(prints_then_waits("replay-me-xyz"))
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    vtee()
+        .arg("replay")
+        .arg(&log)
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--- snapshot").and(predicate::str::contains("replay-me-xyz")));
+
+    let out =
+        vtee().arg("replay").arg(&log).arg("--json").timeout(std::time::Duration::from_secs(10)).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!((snapshot["cols"].as_u64(), snapshot["rows"].as_u64()), (Some(70), Some(12)));
+    assert_eq!(snapshot["schema_version"], 1);
+    assert!(snapshot["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("replay-me-xyz")));
+
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&script);
+}
+
+#[test]
+fn replay_reports_a_missing_or_malformed_file() {
+    vtee().args(["replay", "no-such-recording.cast"]).assert().failure().code(exitcode::NOINPUT);
+
+    let bad = std::env::temp_dir().join(format!("vtee-replay-bad-{}.cast", std::process::id()));
+    std::fs::write(&bad, "this is not an asciicast file\n").unwrap();
+    vtee()
+        .arg("replay")
+        .arg(&bad)
+        .assert()
+        .failure()
+        .code(exitcode::DATAERR)
+        .stderr(predicate::str::contains("not an asciicast v2 recording"));
+    let _ = std::fs::remove_file(&bad);
+}
+
 /// Windows PowerShell 5.1 writes a UTF-8 byte order mark at the start of a file or pipe; the first
 /// command line must still parse.
 #[test]
