@@ -8,6 +8,7 @@ mod model;
 mod parse;
 pub mod pattern;
 mod version;
+mod write;
 
 pub use model::{
     Assert, AssertText, Attr, AttrCheck, Entry, GRAMMAR_VERSION, Golden, GoldenScreen, Ignore, MODE_VOCABULARY, Mask,
@@ -15,3 +16,4 @@ pub use model::{
 };
 pub use parse::{LoadError, ParseError};
 pub use version::{Build, Invocation, Refusal, WayForward};
+pub use write::{RecordOptions, portable_profile};
