@@ -23,7 +23,7 @@ pub use session::{
     SessionPaths, SessionRecord, default_log_path, session_is_live, session_names, session_paths, session_record,
     write_session_record,
 };
-pub use snapshot::{Cell, Color, Cursor, CursorShape, Snapshot, UnderlineStyle, redraw_sequence};
+pub use snapshot::{Cell, Color, Cursor, CursorShape, SCHEMA_VERSION, Snapshot, UnderlineStyle, redraw_sequence};
 #[cfg(windows)]
 pub use tap::restore_default_ctrl_c;
 pub use tap::{SpawnOptions, Tap};

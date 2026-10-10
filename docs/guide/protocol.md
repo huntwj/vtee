@@ -134,11 +134,12 @@ is internally consistent: the state and `byte_offset` always agree.
 A real reply from a 12 by 3 screen, with the cell lists shortened:
 
 ```
-{"cmd":"snapshot","snapshot":{"byte_offset":2,"cols":12,"rows":3,"lines":["$           ","            ","            "],"cells":[[{"ch":"$","fg":"Default","bg":"Default","bold":false,"dim":false,"italic":false,"underline":false,"underline_style":"none","underline_color":"Default","blink":false,"reverse":false,"strike":false,"hyperlink":null}, ...]],"cursor":{"row":0,"col":2,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
+{"cmd":"snapshot","snapshot":{"schema_version":1,"byte_offset":2,"cols":12,"rows":3,"lines":["$           ","            ","            "],"cells":[[{"ch":"$","fg":"Default","bg":"Default","bold":false,"dim":false,"italic":false,"underline":false,"underline_style":"none","underline_color":"Default","blink":false,"reverse":false,"strike":false,"hyperlink":null}, ...]],"cursor":{"row":0,"col":2,"hidden":false,"shape":"Block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[]}}
 ```
 
 | Field | Type | Meaning |
 | --- | --- | --- |
+| `schema_version` | integer | The version of this schema, currently `1`. Always the first field. JSON without it reads as `1`. |
 | `byte_offset` | integer | Total bytes of program output processed so far. Use it to tell whether the screen can have changed between two snapshots. |
 | `cols`, `rows` | integer | Screen size. |
 | `lines` | array of string | One string per row, padded with spaces to `cols`. Combining marks are included. Convenient when attributes do not matter. |
@@ -148,6 +149,14 @@ A real reply from a 12 by 3 screen, with the cell lists shortened:
 | `alt_screen` | boolean | Whether the alternate screen (used by full-screen programs) is active. |
 | `title` | string or null | The window title set by the program, `null` if none. |
 | `scrollback` | array of string | Rows that scrolled off the top, oldest first, text only. |
+
+### Schema versioning
+
+`schema_version` changes only when an existing field is renamed, removed or changes meaning. Adding a field does
+not change it, so a reader should ignore fields it does not know. A stored golden should record the version it was
+written with: if a snapshot arrives with a higher number than the one a golden was recorded under, regenerate
+and review the golden instead of trusting a comparison across versions. Fields added so far without a bump:
+`underline_style` and `underline_color` on cells (older JSON without them reads as `"none"` and `"Default"`).
 
 ### Cell
 
