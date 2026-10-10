@@ -1,0 +1,3 @@
+--expect
+g.golden
+--update=migrate

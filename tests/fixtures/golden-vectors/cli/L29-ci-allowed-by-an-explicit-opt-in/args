@@ -1,0 +1,5 @@
+--expect
+new.golden
+--snapshot
+missing.ndjson
+--update

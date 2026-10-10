@@ -14,6 +14,7 @@ use vtee::golden::{
     CheckError, CheckOptions, Golden, Invocation, LoadError, check_saved, escape, pattern::Pattern, refuse_unread,
 };
 
+mod commands;
 mod defs;
 mod more;
 
@@ -166,6 +167,124 @@ fn every_run_vector_gives_its_verdict_through_the_command() {
             assert_eq!(String::from_utf8_lossy(&text.stderr).trim_end(), want.trim_end(), "{name}: message");
             assert!(text.stdout.is_empty(), "{name}: standard output is not empty");
         }
+    }
+}
+
+// ---- the command line and --update vectors -----------------------------------------------------------------------
+
+fn scratch(label: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "vtee-vectors-{label}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Runs `vtee` in `dir` with `CI`, `VTEE_ALLOW_UPDATE` and colours out of the way, then `env`.
+fn vtee_with(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_vtee"))
+        .current_dir(dir)
+        .env_remove("CI")
+        .env_remove("VTEE_ALLOW_UPDATE")
+        .env_remove("FORCE_COLOR")
+        .env("NO_COLOR", "1")
+        .envs(env.iter().copied())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn first_stderr_line(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").to_string()
+}
+
+/// What a command-line vector does, run in a scratch directory holding its files.
+fn run_cli(files: &[(String, Vec<u8>)], args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+    let dir = scratch("cli");
+    for (name, bytes) in files {
+        fs::write(dir.join(name), bytes).unwrap();
+    }
+    let out = vtee_with(&dir, args, env);
+    let _ = fs::remove_dir_all(&dir);
+    out
+}
+
+/// The result of an `--update` vector.
+struct Updated {
+    exit: i32,
+    stdout: String,
+    after: Option<Vec<u8>>,
+}
+
+fn run_update(before: Option<&[u8]>, run: &str, args: &[&str]) -> Updated {
+    let dir = scratch("update");
+    if let Some(before) = before {
+        fs::write(dir.join("golden.golden"), before).unwrap();
+    }
+    fs::write(dir.join("run.ndjson"), run).unwrap();
+    let mut all = vec!["--expect", "golden.golden", "--snapshot", "run.ndjson"];
+    all.extend_from_slice(args);
+    let out = vtee_with(&dir, &all, &[]);
+    let after = fs::read(dir.join("golden.golden")).ok();
+    let _ = fs::remove_dir_all(&dir);
+    Updated { exit: out.status.code().unwrap_or(-1), stdout: String::from_utf8_lossy(&out.stdout).into_owned(), after }
+}
+
+fn env_pairs(lines: &[String]) -> Vec<(&str, &str)> {
+    lines.iter().map(|l| l.split_once('=').expect("KEY=VALUE")).collect()
+}
+
+#[test]
+fn every_command_line_vector_gives_its_recorded_result() {
+    let vectors = dirs("cli");
+    assert!(vectors.len() >= 35, "only {} command-line vectors", vectors.len());
+    for dir in vectors {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let files: Vec<(String, Vec<u8>)> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.file_name().unwrap().to_string_lossy().to_string(), fs::read(&p).unwrap()))
+            .collect();
+        let args = lines(&dir.join("args"));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let env = if dir.join("env").exists() { lines(&dir.join("env")) } else { Vec::new() };
+        let exit: i32 = read(&dir.join("exit")).trim().parse().unwrap();
+        let out = run_cli(&files, &args, &env_pairs(&env));
+        let stderr_line = first_stderr_line(&out);
+        assert_eq!(out.status.code(), Some(exit), "{name}: exit code\n{}", String::from_utf8_lossy(&out.stderr));
+        if dir.join("stderr-first-line").exists() {
+            let clause = read(&dir.join("stderr-first-line"));
+            let clause = clause.trim_end_matches('\n');
+            assert!(
+                stderr_line.starts_with(clause),
+                "{name}: first line of stderr\nwanted: {clause}\ngot:    {stderr_line}"
+            );
+        } else {
+            assert!(out.stderr.is_empty(), "{name}: unexpected message {stderr_line}");
+        }
+    }
+}
+
+#[test]
+fn every_update_vector_rewrites_the_golden_as_recorded() {
+    let vectors = dirs("update");
+    assert!(vectors.len() >= 15, "only {} update vectors", vectors.len());
+    for dir in vectors {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let before = fs::read(dir.join("before.golden")).ok();
+        let run = read(&dir.join("run.ndjson"));
+        let args = lines(&dir.join("args"));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let exit: i32 = read(&dir.join("exit")).trim().parse().unwrap();
+        let got = run_update(before.as_deref(), &run, &args);
+        assert_eq!(got.exit, exit, "{name}: exit code\n{}", got.stdout);
+        assert_eq!(got.stdout, read(&dir.join("stdout")), "{name}: standard output");
+        assert_eq!(got.after, fs::read(dir.join("after.golden")).ok(), "{name}: the golden afterwards");
     }
 }
 
@@ -406,6 +525,52 @@ fn bless() {
         }
     }
 
+    for vector in commands::cli_vectors() {
+        let dir = format!("cli/{}", vector.dir);
+        let mut all_files: Vec<(String, Vec<u8>)> =
+            vector.files.iter().map(|(n, b)| (n.to_string(), b.clone())).collect();
+        let out = run_cli(&all_files, &vector.args, &vector.env);
+        let got = first_stderr_line(&out);
+        assert_eq!(out.status.code(), Some(vector.exit), "{}: wrong exit code\n{got}", vector.dir);
+        assert!(
+            got.starts_with(vector.first_line),
+            "{}: message\nwanted: {}\ngot:    {got}",
+            vector.dir,
+            vector.first_line
+        );
+        assert!(!vector.first_line.is_empty() || out.stderr.is_empty(), "{}: unexpected message", vector.dir);
+        all_files.sort();
+        for (name, bytes) in &all_files {
+            write(format!("{dir}/{name}"), bytes);
+        }
+        write(format!("{dir}/args"), vector.args.iter().map(|a| format!("{a}\n")).collect::<String>().as_bytes());
+        if !vector.env.is_empty() {
+            let env: String = vector.env.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+            write(format!("{dir}/env"), env.as_bytes());
+        }
+        if !vector.first_line.is_empty() {
+            write(format!("{dir}/stderr-first-line"), format!("{}\n", vector.first_line).as_bytes());
+        }
+        write(format!("{dir}/exit"), format!("{}\n", vector.exit).as_bytes());
+    }
+    for vector in commands::update_vectors() {
+        let dir = format!("update/{}", vector.dir);
+        let got = run_update(vector.before.as_deref(), &vector.run, &vector.args);
+        assert_eq!(got.exit, vector.exit, "{}: wrong exit code\n{}", vector.dir, got.stdout);
+        for needle in vector.contains {
+            assert!(got.stdout.contains(needle), "{}: output lacks {needle:?}\n{}", vector.dir, got.stdout);
+        }
+        if let Some(before) = &vector.before {
+            write(format!("{dir}/before.golden"), before);
+        }
+        write(format!("{dir}/run.ndjson"), vector.run.as_bytes());
+        write(format!("{dir}/args"), vector.args.iter().map(|a| format!("{a}\n")).collect::<String>().as_bytes());
+        if let Some(after) = &got.after {
+            write(format!("{dir}/after.golden"), after);
+        }
+        write(format!("{dir}/stdout"), got.stdout.as_bytes());
+        write(format!("{dir}/exit"), format!("{}\n", vector.exit).as_bytes());
+    }
     for (name, bytes) in more::rejects() {
         assert!(matches!(Golden::parse(&bytes), Err(LoadError::Malformed(_))), "reject/{name} must be malformed");
         write(format!("reject/{name}.golden"), &bytes);
@@ -433,7 +598,7 @@ fn bless() {
         );
     }
     let base = root();
-    for sub in ["runs", "reject", "roundtrip", "regex"] {
+    for sub in ["runs", "reject", "roundtrip", "regex", "cli", "update"] {
         let _ = fs::remove_dir_all(base.join(sub));
     }
     for (file, bytes) in &files {

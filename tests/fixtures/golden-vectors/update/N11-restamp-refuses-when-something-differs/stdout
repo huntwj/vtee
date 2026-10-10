@@ -1,0 +1,11 @@
+NOT RESTAMPED golden.golden: 2 differences that would change what the golden checks; it was left as it was
+FAIL golden.golden: 2 mismatches in 1 of 1 screen
+screen 1:
+  text       row 0 col 0-3   expected 'stea'   actual 'move'
+             0| steady   (expected)
+             0| moved!   (actual)
+                ^^^^
+  text       row 0 col 5   expected 'y'   actual '!'
+             0| steady   (expected)
+             0| moved!   (actual)
+                     ^

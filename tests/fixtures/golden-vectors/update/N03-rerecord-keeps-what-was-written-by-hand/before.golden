@@ -1,0 +1,27 @@
+vtee-golden 1
+schema 1
+semantics 1
+ignore title
+
+[masks]
+# any time of day
+mask row=0 cols=6-10 text=/\d\d:\d\d/
+
+[screen 1]
+size 20x2
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|clock 12:00
+1|status ok
+
+[masks]
+# this row varies
+mask row=1 cols=7-8 text=ignore
+
+[assert]
+# the greeting is there
+assert row=0 text="clock 12:00"

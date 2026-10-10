@@ -1,0 +1,1 @@
+vtee: --snapshot reads finished output; it cannot be combined with --connect, --script, a program or session options

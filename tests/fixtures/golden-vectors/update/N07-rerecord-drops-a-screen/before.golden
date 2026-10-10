@@ -1,0 +1,30 @@
+vtee-golden 1
+schema 1
+semantics 1
+
+[screen 1]
+size 20x1
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|one
+
+[screen 2]
+size 20x1
+cursor row=0 col=0 shape=block hidden=false
+modes
+alt_screen false
+title null
+
+[text]
+0|two
+
+[masks]
+mask row=0 text=ignore
+mask row=0 cols=0 attrs=ignore
+
+[assert]
+assert row=0 text="two"

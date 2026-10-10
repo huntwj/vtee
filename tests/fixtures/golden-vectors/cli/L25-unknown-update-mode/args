@@ -1,0 +1,5 @@
+--expect
+g.golden
+--snapshot
+s.ndjson
+--update=frobnicate

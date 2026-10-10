@@ -1,0 +1,4 @@
+--expect
+none.golden
+--snapshot
+s.ndjson

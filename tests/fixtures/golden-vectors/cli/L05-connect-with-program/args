@@ -1,0 +1,4 @@
+--connect
+x.sock
+--
+sh

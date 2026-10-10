@@ -1,0 +1,6 @@
+--script
+bad.ndjson
+--expect
+g.golden
+--
+never-started

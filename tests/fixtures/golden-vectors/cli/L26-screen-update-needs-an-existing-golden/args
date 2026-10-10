@@ -1,0 +1,7 @@
+--expect
+new.golden
+--snapshot
+s.ndjson
+--update
+--screen
+1
