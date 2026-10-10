@@ -56,10 +56,11 @@ fn run_script_body(tap: &vtee::Tap, script_path: &Path, text_mode: bool) -> Exit
             Ok(l) => l,
             Err(e) => return fail(exitcode::IOERR, format!("error reading script line {lineno}: {e}")),
         };
+        let line = strip_bom(&line);
         if line.trim().is_empty() {
             continue;
         }
-        let cmd: vtee::Command = match serde_json::from_str(&line) {
+        let cmd: vtee::Command = match serde_json::from_str(line) {
             Ok(c) => c,
             Err(e) => return fail(exitcode::DATAERR, format!("bad command on script line {lineno}: {e}")),
         };
@@ -131,7 +132,7 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
 
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        if writeln!(writer, "{line}").is_err() {
+        if writeln!(writer, "{}", strip_bom(&line)).is_err() {
             break;
         }
     }
@@ -140,6 +141,11 @@ pub fn run_connect(path: &Path, text_mode: bool) -> ExitCode {
     let _ = writer.shutdown(std::net::Shutdown::Write);
     let _ = reader_thread.join();
     ExitCode::SUCCESS
+}
+
+/// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark, which is not JSON.
+fn strip_bom(line: &str) -> &str {
+    line.strip_prefix('\u{feff}').unwrap_or(line)
 }
 
 /// `running`, `code=N` or `signal=...`, and `timed_out=...` for a `wait_exit` reply.
@@ -186,5 +192,17 @@ fn print_text(out: &mut impl Write, result: &vtee::CommandResult) {
     let _ = writeln!(out, "--- {label} (byte_offset={}) ---", snapshot.byte_offset);
     for line in &snapshot.lines {
         let _ = writeln!(out, "{}", line.trim_end());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_bom;
+
+    #[test]
+    fn a_leading_byte_order_mark_is_removed() {
+        assert_eq!(strip_bom("\u{feff}{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
+        assert_eq!(strip_bom("{\"cmd\":\"snapshot\"}"), "{\"cmd\":\"snapshot\"}");
+        assert_eq!(strip_bom(""), "");
     }
 }

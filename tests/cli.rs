@@ -244,6 +244,24 @@ fn text_mode_prints_the_exit_status_on_one_line() {
     let _ = std::fs::remove_file(&script);
 }
 
+/// Windows PowerShell 5.1 writes a UTF-8 byte order mark at the start of a file or pipe; the first
+/// command line must still parse.
+#[test]
+fn a_script_with_a_byte_order_mark_still_parses() {
+    let script = exit_script(&["\u{feff}{\"cmd\":\"wait_exit\",\"timeout_ms\":15000}"]);
+    vtee()
+        .arg("--script")
+        .arg(&script)
+        .arg("--text")
+        .arg("--")
+        .args(exits_with(0))
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wait_exit exited code=0"));
+    let _ = std::fs::remove_file(&script);
+}
+
 #[cfg(unix)]
 mod unix_behavior {
     use super::*;
@@ -715,6 +733,29 @@ mod unix_behavior {
             .arg(&sock)
             .timeout(Duration::from_secs(5))
             .write_stdin("{\"cmd\":\"snapshot\"}\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"cols\":80"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Windows PowerShell 5.1 starts piped text with a UTF-8 byte order mark; `--connect` must not
+    /// forward it as part of the first JSON line.
+    #[test]
+    fn connect_accepts_a_first_line_with_a_byte_order_mark() {
+        let tmpdir = isolated_tmpdir();
+        let dir = session_dir(&tmpdir);
+        let mut child = spawn_named(&tmpdir, "bom", &[]);
+        wait_for_session(&tmpdir, "bom");
+
+        vtee()
+            .arg("--connect")
+            .arg(dir.join("bom.sock"))
+            .timeout(Duration::from_secs(5))
+            .write_stdin("\u{feff}{\"cmd\":\"snapshot\"}\n")
             .assert()
             .success()
             .stdout(predicate::str::contains("\"cols\":80"));
