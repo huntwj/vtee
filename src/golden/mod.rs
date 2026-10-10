@@ -8,6 +8,7 @@ pub mod escape;
 mod model;
 mod parse;
 pub mod pattern;
+mod report;
 mod run;
 mod version;
 mod write;
@@ -21,6 +22,9 @@ pub use model::{
     MaskText, Region, Semantics, attr_tokens, mode_key, shape_name, sorted_modes, underline_from_name, underline_name,
 };
 pub use parse::{LoadError, ParseError};
+pub use report::{
+    CheckError, CheckOptions, DEFAULT_MAX_MISMATCHES, Report, Verdict, check_run, check_saved, display_name,
+};
 pub use run::{Run, RunError, RunProblem, read_run};
 pub use version::{Build, Invocation, Refusal, WayForward};
 pub use write::{RecordOptions, portable_profile};
