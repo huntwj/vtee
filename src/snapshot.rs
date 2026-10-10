@@ -232,23 +232,26 @@ pub struct Cursor {
     pub shape: CursorShape,
 }
 
-/// Bumped only when an existing field is renamed, removed or changes meaning. Adding a field
-/// does not bump it. See `docs/guide/protocol.md`.
+/// The layout of the JSON: bumped when a field is renamed, removed or changes type. Adding an
+/// optional field does not bump it. See `docs/guide/protocol.md`.
 pub const SCHEMA_VERSION: u32 = 1;
 
-fn default_schema_version() -> u32 {
-    1
-}
+/// What a cell, mode or position means for given program output, and which names are reported at
+/// all. Bumped by an emulation fix, an emulator upgrade, or a newly reported mode, attribute or
+/// attribute value. Every bump is an entry in `docs/guide/snapshot-semantics.md`.
+pub const SEMANTICS_VERSION: u32 = 1;
 
 /// The full state of a tap's screen as of `byte_offset` bytes of child output. Two snapshots
 /// built from the same byte offset (e.g. one live, one replayed from the raw log) should be
 /// identical - that's what makes a golden test out of this stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// The JSON schema version this snapshot follows (`SCHEMA_VERSION`). Absent in JSON written
-    /// before the field existed, which reads as 1.
-    #[serde(default = "default_schema_version")]
+    /// The JSON layout this snapshot follows (`SCHEMA_VERSION`). Required: there is no unnumbered
+    /// form, so JSON without it is refused.
     pub schema_version: u32,
+    /// What the values mean (`SEMANTICS_VERSION`). Required, for the same reason. A snapshot written
+    /// before 0.1.0 has no such field and is refused.
+    pub semantics_version: u32,
     pub byte_offset: u64,
     pub cols: usize,
     pub rows: usize,
@@ -339,6 +342,7 @@ pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Opti
 
     Snapshot {
         schema_version: SCHEMA_VERSION,
+        semantics_version: SEMANTICS_VERSION,
         byte_offset,
         cols,
         rows,
@@ -757,21 +761,24 @@ mod emulator_tests {
     }
 
     #[test]
-    fn the_schema_version_comes_first_and_older_json_reads_as_version_one() {
+    fn both_versions_come_first_and_are_required() {
         let s = snap(b"x", 5, 2);
-        assert_eq!(s.schema_version, SCHEMA_VERSION);
+        assert_eq!((s.schema_version, s.semantics_version), (SCHEMA_VERSION, SEMANTICS_VERSION));
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.starts_with("{\"schema_version\":1,\"byte_offset\":"), "{}", &json[..60]);
+        assert!(json.starts_with("{\"schema_version\":1,\"semantics_version\":1,\"byte_offset\":"), "{}", &json[..80]);
 
-        let mut v = serde_json::to_value(&s).unwrap();
-        v.as_object_mut().unwrap().remove("schema_version");
-        let old: Snapshot = serde_json::from_value(v).unwrap();
-        assert_eq!(old.schema_version, 1);
+        for missing in ["schema_version", "semantics_version"] {
+            let mut v = serde_json::to_value(&s).unwrap();
+            v.as_object_mut().unwrap().remove(missing);
+            let err = serde_json::from_value::<Snapshot>(v).unwrap_err().to_string();
+            assert!(err.contains(missing), "{err}");
+        }
 
         let mut v = serde_json::to_value(&s).unwrap();
         v["schema_version"] = 7.into();
+        v["semantics_version"] = 9.into();
         let newer: Snapshot = serde_json::from_value(v).unwrap();
-        assert_eq!(newer.schema_version, 7, "a newer version is kept, not rewritten");
+        assert_eq!((newer.schema_version, newer.semantics_version), (7, 9), "numbers are kept, not rewritten");
     }
 
     #[test]

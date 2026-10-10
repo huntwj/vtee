@@ -339,6 +339,7 @@ fn replay_shows_the_final_screen_of_a_log() {
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!((snapshot["cols"].as_u64(), snapshot["rows"].as_u64()), (Some(70), Some(12)));
     assert_eq!(snapshot["schema_version"], 1);
+    assert_eq!(snapshot["semantics_version"], 1);
     assert!(snapshot["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("replay-me-xyz")));
 
     let _ = std::fs::remove_file(&log);
