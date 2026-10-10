@@ -54,7 +54,8 @@ $ echo $((40+2))
 $
 ```
 
-The `INFO` line is `vtee`'s own log on stderr. On Windows:
+The `INFO` line is `vtee`'s own log on stderr. On Windows (the working-directory path is shortened; the
+rest is the real output):
 
 ```
 PS> .\examples\drive.ps1
