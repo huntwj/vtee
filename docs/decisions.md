@@ -961,3 +961,12 @@ The owner decided that the unified input policy (N terminal clients x M command 
 part of 0.1.0. 0.1.0 is the snapshot and golden contract; `--writable[=open|exclusive|exclusive-shared]` keeps its
 current behaviour and nothing about input policy is frozen. The design document for it is still to be written and the
 owner's open questions on it are unanswered.
+
+## 2026-10-11: TinyFugue's 0.1.0 trial; the escape-set file stays under `tests/`
+
+TinyFugue recorded 11 scenarios (26 screens, 80x24, Linux) against `cec06cb7e778` and reported that the workflow meets its
+needs; the gaps were minor. The golden library compiles in `tests/fixtures/golden-vectors/escapes/escape-set.txt`, so an
+out-of-tree build that copies only `Cargo.toml`, `Cargo.lock` and `src/` fails. Moving the file under `src/` would
+change the frozen vector manifest, so it stays and the README states the build requirement. The `--update=bogus` message
+lists `migrate` although it is not available in 0.1.0; that wording is the design's and stays. `cli-reference.md` no
+longer claims the version is `0.0.0`.

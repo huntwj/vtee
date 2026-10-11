@@ -42,6 +42,10 @@ cargo build --release
 
 The binary is `target/release/vtee` (`vtee.exe` on Windows).
 
+Build from a whole checkout or from the crates.io package. A build that copies only `Cargo.toml`, `Cargo.lock` and `src/`
+fails: `src/golden/escape.rs` includes the data file `tests/fixtures/golden-vectors/escapes/escape-set.txt` at compile
+time, so that file must be present too.
+
 ## Quick start
 
 Start a session that an agent will drive (no human terminal, JSON socket open for writing). The `--env` gives
