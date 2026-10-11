@@ -63,7 +63,7 @@ $ vtee --no-listen -- printenv HOME
 | `--rows <N>` | terminal height, else 24 | Terminal height in rows, 1 to 1000. Applies to `--script` too. Same range check as `--cols`. |
 | `--env <KEY=VALUE>` | | Set an environment variable for the program (repeatable). Added to the inherited environment, which is not cleared. Applies to `--script` too. |
 | `-h`, `--help` | | Print help. |
-| `-V`, `--version` | | Print the version (`vtee 0.0.0` at the time of writing). |
+| `-V`, `--version` | | Print the version (for example `vtee 0.0.1`). |
 
 `--writable` also needs an equals sign for its value: `--writable=exclusive`.
 
