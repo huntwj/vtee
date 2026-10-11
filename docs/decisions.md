@@ -954,3 +954,10 @@ Still not built: `--update=migrate` (follows the first schema or grammar bump) a
 - The `fast` CI jobs listed only `cli`, `replay` and `differential`. They now also run `conformance`, `golden_vectors`,
   `expect` and `goldens` on Ubuntu and Windows, so the frozen vectors are checked on both platforms.
 - `docs/guide/golden-format.md` is the user-facing format guide; the design document stays normative.
+
+## 2026-10-11: `--input-policy` is deferred to 0.2.0
+
+The owner decided that the unified input policy (N terminal clients x M command clients, replacing `--writable`) is not
+part of 0.1.0. 0.1.0 is the snapshot and golden contract; `--writable[=open|exclusive|exclusive-shared]` keeps its
+current behaviour and nothing about input policy is frozen. The design document for it is still to be written and the
+owner's open questions on it are unanswered.
