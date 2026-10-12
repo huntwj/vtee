@@ -196,6 +196,8 @@ fn remove_socket_file(path: &Path) {
     }
 }
 
+/// `_pidfile` is unused on Unix (a plain signal needs no PID-reuse guard the way Windows'
+/// `TerminateProcess` does below) but kept so both platforms' `stop_holder` share one signature.
 #[cfg(unix)]
 fn stop_holder(pid: i32, _pidfile: &Path) {
     unsafe {

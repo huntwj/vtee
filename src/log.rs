@@ -15,6 +15,10 @@ use crate::snapshot::{self, Snapshot};
 use crate::{ObserverListener, Size};
 
 pub struct RawLog {
+    // Flushed after every event in write_event/finish, by design: a holder killed mid-session
+    // (SIGKILL, a crash) must leave a replayable prefix of the log on disk, not lose whatever sat
+    // unflushed in the BufWriter's own buffer. The BufWriter still earns its keep by coalescing
+    // write_event's own multiple small writes (the timestamp, "o", the text) into one syscall.
     writer: BufWriter<File>,
     start: Instant,
     /// A UTF-8 sequence's leading bytes, held back from the end of one chunk because they were

@@ -11,8 +11,9 @@ use crate::net::{UnixListener, UnixStream, bind_private, peer_is_trusted};
 use crate::tap::{LockExt, SinkQueue};
 use crate::{Command, CommandResult, HumanPriority, ServeOptions, Tap, WritePolicy, snapshot};
 
-/// One NDJSON command line; a client that never sends a newline would otherwise grow the
-/// holder's memory without bound.
+/// One NDJSON command line's content, not counting its trailing newline (a line of exactly this
+/// many content bytes plus `\n` is accepted, one byte over this constant); a client that never
+/// sends a newline would otherwise grow the holder's memory without bound.
 const MAX_COMMAND_LINE_BYTES: u64 = 1024 * 1024;
 
 /// Per listener; each connection costs at least one thread.
@@ -240,7 +241,9 @@ fn handle_line(tap: &Tap, id: u64, opts: ServeOptions, line: &str) -> Option<Com
 }
 
 /// A TTY client is a live output sink plus a writer: every byte it sends is gated by `policy`
-/// through the same `ExclusiveLock` a JSON client's `Send` uses.
+/// through the same `ExclusiveLock` a JSON client's `Send` uses - except a tty connection's id
+/// can never itself be the holder (there is no `acquire_write` over this protocol), so under
+/// `WritePolicy::Exclusive` it's permanently gated shut (see `Tap::serve_tty`'s doc comment).
 fn serve_tty_connection(tap: &Tap, stream: UnixStream, policy: WritePolicy) {
     let id = tap.next_connection_id.fetch_add(1, Ordering::Relaxed);
     ::log::debug!("tty connection {id}: accepted");
@@ -271,5 +274,7 @@ fn serve_tty_connection(tap: &Tap, stream: UnixStream, policy: WritePolicy) {
     }
     ::log::debug!("tty connection {id}: disconnected");
     tap.detach_tty_sink(id);
-    tap.exclusive_lock.release_if_held_by(id);
+    // Not release_if_held_by(id): a tty connection's id can never be the lock's holder (there's
+    // no acquire_write over this protocol to have made it so), so that call could only ever be a
+    // no-op here.
 }
