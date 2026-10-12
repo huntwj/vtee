@@ -377,10 +377,14 @@ fn check_dimensions(cli: &Cli) -> Result<(), ExitCode> {
 /// terminal: stderr would interleave with the child's screen, so they go to a file beside the
 /// session's socket instead (`docs/decisions.md`).
 fn init_logging(cli: &Cli) {
+    // `--no-listen`'s whole point is "nothing is left in the session directory" - a diagnostic
+    // log file at `default_log_path()` (inside that same directory) would quietly break that
+    // promise, and unlike every other file there, nothing ever cleans it up afterwards.
     let mux_shows_child_live = cli.script.is_none()
         && cli.connect.is_none()
         && cli.expect.is_none()
         && !cli.headless
+        && !cli.no_listen
         && std::io::stdin().is_terminal();
 
     let mut builder = env_logger::Builder::new();
