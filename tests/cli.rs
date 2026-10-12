@@ -1349,26 +1349,43 @@ mod unix_behavior {
 
     // ---- the config file -----------------------------------------------------------------------
 
-    /// confy writes the file on first load, so provoke a load (a duplicate name reaches it),
-    /// find where it went, and overwrite it. Returns the live first session.
-    fn session_with_config(tmpdir: &std::path::Path, name: &str, config: &str) -> Proc {
-        let first = spawn_named(tmpdir, name, &[]);
-        wait_for_session(tmpdir, name);
-        let _ = vtee_in(tmpdir).args(["--name", name, "--", "cat"]).timeout(Duration::from_secs(10)).output();
-        let mut found = Vec::new();
-        let mut stack = vec![tmpdir.join("config")];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "toml") {
-                    found.push(path);
+    /// `confy::get_configuration_file_path` resolves against this process's own environment, not
+    /// a child's - so computing the path a test's redirected `config_env` would resolve to needs
+    /// setting it here too, briefly. Serialized against itself since `cargo test` runs tests in
+    /// threads of one process and env vars are process-global; nothing else in this suite reads
+    /// `XDG_CONFIG_HOME`/`HOME`/`APPDATA` from its own environment (only ever passes them to a
+    /// child), so this is the only thing that can race against it.
+    fn confy_path_under(tmpdir: &std::path::Path) -> std::path::PathBuf {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<_> = config_env(tmpdir).iter().map(|(k, _)| (*k, std::env::var_os(k))).collect();
+        unsafe {
+            for (key, value) in config_env(tmpdir) {
+                std::env::set_var(key, value);
+            }
+        }
+        let path = confy::get_configuration_file_path("vtee", None).unwrap();
+        unsafe {
+            for (key, value) in saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
                 }
             }
         }
-        assert_eq!(found.len(), 1, "expected confy to have created one config file under {tmpdir:?}: {found:?}");
-        std::fs::write(&found[0], config).unwrap();
+        path
+    }
+
+    /// Writes a config file directly at the path `confy` would use, rather than relying on
+    /// `confy::load`'s own file-creation side effect (removed from `attach_if_exists` - see
+    /// `fn attach_if_exists` in `main.rs` - since it made checking the setting a surprising write
+    /// on every duplicate-session-name error). Returns the live first session.
+    fn session_with_config(tmpdir: &std::path::Path, name: &str, config: &str) -> Proc {
+        let first = spawn_named(tmpdir, name, &[]);
+        wait_for_session(tmpdir, name);
+        let path = confy_path_under(tmpdir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, config).unwrap();
         first
     }
 
@@ -1381,6 +1398,30 @@ mod unix_behavior {
         second.send(b"via-config\r");
         assert!(second.wait_for("via-config", Duration::from_secs(10)), "{:?}", second.text());
         drop(second);
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// Checking the setting (hit on every duplicate-session-name error, not just when someone
+    /// has asked to configure something) must not create a config file where none existed - that
+    /// was `confy::load`'s own side effect, a surprising write for what reads as a pure check.
+    #[test]
+    fn checking_attach_if_exists_does_not_create_a_config_file() {
+        let tmpdir = isolated_tmpdir();
+        let first = spawn_named(&tmpdir, "no-config-write", &[]);
+        wait_for_session(&tmpdir, "no-config-write");
+
+        vtee_in(&tmpdir)
+            .args(["--name", "no-config-write", "--", "cat"])
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .failure()
+            .code(exitcode::USAGE)
+            .stderr(predicate::str::contains("duplicate session: no-config-write"));
+
+        let config_root = tmpdir.join("config");
+        assert!(!config_root.exists(), "checking attach_if_exists created {config_root:?}");
+
+        drop(first);
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 

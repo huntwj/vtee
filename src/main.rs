@@ -448,12 +448,19 @@ fn resolve_session(cli: &Cli, program: &str) -> Result<SessionAddrs, ExitCode> {
 }
 
 /// `--attach-if-exists` / `--no-attach-if-exists`, falling back to the config file's default.
+/// Only reads the file if it's actually there: `confy::load` creates one with default values on
+/// `NotFound`, which would make checking this setting - run on every duplicate-session-name
+/// error, not just when someone has asked to configure something - a surprising write.
 fn attach_if_exists(cli: &Cli) -> bool {
     if cli.attach_if_exists {
         return true;
     }
     if cli.no_attach_if_exists {
         return false;
+    }
+    let exists = confy::get_configuration_file_path("vtee", None).is_ok_and(|p| p.exists());
+    if !exists {
+        return VteeConfig::default().attach_if_exists;
     }
     match confy::load::<VteeConfig>("vtee", None) {
         Ok(config) => config.attach_if_exists,
