@@ -385,6 +385,30 @@ mod unix_behavior {
     use super::*;
     use std::os::unix::fs::DirBuilderExt;
 
+    /// `main`'s own pre-`clap` check for the hidden `--internal-tty-guard` flag used to read argv
+    /// through `env::args()`, which panics if *any* argument anywhere is not valid UTF-8 - not
+    /// just the one being checked. A non-UTF8 byte in the wrapped *program's own* argument (never
+    /// vtee's business, and no reason to crash over) must instead reach `clap`, which already
+    /// rejects non-UTF8 arguments on its own terms: a clean usage error, not a panic.
+    #[test]
+    fn a_non_utf8_program_argument_does_not_panic() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::ffi::OsStr::from_bytes(b"not-\xffutf8");
+        let out = vtee()
+            .args(["--no-listen", "--"])
+            .arg("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .arg(bad)
+            .timeout(Duration::from_secs(5))
+            .output()
+            .unwrap();
+        // The exact outcome (clap's own non-UTF8-argument rejection) matters less here than that
+        // it isn't a panic: no human-panic crash report, and a plain `clap` usage exit, not 101.
+        assert_eq!(out.status.code(), Some(exitcode::USAGE), "{out:?}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("panicked"), "{out:?}");
+    }
+
     /// `--env` reaches the child via `portable_pty::CommandBuilder::env`, on top of the
     /// inherited environment rather than in place of it - `printenv` exits on its own once it's
     /// printed, so no hang risk the way `cat` would have.

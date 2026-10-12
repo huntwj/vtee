@@ -231,9 +231,12 @@ struct Cli {
 
 fn main() -> ExitCode {
     // The terminal-restore watchdog re-execs this binary with a hidden flag; handle it before
-    // clap so it never shows up in `--help`.
+    // clap so it never shows up in `--help`. `args_os`, not `args`: the latter panics on a
+    // non-UTF8 argument anywhere in argv (for example `vtee -- prog $'\xff'`), which must not
+    // crash a plain, well-formed invocation just because one of the *program's own* arguments
+    // happens to be non-UTF8 - that argument is none of this check's business.
     #[cfg(unix)]
-    if std::env::args().nth(1).as_deref() == Some("--internal-tty-guard") {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--internal-tty-guard")) {
         vtee::run_tty_guard();
     }
 
