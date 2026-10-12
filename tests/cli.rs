@@ -726,6 +726,27 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
+    /// `--no-listen`'s own help text promises "nothing is left in the session directory" -
+    /// including the diagnostic log file an interactive run with a real terminal otherwise
+    /// writes there (`default_log_path`), which nothing ever cleans up afterwards.
+    #[test]
+    fn no_listen_leaves_no_diagnostic_log_behind_even_with_a_real_terminal() {
+        let tmpdir = isolated_tmpdir();
+        // A real pty, so vtee's own stdin/stdout are terminals - exactly the condition that
+        // otherwise turns on the diagnostic log file. The file (if any) is created at startup,
+        // well before the child does anything, so there's no need to wait for exit to check.
+        let session = common::PtyProc::spawn(vtee_process(&tmpdir).args(["--no-listen", "--", "cat"]));
+        session.send(b"hello\r");
+        assert!(session.wait_for("hello", Duration::from_secs(10)), "{:?}", session.text());
+
+        let dir = session_dir(&tmpdir);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).map(|d| d.flatten().collect()).unwrap_or_default();
+        assert!(leftovers.is_empty(), "--no-listen left files behind: {leftovers:?}");
+
+        drop(session);
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
     /// `vtee ls`/`kill` round trip: a live session shows up, `kill` ends it and removes its
     /// files, and it no longer shows up afterward.
     #[test]
