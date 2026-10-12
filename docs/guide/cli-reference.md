@@ -76,8 +76,8 @@ $ echo $?
 64
 ```
 
-The `resize` command on the JSON socket uses the same upper limit but raises `0` to `1` instead of refusing it (see
-[protocol](protocol.md#resize)).
+The `resize` command on the JSON socket applies the same 1 to 1000 range and refuses a value outside it with an
+error reply, rather than clamping it (see [protocol](protocol.md#resize)).
 
 The raw-terminal socket that `attach` uses always allows typing. `--writable` governs only the JSON socket.
 
