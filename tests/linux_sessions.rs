@@ -436,6 +436,8 @@ fn exclusive_write_hands_off_between_clients_and_releases_on_disconnect() {
     assert!(denied["message"].as_str().unwrap().contains("not held"), "{denied}");
 
     assert_eq!(a.request(json!({"cmd": "acquire_write"}))["acquired"], true);
+    // Re-acquiring while already the holder reports the lock's actual state: still held.
+    assert_eq!(a.request(json!({"cmd": "acquire_write"}))["acquired"], true);
     assert_eq!(b.request(json!({"cmd": "acquire_write"}))["acquired"], false);
     assert_eq!(b.request(json!({"cmd": "send", "text": "x"}))["cmd"], "error");
 
@@ -572,6 +574,25 @@ fn sigterm_to_the_holder_ends_the_child_and_the_name_can_be_reused() {
     let second = Session::start_in(&first.tmp, "reuse", &[], &["cat"]);
     let mut nd = second.nd();
     nd.snapshot();
+}
+
+/// `SIGHUP` is what the kernel sends a foreground process when its controlling terminal closes;
+/// unlike `SIGTERM`, there is no dedicated application-level convention for it, so it must be
+/// handled the same way or a closed terminal leaves the same mess a `SIGKILL` would.
+#[test]
+fn sighup_to_the_holder_ends_the_child_and_leaves_nothing_behind() {
+    let mut session = Session::start("hup", &[], &["sleep", "31342"]);
+    assert_eq!(procs_running("sleep", "31342").len(), 1);
+
+    unsafe {
+        libc::kill(session.child.id() as i32, libc::SIGHUP);
+    }
+    wait_until("holder to exit", || matches!(session.child.try_wait(), Ok(Some(_))));
+    wait_until("child to end", || procs_running("sleep", "31342").is_empty());
+
+    for file in [session.pidfile(), session.sock(), session.tty_sock()] {
+        assert!(!file.exists(), "{} was left behind after SIGHUP", file.display());
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -222,8 +222,18 @@ fn serve_tty_connection(tap: &Tap, stream: UnixStream, policy: WritePolicy) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        if tap.exclusive_lock.permits(policy, id) && tap.send_bytes(&buf[..n]).is_err() {
+        if !tap.exclusive_lock.permits(policy, id) {
+            continue;
+        }
+        if tap.send_bytes(&buf[..n]).is_err() {
             break;
+        }
+        // Keystrokes relayed through `attach` are a human typing, exactly like the session's own
+        // terminal (`forward_input`): under `HumanPriority::Participant` they revoke a remote
+        // holder too, so `--writable=exclusive-shared` isn't silently equivalent to `exclusive`
+        // when the session is `--headless` and `attach` is the only terminal there is.
+        if tap.human_revokes_lock.load(Ordering::Relaxed) && tap.exclusive_lock.revoke() {
+            ::log::debug!("tty connection {id}: a keystroke revoked the remote write lock");
         }
     }
     ::log::debug!("tty connection {id}: disconnected");

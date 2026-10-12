@@ -35,6 +35,7 @@ impl ExclusiveLock {
     pub(crate) fn try_acquire(&self, id: u64) -> bool {
         let mut holder = self.holder.lock_unpoisoned();
         match *holder {
+            Some(h) if h == id => true,
             Some(_) => false,
             None => {
                 *holder = Some(id);
