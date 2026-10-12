@@ -37,6 +37,29 @@ pub fn bind_private(path: &Path) -> io::Result<UnixListener> {
     }
 }
 
+/// Whether `path` currently names a socket file, without following symlinks. Used before removing
+/// a path that might not be ours to remove: a stale socket left by a dead session is safe to
+/// clear, but an ordinary file - a typo in `--listen=<path>`, or a path someone else cares about -
+/// never is. On Windows, `uds_windows` implements AF_UNIX sockets as reparse points tagged
+/// `IO_REPARSE_TAG_AF_UNIX` (`0x80000023`, confirmed with `fsutil reparsepoint query` against a
+/// real bound socket); a symlink or junction is also a reparse point but a different tag, so
+/// checking the attribute alone also passes those through as "a socket" - an accepted, narrow
+/// over-approximation (an ordinary file, which is what actually needs protecting, is never a
+/// reparse point at all).
+pub fn path_is_socket(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+    }
+}
+
 /// Whether the process on the other end of `stream` may talk to this session: the same user, or
 /// root, exactly as tmux decides (its server allows its own uid and uid 0, and refuses everyone
 /// else). A peer whose identity can't be read is refused. On Windows the peer is the process

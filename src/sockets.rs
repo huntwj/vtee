@@ -50,6 +50,31 @@ pub(crate) fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::
     accept_loop(tap, path, move |tap, stream| serve_tty_connection(tap, stream, policy))
 }
 
+/// Clears `path` so a fresh socket can be bound there, without blindly destroying whatever is
+/// already there: an explicit `--listen=<path>` naming an ordinary file (a typo, or a path
+/// someone cares about) must not be deleted out from under them, and a path that is still a
+/// *live* socket - another session, reached before its own liveness check ran, or a path reused
+/// while its old session is still up - must not be silently stolen from it either.
+fn claim_socket_path(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if !crate::net::path_is_socket(path) {
+        return Err(io::Error::other(format!(
+            "{} exists and is not a socket - refusing to remove it to listen here",
+            path.display()
+        )));
+    }
+    if UnixStream::connect(path).is_ok() {
+        return Err(io::Error::other(format!(
+            "{} is already in use by a live session - refusing to take it over",
+            path.display()
+        )));
+    }
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
 /// Binds `path` (removing a stale socket first) as a mode-0600 socket and runs a thread per
 /// accepted connection, up to `MAX_CONNECTIONS`; excess connections are dropped, and so is any
 /// connection from a process that is neither this user nor root (the checks tmux makes).
@@ -58,7 +83,7 @@ fn accept_loop(
     path: &Path,
     handler: impl Fn(&Tap, UnixStream) + Send + Sync + 'static,
 ) -> io::Result<()> {
-    let _ = std::fs::remove_file(path);
+    claim_socket_path(path)?;
     let listener: UnixListener = bind_private(path)?;
     let live = Arc::new(AtomicUsize::new(0));
     let handler = Arc::new(handler);

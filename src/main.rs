@@ -502,7 +502,13 @@ struct SpawnArgs<'a> {
     env: &'a [(String, String)],
 }
 
-/// Removes a session's files when dropped, whichever way `run_spawn` returns.
+/// Removes a session's files when dropped, whichever way `run_spawn` returns. Each field starts
+/// `None` and is only ever set to `Some` right after this process itself successfully bound (or
+/// wrote) that file - never upfront from `cli`'s paths - so a startup failure before a bind was
+/// even attempted can't make this guard delete a path we never touched, such as another live
+/// session's socket we correctly refused to steal (`claim_socket_path`), or an unrelated file at
+/// an explicit `--listen=<path>` that failed for some other reason.
+#[derive(Default)]
 struct SessionFiles<'a> {
     pidfile: Option<&'a Path>,
     listen_path: Option<&'a Path>,
@@ -543,8 +549,10 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
         }
     };
 
-    // Built before anything is bound, so any early return below still removes what got created.
-    let _session_files = SessionFiles { pidfile: cli.pidfile, listen_path: cli.listen_path, tty_path: cli.tty_path };
+    // Starts empty; each field is set only once this process has actually bound (or written)
+    // that file, so an early return below only ever cleans up what got created. `_cleanup_guard`
+    // outlives every `return` in this function, including the two below from a failed bind.
+    let mut _cleanup_guard = SessionFiles::default();
 
     // With a real terminal here, it alone owns the pty's size, so a remote resize would fight it.
     let resize_owned_by_terminal = !cli.headless && std::io::stdin().is_terminal();
@@ -552,9 +560,14 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
     if !cli.headless {
         tap.watch_resize(cli.observed_size);
     }
-    let session_files: Vec<PathBuf> =
+    // Registered against `cli`'s paths before any bind, so a `SIGTERM`/`SIGHUP` during a slow
+    // bind still kills the child promptly - unlike `_cleanup_guard`, this can't be made to track
+    // binds as they complete without a mutable, shared file list, so in the narrow window before
+    // a path is actually bound, a signal landing in that exact instant could still ask to remove
+    // a path this process never touched. Accepted: the window is a few system calls wide.
+    let sigterm_files: Vec<PathBuf> =
         [cli.pidfile, cli.listen_path, cli.tty_path].into_iter().flatten().map(Path::to_path_buf).collect();
-    tap.watch_sigterm_removing(&session_files);
+    tap.watch_sigterm_removing(&sigterm_files);
 
     if let Some(path) = cli.listen_path {
         let write_policy = cli.write_policy.unwrap_or(vtee::WritePolicy::ReadOnly);
@@ -564,6 +577,7 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
             raw_guard.take();
             return fail(exitcode::OSERR, format!("--listen failed: {e}"));
         }
+        _cleanup_guard.listen_path = Some(path);
         log::info!("listening for observers ({write_policy:?}) at {}", path.display());
     }
 
@@ -573,6 +587,7 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
             raw_guard.take();
             return fail(exitcode::OSERR, format!("couldn't bind the attach socket: {e}"));
         }
+        _cleanup_guard.tty_path = Some(path);
     }
 
     // Written last, so `ls`/`kill`/`attach` find this process only once its sockets exist, and
@@ -585,6 +600,7 @@ fn run_spawn(program: &str, rest: &[String], cli: SpawnArgs) -> ExitCode {
         return fail(exitcode::OSERR, format!("couldn't write pidfile {}: {e}", pidfile.display()));
     }
     if let Some(pidfile) = cli.pidfile {
+        _cleanup_guard.pidfile = Some(pidfile);
         tap.set_activity_file(pidfile);
     }
 

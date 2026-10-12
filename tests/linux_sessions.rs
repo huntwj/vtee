@@ -654,6 +654,51 @@ fn a_second_holder_with_the_same_name_is_rejected_even_when_the_first_used_liste
     let _ = std::fs::remove_file(&custom);
 }
 
+/// `--listen=<path>` naming a path that is already a live socket - a different, still-running
+/// session, or the same path handed to two holders at once - must be refused, not silently
+/// stolen out from under the session already listening there.
+#[test]
+fn listen_refuses_to_take_over_a_path_that_is_already_a_live_socket() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    let first = Session::start_listening("listen-live", &custom, &["cat"]);
+
+    let tmp2 = unique("vtee-linux");
+    std::fs::create_dir_all(&tmp2).unwrap();
+    let out = vtee_in(&tmp2)
+        .args(["--headless", "--name", "listen-live-2", &format!("--listen={}", custom.display()), "--", "cat"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already in use by a live session"), "{:?}", out.stderr);
+
+    // The first session must be untouched: still there, still answering.
+    assert!(custom.exists());
+    Nd::connect(&custom).snapshot();
+    drop(first);
+    let _ = std::fs::remove_file(&custom);
+}
+
+/// `--listen=<path>` naming a path that is an ordinary file - a typo, or a path that matters to
+/// someone - must be refused, not deleted to make room for the socket.
+#[test]
+fn listen_refuses_to_delete_a_path_that_is_not_a_socket() {
+    let custom = unique("vtee-custom").with_extension("sock");
+    std::fs::write(&custom, "do not touch me\n").unwrap();
+
+    let tmp = unique("vtee-linux");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = vtee_in(&tmp)
+        .args(["--headless", "--name", "listen-not-a-socket", &format!("--listen={}", custom.display()), "--", "cat"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not a socket"), "{:?}", out.stderr);
+    assert_eq!(std::fs::read_to_string(&custom).unwrap(), "do not touch me\n", "the file must be left alone");
+    let _ = std::fs::remove_file(&custom);
+}
+
 #[test]
 fn kill_stops_a_listen_session_and_removes_its_custom_socket() {
     let custom = unique("vtee-custom").with_extension("sock");
