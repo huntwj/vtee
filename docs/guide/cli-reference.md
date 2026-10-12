@@ -253,7 +253,10 @@ A file that cannot be opened exits 66 (NOINPUT); a file that is not an asciicast
 ## Exit codes
 
 `vtee` uses the BSD `sysexits.h` numbers for its own failures. In interactive and headless mode, when the program
-runs to completion, `vtee` exits with the program's own exit status (low 8 bits).
+runs to completion, `vtee` exits with the program's own exit status (low 8 bits). A program ended by a signal is
+the one exception: `vtee` itself always exits 1 for that, not the shell's `128 + signal` convention - the
+underlying library only exposes the signal as a name (`architecture.md`), not a number to compute that from. Use
+the JSON socket's `exit_status`/`wait_exit` (`protocol.md#exit_status`) to learn the signal by name.
 
 | Code | Name | Seen when |
 | --- | --- | --- |
