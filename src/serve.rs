@@ -80,8 +80,13 @@ impl Tap {
         crate::sockets::serve(tap, path, opts)
     }
 
-    /// Serve the raw-TTY protocol: a client sees a redraw of the current screen, then live output,
-    /// and its keystrokes are gated by `policy` exactly like a JSON client's `Send`.
+    /// Serve the raw-TTY protocol: a client sees a redraw of the current screen, then live
+    /// output, and its keystrokes are gated by `policy` the same way a JSON client's `Send` is -
+    /// with one structural difference: the raw protocol has no `acquire_write`, so under
+    /// `WritePolicy::Exclusive` a tty client can never become the holder and is effectively
+    /// permanently read-only (silently; the bytes it sends are simply dropped, not refused with
+    /// an error, since the protocol has no framing for that either). `main.rs` only ever calls
+    /// this with `WritePolicy::Open`, where this difference doesn't come up.
     pub fn serve_tty(tap: Arc<Tap>, path: &Path, policy: WritePolicy) -> io::Result<()> {
         crate::sockets::serve_tty(tap, path, policy)
     }

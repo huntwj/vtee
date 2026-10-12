@@ -21,39 +21,39 @@ fn default_session_dir() -> io::Result<PathBuf> {
     let uid = unsafe { libc::getuid() };
     let dir = std::env::temp_dir().join(format!("vtee-{uid}"));
 
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if !meta.is_dir() => {
-            return Err(io::Error::other(format!(
-                "{} exists and isn't a plain directory - refusing to use it as the default session dir",
-                dir.display()
-            )));
-        }
-        Ok(meta) if meta.uid() != uid => {
-            return Err(io::Error::other(format!(
-                "{} isn't owned by the current user - refusing to use it as the default session dir",
-                dir.display()
-            )));
-        }
-        Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
-            return Err(io::Error::other(format!(
-                "{} has unsafe permissions (group/other access) - refusing to use it as the default session dir",
-                dir.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // Another process may win the race to create it; re-verify either way.
-            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
+    // One retry after creating it: another process may win the race to create it first, so
+    // either way the loop re-verifies rather than trusting its own create() call.
+    loop {
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if !meta.is_dir() => {
+                return Err(io::Error::other(format!(
+                    "{} exists and isn't a plain directory - refusing to use it as the default session dir",
+                    dir.display()
+                )));
             }
-            return default_session_dir();
+            Ok(meta) if meta.uid() != uid => {
+                return Err(io::Error::other(format!(
+                    "{} isn't owned by the current user - refusing to use it as the default session dir",
+                    dir.display()
+                )));
+            }
+            Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
+                return Err(io::Error::other(format!(
+                    "{} has unsafe permissions (group/other access) - refusing to use it as the default session dir",
+                    dir.display()
+                )));
+            }
+            Ok(_) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
     }
-
-    Ok(dir)
 }
 
 /// `%LOCALAPPDATA%\vtee`: already private to the user by the profile's ACL. There is no fallback
@@ -69,21 +69,24 @@ fn default_session_dir() -> io::Result<PathBuf> {
         io::Error::other("%LOCALAPPDATA% isn't set to an absolute path - no private place for sessions")
     })?;
     let dir = base.join("vtee");
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
-            return Err(io::Error::other(format!(
-                "{} exists and isn't a plain directory - refusing to use it as the default session dir",
-                dir.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => match std::fs::create_dir_all(&dir) {
-            Ok(()) => return default_session_dir(),
+    // One retry after creating it, re-verifying rather than trusting the create() call, same as
+    // the Unix version above.
+    loop {
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+                return Err(io::Error::other(format!(
+                    "{} exists and isn't a plain directory - refusing to use it as the default session dir",
+                    dir.display()
+                )));
+            }
+            Ok(_) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match std::fs::create_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            },
             Err(e) => return Err(e),
-        },
-        Err(e) => return Err(e),
+        }
     }
-    Ok(dir)
 }
 
 /// Why Windows would not accept `name` as a file stem, if it wouldn't. Pure so it is tested on every
