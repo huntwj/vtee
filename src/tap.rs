@@ -619,6 +619,7 @@ impl Tap {
         {
             static KILLER: std::sync::OnceLock<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> =
                 std::sync::OnceLock::new();
+            static FILES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
             const CTRL_BREAK_EVENT: u32 = 1;
             const CTRL_CLOSE_EVENT: u32 = 2;
             const CTRL_SHUTDOWN_EVENT: u32 = 6;
@@ -629,6 +630,11 @@ impl Tap {
                 if !matches!(event, CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_SHUTDOWN_EVENT) {
                     return 0;
                 }
+                if let Some(files) = FILES.get() {
+                    for file in files {
+                        let _ = std::fs::remove_file(file);
+                    }
+                }
                 let _ = crossterm::terminal::disable_raw_mode();
                 crate::rawmode::restore_console_modes();
                 if let Some(killer) = KILLER.get() {
@@ -637,6 +643,7 @@ impl Tap {
                 std::process::exit(143);
             }
 
+            let _ = FILES.set(files.to_vec());
             if KILLER.set(Mutex::new(self.child.lock_unpoisoned().clone_killer())).is_ok() {
                 unsafe {
                     SetConsoleCtrlHandler(Some(on_ctrl), 1);

@@ -130,6 +130,13 @@ mod windows_peer {
             return true;
         };
         let own = own_user_sid();
+        if own.is_none() {
+            // Our own SID, not the peer's - nothing about this connection is unusual. Every
+            // connection fails closed from here on until this starts working again, which is
+            // confusing to debug from the outside (the session looks live in `ls`, nothing can
+            // connect to it) without this logged somewhere.
+            ::log::error!("couldn't determine this process's own user SID; refusing every connection until it can");
+        }
         // SAFETY: the handle is closed below, whatever the outcome.
         let peer_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if peer_handle.is_null() {

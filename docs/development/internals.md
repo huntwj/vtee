@@ -53,10 +53,11 @@ when the holder dies.
 
 ## Windows console events
 
-`Tap::watch_sigterm` has a Windows form: a console control handler registered with `SetConsoleCtrlHandler` for
-Ctrl-Break, console close and shutdown events. It kills the child and exits with code 143. Because it exits without
-running destructors, it leaves the session files behind (as after `SIGKILL`); `ls` shows them stale and `kill`
-clears them. Plain Ctrl-C is left to the program, not handled by `vtee`.
+`Tap::watch_sigterm_removing` has a Windows form: a console control handler registered with `SetConsoleCtrlHandler`
+for Ctrl-Break, console close and shutdown events. It removes the session's files itself first - `exit`-ing
+without running destructors means `SessionFiles`'s own cleanup never gets the chance - then kills the child and
+exits with code 143, the same shape as the Unix `SIGTERM`/`SIGHUP` handler. Plain Ctrl-C is left to the program,
+not handled by `vtee`.
 
 ### Ctrl-C and process groups
 
