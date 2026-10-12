@@ -625,6 +625,38 @@ fn two_holders_racing_for_the_same_name_leave_exactly_one_survivor_and_no_orphan
     wait_until("the surviving child to end too", || procs_running("sleep", "31343").is_empty());
 }
 
+/// A broken pipe on vtee's own stdout (`vtee prog | head`, once `head` has read enough and closes
+/// its end) must only stop *that* copy of the output, not the whole session: the emulator, the
+/// log and every socket client keep going, and the pty keeps being drained so the flooding child
+/// never blocks on a full pty buffer.
+#[test]
+fn a_broken_stdout_pipe_does_not_freeze_the_session() {
+    let tmp = unique("vtee-linux");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let sock = tmp.join("broken-pipe.sock");
+    let mut child = vtee_in(&tmp)
+        .args(["--name", "broken-pipe", &format!("--listen={}", sock.display())])
+        .args(["--", "yes", "hello"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Close our end of the pipe without reading anything: vtee's *own* next write to its stdout
+    // (not the pty, not the socket) now gets a broken-pipe error.
+    drop(child.stdout.take());
+
+    wait_until("the socket to come up", || UnixStream::connect(&sock).is_ok());
+    let mut nd = Nd::connect(&sock);
+    let first = nd.request(json!({"cmd": "snapshot"}))["snapshot"]["byte_offset"].as_u64().unwrap();
+    wait_until("byte_offset to keep advancing after the broken pipe", || {
+        nd.request(json!({"cmd": "snapshot"}))["snapshot"]["byte_offset"].as_u64().unwrap() > first
+    });
+
+    terminate(&mut child);
+    let _ = std::fs::remove_file(&sock);
+}
+
 // ---------------------------------------------------------------------------------------------
 // 4b. Sessions started with an explicit `--listen=<path>`
 
