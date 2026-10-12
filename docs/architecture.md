@@ -556,8 +556,8 @@ Sessions, `attach`/`ls`/`kill` and both sockets work on native Windows. The piec
   the wrapped program. Files are removed by `kill` itself. A PID-reuse guard compares the target process's creation
   time (`GetProcessTimes`) against the pidfile's mtime: a process created after the pidfile was last written cannot
   be the holder and is left alone.
-- **Termination events:** `watch_sigterm` registers a console control handler for close/break/shutdown that kills
-  the child and exits 143. Session files are left for `ls`/`kill`, as after a `SIGKILL`.
+- **Termination events:** `watch_sigterm_removing` registers a console control handler for close/break/shutdown
+  that removes the session's files (same as the Unix `SIGTERM`/`SIGHUP` handler), kills the child and exits 143.
 - **No terminal-restore watchdog:** nothing restores console modes if the holder is force-killed (shells reset
   them at the next prompt). `RawModeGuard` also turns on `ENABLE_VIRTUAL_TERMINAL_INPUT`/`_PROCESSING` so escape
   sequences are interpreted rather than printed, restoring the original console modes on drop.
