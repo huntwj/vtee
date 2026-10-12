@@ -173,6 +173,14 @@ The other replies print as one line in text mode. These are the real forms:
   still exits 0. Check result lines for `"cmd":"error"`.
 - **Two writers.** If a human is also attached, both of you can type into the same program. Use
   `--writable=exclusive` and `acquire_write` if you need to be the only writer.
+- **Writing to `<name>.tty.sock` instead of `<name>.sock`.** The two sockets are not interchangeable: `<name>.sock`
+  parses JSON commands, but `<name>.tty.sock` (the raw socket `attach` uses) has no protocol at all - every byte it
+  receives is forwarded straight to the program's input, exactly as if a human typed it, and it always accepts
+  writes regardless of the session's `--writable` policy ([write policies](protocol.md#write-policies)). A JSON
+  command line sent there is not parsed or rejected; it is typed into the program literally, newline and all, and
+  the program does whatever it does with that input (a shell runs it, a MUD session sends it to the server). Get
+  the JSON socket's path from `vtee ls`, or let `--connect` resolve it - it always targets `<name>.sock`. See
+  [troubleshooting](troubleshooting.md#a-command-was-typed-into-the-program-instead-of-run-by-vtee).
 - **Leaving sessions running.** End the session when done: `vtee kill work`. A session ends by itself when the
   program exits.
 - **Errors look different in text mode.** They print as `--- error: <message> ---`, and acquire/release replies as
