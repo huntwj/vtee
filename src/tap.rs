@@ -662,6 +662,11 @@ fn forward_output(
     replies: Option<(ObserverListener, SharedWriter)>,
 ) {
     let mut stdout = io::stdout();
+    // Mutable: a broken pipe on our own stdout (`vtee prog | head`, once `head` has read enough
+    // and closes its end) stops *this* copy, not the whole session - the emulator, the log and
+    // every socket client must keep going, and the pty must keep being drained so the child
+    // doesn't block once its pty buffer fills.
+    let mut write_raw = write_raw;
     let mut parser = Processor::<vte::ansi::StdSyncHandler>::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -672,7 +677,7 @@ fn forward_output(
         let chunk = &buf[..n];
         if write_raw {
             if stdout.write_all(chunk).is_err() {
-                break;
+                write_raw = false;
             }
             let _ = stdout.flush();
         }
