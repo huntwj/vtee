@@ -213,7 +213,7 @@ mask row=20 cols=75-79 text=/\d\d:\d\d/
 
 The cells under a mask are no longer compared with the stored text (the pattern must match instead), but their
 colours still are. Assertions check the actual screen for what matters, whatever the stored text says:
-`assert find=/goblin/ fg=idx:1 bold`. The grammar, the regex dialect and every rule are described in the [golden file format](golden-format.md); the normative text is sections 6.1 to 6.8 of the
+`assert find=/goblin/ fg=idx:1 bold`. The grammar, the regex dialect and every rule are described in the [golden file format](golden-format.md); the normative text is section 6 of the
 [snapshot and golden contract](../design/snapshot-and-golden-contract.md). `--update` keeps masks, assertions and
 comments when it regenerates the screens, and says what moved.
 

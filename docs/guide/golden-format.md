@@ -2,8 +2,9 @@
 
 A golden is the expected output of a run: the screens a test script snapshots, in order, with the volatile parts
 declared. This page is the user's reference for the file. The normative grammar, every error rule and the reasoning are
-in sections 6.1 to 6.8 of the [snapshot and golden contract](../design/snapshot-and-golden-contract.md); where this page
-and that one disagree, the contract wins. How to run a test is in [testing TUIs](testing-tuis.md) and the
+in section 6 of the [snapshot and golden contract](../design/snapshot-and-golden-contract.md) (the grammar is 6.1 to
+6.3, the regex dialect 6.7, what a reader must reject and accept 6.13); where this page and that one disagree, the
+contract wins. How to run a test is in [testing TUIs](testing-tuis.md) and the
 [CLI reference](cli-reference.md#testing-with-goldens---expect).
 
 ## A golden at a glance
