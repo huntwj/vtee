@@ -122,6 +122,22 @@ pub struct TapDriver<'a>(pub &'a vtee::Tap);
 
 impl Driver for TapDriver<'_> {
     fn execute(&mut self, line: &ScriptLine) -> Result<Option<Reply>, Failure> {
+        // `Command::execute`'s handling for these two is a no-op `Ok(None)` by design - over a
+        // socket, the connection handler intercepts them first, because only it knows which
+        // connection is asking (`src/command.rs`). A freshly-spawned program has no connections
+        // to arbitrate between at all, so silently doing nothing here would misleadingly look
+        // like success to a script author, rather than telling them the command means nothing
+        // in this context.
+        if matches!(line.command, vtee::Command::AcquireWrite | vtee::Command::ReleaseWrite) {
+            return Err(Failure {
+                code: exitcode::DATAERR,
+                message: format!(
+                    "script line {}: acquire_write/release_write only mean something against a live session \
+                     (--connect), not a program this run spawned itself",
+                    line.number
+                ),
+            });
+        }
         let result = match line.command.execute(self.0) {
             Ok(Some(result)) => result,
             Ok(None) => return Ok(None),
@@ -214,12 +230,24 @@ impl Driver for SocketDriver {
         match reply {
             Some(reply) if reply.cmd() == "error" => {
                 let message = reply.value.get("message").and_then(Value::as_str).unwrap_or("unknown error").to_string();
-                let code = if message.starts_with("bad command:") { exitcode::DATAERR } else { exitcode::NOPERM };
+                let code = if is_bad_input(&message) { exitcode::DATAERR } else { exitcode::NOPERM };
                 Err(Failure { code, message: format!("the session refused script line {}: {message}", line.number) })
             }
             other => Ok(other),
         }
     }
+}
+
+/// Whether an error message describes a malformed request (the line itself, or a value it
+/// carried) rather than an actual permission/policy refusal - the exact, closed set of messages
+/// `Command::execute`/`handle_line` can send that aren't one of `Denied`'s three variants
+/// (`src/command.rs`). Everything else (`Denied`'s own messages: read-only, the wrong write
+/// policy for acquire_write/release_write, a resize the real terminal owns) really is a refusal,
+/// not bad data, and keeps the previous default of exitcode::NOPERM.
+fn is_bad_input(message: &str) -> bool {
+    message.starts_with("bad command:")
+        || message.starts_with("unknown key ")
+        || (message.starts_with("terminal size ") && (message.contains("exceeds the") || message.contains("below the")))
 }
 
 /// What a `wait_for` reply says went wrong, if a `wait_for` that may not time out did.
