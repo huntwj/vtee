@@ -107,7 +107,7 @@ that does and does not protect against.
 ```
 $ ls -la $TMPDIR/vtee-0
 drwx------ 2 root root 4096 Oct  9 19:31 .
--rw-r--r-- 1 root root    4 Oct  9 19:31 demo.pid
+-rw-r--r-- 1 root root   53 Oct  9 19:31 demo.pid
 srw------- 1 root root    0 Oct  9 19:31 demo.sock
 srw------- 1 root root    0 Oct  9 19:31 demo.tty.sock
 ```

@@ -27,8 +27,9 @@ terminal takes it to get a redraw of the current screen and start receiving late
 **Two sockets, two protocols**, both in the per-user session directory (`src/session.rs`) and named after the
 session:
 
-- `<name>.sock`, newline-delimited JSON commands (`src/command.rs`): snapshot, wait, send, resize and the
-  write-handoff commands. Meant for programs. Write access is governed by the `WritePolicy` chosen at start.
+- `<name>.sock`, newline-delimited JSON commands (`src/command.rs`): snapshot, wait, send, resize, the
+  write-handoff commands, and querying or waiting on the program's exit. Meant for programs. Write access is
+  governed by the `WritePolicy` chosen at start.
 - `<name>.tty.sock`, raw bytes both ways (`vtee attach`). Meant for humans. A new client first receives a redraw
   of the current screen (`redraw_sequence`, `src/snapshot.rs`), then the live byte stream. Its typing goes to the
   program.
@@ -161,11 +162,15 @@ processes can query and drive a running session.
 
 `Command` is the one vocabulary this project uses for "do something to a running tap and maybe get a `Snapshot`
 back" - `Send { text }`, `SendKey { key }`, `Resize { cols, rows }`, `WaitMs { ms }`,
-`WaitFor { text, timeout_ms }`, `Snapshot`, and the write-handoff pair `AcquireWrite`/`ReleaseWrite`. `Command::execute(&self, tap: &Tap)` runs one against a `Tap` and
-returns `Option<CommandResult>` - `None` for everything except `Snapshot` and `WaitFor`, which produce a tagged
-`CommandResult::Snapshot { snapshot }` / `CommandResult::WaitFor { matched, snapshot }`. This exists as its own
-module, independent of how the commands arrive, specifically so a later live protocol can drive the identical
-enum from a socket instead of a script file (`roadmap.md`) without a second design.
+`WaitFor { text, timeout_ms, join_wrapped }`, `Snapshot`, the write-handoff pair `AcquireWrite`/`ReleaseWrite`,
+and `ExitStatus`/`WaitExit { timeout_ms }` for querying or waiting on the program's own exit (added later, once
+a live socket client needed to tell a program that quit from one that is merely quiet - `wait_for` only ever
+answers about the screen). `Command::execute(&self, tap: &Tap)` runs one against a `Tap` and returns
+`Option<CommandResult>` - `None` for `Send`, `SendKey`, `Resize`, `WaitMs`, `AcquireWrite` and `ReleaseWrite`;
+every other variant produces its own tagged `CommandResult` (`Snapshot { snapshot }`,
+`WaitFor { matched, snapshot }`, `ExitStatus { .. }`, `WaitExit { .. }`). This exists as its own module,
+independent of how the commands arrive, specifically so a later live protocol can drive the identical enum from
+a socket instead of a script file (`roadmap.md`) without a second design.
 
 `SendKey` resolves through `src/keys.rs`: a name (`Up`, `Home`, `F5`, `Ctrl-c`, `Alt-x`, ...) to the bytes to
 send, requested by TinyFugue because they have no such table of their own. Arrow keys and Home/End pick between
@@ -369,9 +374,10 @@ outright if it isn't a plain directory (`symlink_metadata`, so a symlink is caug
 file would be), isn't owned by the current UID, or has any group/other permission bit set at all. `Cli`'s
 `listen` field (`src/main.rs`) routes a bare `--listen`, or no `--listen` at all, through this; an explicit
 `--listen=<path>` is untouched and stays the caller's own responsibility. The socket inside is named
-`<pid>.sock`; `Tap::serve`'s pre-bind `remove_file` (above) already handles a stale file left by a killed,
-pid-reused session. `default_log_path` (below) shares the same directory via a common `default_session_dir`
-helper, so a session's socket and its diagnostic log always live side by side.
+`<pid>.sock` *as of this section* - superseded below ("Named sessions and `vtee attach`"), where pid-based
+naming is replaced entirely by name-based paths. `Tap::serve`'s pre-bind `remove_file` (above) already handles a
+stale file left by a killed, pid-reused session. `default_log_path` (below) shares the same directory via a
+common `default_session_dir` helper, so a session's socket and its diagnostic log always live side by side.
 
 This narrows who can *reach* the socket at all - it adds nothing on top for a client that does connect, which
 still gets exactly what `WritePolicy` on that connection allows, with no per-client identity beyond the
@@ -478,11 +484,13 @@ mouse reporting) for a freshly-attached client's own keystrokes is a smaller, kn
 
 **`vtee ls`/`kill`** read/signal via the pidfile record. `kill` signals only after the recorded NDJSON socket
 answers, then cleans up the pidfile and the recorded sockets itself rather than relying on the holder's own
-cleanup - `watch_sigterm`'s handler calls `std::process::exit` directly on `SIGTERM`, which skips every destructor
-including the holder's own cleanup guard (`SessionFiles`, `src/main.rs`), so without this the files would be left
-behind despite the process actually stopping. On Unix a recorded path is removed only if it is still a socket: a
-stale record's path may since have been reused for something else. `ls` prints `sock=<path>` for a session whose
-NDJSON socket is not the conventional one.
+cleanup. A live holder's own `SIGTERM` handler (`Tap::watch_sigterm_removing`) also removes its files before
+`std::process::exit`, which otherwise skips every destructor including the holder's own cleanup guard
+(`SessionFiles`, `src/main.rs`) - but `kill` cannot rely on that alone: a *stale* record (the holder already
+gone, `SIGKILL`ed or crashed) has no process left to signal, and `kill` still has to clear the leftover files
+itself. On Unix a recorded path is removed only if it is still a socket: a stale record's path may since have
+been reused for something else. `ls` prints `sock=<path>` for a session whose NDJSON socket is not the
+conventional one.
 
 **Detach has no keybinding**, unlike tmux (which needs a prefix key, Ctrl-b `d`, because its server requires
 an explicit detach signal). Here, the holder's lifetime depends on the child process, not on any one client
