@@ -595,6 +595,36 @@ fn sighup_to_the_holder_ends_the_child_and_leaves_nothing_behind() {
     }
 }
 
+/// Two holders started under the same name with neither given time to become live first: the
+/// name's own liveness check (`resolve_session`) only catches the common case where one is
+/// already live; if both race past it, the actual arbitration is `claim_socket_path` refusing to
+/// take over whatever the other one binds first. Either way, exactly one must end up live, and
+/// the loser must not orphan the child it already spawned, nor touch the winner's files.
+#[test]
+fn two_holders_racing_for_the_same_name_leave_exactly_one_survivor_and_no_orphan() {
+    let tmp = unique("vtee-linux");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut children =
+        [spawn_holder(&tmp, "race", &[], &["sleep", "31343"]), spawn_holder(&tmp, "race", &[], &["sleep", "31343"])];
+
+    // Exactly one must exit (the loser) while the other keeps running (the winner); reap the
+    // loser as soon as it's done so it isn't left as a zombie for the rest of the test.
+    wait_until("exactly one holder to have exited", || {
+        let exited = children.iter_mut().map(|c| matches!(c.try_wait(), Ok(Some(_)))).filter(|e| *e).count();
+        exited == 1
+    });
+
+    assert_eq!(procs_running("sleep", "31343").len(), 1, "exactly one child should survive, none orphaned");
+
+    let out = vtee_in(&tmp).arg("ls").output().unwrap();
+    let ls = String::from_utf8_lossy(&out.stdout);
+    assert!(ls.contains("race") && ls.contains("live") && !ls.contains("stale"), "ls output: {ls:?}");
+
+    let status = vtee_in(&tmp).args(["kill", "race"]).status().unwrap();
+    assert!(status.success());
+    wait_until("the surviving child to end too", || procs_running("sleep", "31343").is_empty());
+}
+
 // ---------------------------------------------------------------------------------------------
 // 4b. Sessions started with an explicit `--listen=<path>`
 
