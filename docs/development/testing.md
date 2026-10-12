@@ -193,8 +193,9 @@ Like the conformance files they are frozen: `MANIFEST` records a hash of each an
 
 ## Known gaps
 
-The main untested area is listed in the [roadmap](../roadmap.md#beta-readiness): a live read-only socket rejecting
-`send`, `send_key` and `resize` (the policy table in `command.rs` is unit-tested, the wiring in `sockets.rs` is
-not). Snapshot fields, the `redraw_sequence` round trip, `--log` through the CLI, the config-file path and terminal
-restore after a signal are covered, and the differential tests cover the per-cell attributes of the snapshot.
-Windows has no test for a force-killed holder restoring the console, because nothing does.
+Remaining gaps are listed in the [roadmap](../roadmap.md#beta-readiness): mouse and bracketed-paste input, both
+screen buffers, and richer `wait_for` conditions. A live read-only socket rejecting `send`/`send_key`/`resize` is
+covered (`tests/linux_sessions.rs`, via `--connect --script`), as are snapshot fields, the `redraw_sequence` round
+trip, `--log` through the CLI, the config-file path and terminal restore after a signal; the differential tests
+cover the per-cell attributes of the snapshot. Windows has no test for a force-killed holder restoring the
+console, because nothing does.
