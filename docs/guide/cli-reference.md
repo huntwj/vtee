@@ -52,7 +52,7 @@ $ vtee --no-listen -- printenv HOME
 | `--snapshot <FILE>` | | With `--expect`: check saved output instead of running anything. `-` reads standard input. |
 | `--listen[=<PATH>]` | on, at the default path | Choose the JSON socket path. The `=` is required for a path: `--listen /tmp/x` is read as the program `/tmp/x`. Conflicts with `--no-listen`. |
 | `--no-listen` | | Create no socket, pid file or session name, so nothing is left in the session directory (useful for a CI run driven only through stdin and stdout). Conflicts with `--listen`, `--writable` and `--headless`. |
-| `--writable[=<MODE>]` | read-only | Let clients of the JSON socket write (`send`, `send_key`, `resize`), not just read. Bare `--writable` means `open`. Modes: `open` (anyone, no arbitration), `exclusive` (one writer at a time, who takes access with `acquire_write`), `exclusive-shared` (as `exclusive`, and typing at this session's own terminal takes access back). See [write policies](protocol.md#write-policies). |
+| `--writable[=<MODE>]` | read-only | Let clients of the JSON socket write (`send`, `send_key`, `resize`), not just read. Bare `--writable` means `open`. Modes: `open` (anyone, no arbitration), `exclusive` (one writer at a time, who takes access with `acquire_write`), `exclusive-shared` (as `exclusive`, and typing at this session's own terminal, or through `attach`, takes access back). See [write policies](protocol.md#write-policies). |
 | `--no-stdin` | off | Show the program's output in this terminal but do not send this terminal's keystrokes to it. Socket clients and `attach` can still type. |
 | `--dump-on-exit` | off | When the program exits, print the final screen to stderr. |
 | `--headless` | off | Run without using this terminal at all: no input or output forwarding, so the session is driven through its sockets and `vtee attach`. See [Getting started](getting-started.md#headless-for-agents). |
@@ -63,7 +63,7 @@ $ vtee --no-listen -- printenv HOME
 | `--rows <N>` | terminal height, else 24 | Terminal height in rows, 1 to 1000. Applies to `--script` too. Same range check as `--cols`. |
 | `--env <KEY=VALUE>` | | Set an environment variable for the program (repeatable). Added to the inherited environment, which is not cleared. Applies to `--script` too. |
 | `-h`, `--help` | | Print help. |
-| `-V`, `--version` | | Print the version (for example `vtee 0.0.1`). |
+| `-V`, `--version` | | Print the version (for example `vtee 0.1.0`). |
 
 `--writable` also needs an equals sign for its value: `--writable=exclusive`.
 
@@ -109,8 +109,8 @@ A script's `snapshot` can carry a `name`, which the golden records and a later r
 A `wait_for` that times out is a problem of the run; if it may time out, say so on its line with `"optional":true`.
 
 The report is on standard output, `PASS`, `FAIL` or `REFUSED` on its first line; `--format json` prints one JSON
-object instead. The golden file format is described in [golden-format.md](golden-format.md); the report is specified in the
-[snapshot and golden contract](../design/snapshot-and-golden-contract.md) (sections 6.1 to 6.9).
+object instead. The golden file format is described in [golden-format.md](golden-format.md); the report is specified in
+section 6.9 of the [snapshot and golden contract](../design/snapshot-and-golden-contract.md).
 
 **Exit codes of a run with `--expect`:**
 
@@ -234,7 +234,7 @@ two
 
 
 $ vtee replay run.cast --json | cut -c1-150
-{"schema_version":1,"byte_offset":10,"cols":20,"rows":4,"lines":["one                 ","two                 ","                    ","
+{"schema_version":1,"semantics_version":1,"byte_offset":10,"cols":20,"rows":4,"lines":["one                 ","two                 ","                    ","
 ```
 
 ```

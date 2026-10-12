@@ -10,11 +10,18 @@ simply relays its stdin to the socket and prints the replies.
 - Replies come back in order, one per command that has one.
 - A connection stays open until you close it. A bad command gets an error line and the connection continues.
 - Result lines never contain a character that a reader might take for a line break: besides `\n` and `\r`, which JSON
-  always escapes, vtee writes U+0085, U+2028 and U+2029 as `\u0085`, ` ` and ` `, so splitting on any
+  always escapes, vtee writes U+0085, U+2028 and U+2029 as `\u0085`, `\u2028` and `\u2029`, so splitting on any
   Unicode line terminator is safe.
 
 Strings are ordinary JSON. Control characters must be escaped, and JSON has no octal escape, so write ESC as
 `\u001b` (not `\033`) and carriage return as `\r`.
+
+**Correlating a no-reply command with an error.** `send`, `send_key`, `resize` and `wait_ms` normally produce
+nothing, but a *refused* one still produces an error line - so on a connection where you pipeline several
+commands, you cannot tell from the reply count alone whether an unexpected error line belongs to the `send` you
+just sent or to something later. Follow it with a command that always replies (`exit_status` is the cheapest -
+it never blocks) and treat any error line that arrives before that reply as belonging to the command before it;
+the client code in `--script` uses exactly this to attribute refusals to the right line.
 
 ## Commands
 
@@ -168,7 +175,7 @@ The policy is fixed when the session starts with `--writable`. It applies to the
 | Read-only | no `--writable` | `snapshot`, `wait_for`, `wait_ms`, `exit_status`, `wait_exit`. `send`, `send_key` and `resize` are errors. |
 | Open | `--writable` or `--writable=open` | Everything. Any connection may write at any time, with no arbitration. |
 | Exclusive | `--writable=exclusive` | One connection at a time may write, after `acquire_write`. A human typing in the session's own terminal never loses the ability to type and does not revoke the holder. |
-| Exclusive-shared | `--writable=exclusive-shared` | As exclusive, but each keystroke from a human at the session's own terminal revokes the current holder. The holder finds out when its next write is refused and may acquire again. |
+| Exclusive-shared | `--writable=exclusive-shared` | As exclusive, but each keystroke from a human - at the session's own terminal, or relayed through `attach` - revokes the current holder. The holder finds out when its next write is refused and may acquire again. |
 
 Under the exclusive policies a write from a connection that does not hold access fails with
 `write access not held - send acquire_write first`.
@@ -183,7 +190,7 @@ is internally consistent: the state and `byte_offset` always agree.
 A real reply from a 12 by 3 screen that shows `$ ` and a bold red `R`, with the last two rows of cells shortened:
 
 ```
-{"cmd":"snapshot","snapshot":{"schema_version":1,"semantics_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"wrapped_rows":[],"cursor":{"row":0,"col":3,"hidden":false,"shape":"block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[],"producer":{"vtee":"0.0.0","emulator":"alacritty_terminal 0.26.0"}}}
+{"cmd":"snapshot","snapshot":{"schema_version":1,"semantics_version":1,"byte_offset":14,"cols":12,"rows":3,"lines":["$ R         ","            ","            "],"cells":[[{"ch":"$"},{},{"ch":"R","fg":"idx:1","bold":true},{},{},{},{},{},{},{},{},{}],[{},{}, ...],[{},{}, ...]],"wrapped_rows":[],"cursor":{"row":0,"col":3,"hidden":false,"shape":"block"},"modes":[],"alt_screen":false,"title":null,"scrollback":[],"producer":{"vtee":"0.1.0","emulator":"alacritty_terminal 0.26.0"}}}
 ```
 
 Cells are sparse: a field that has its default value is left out, and a blank cell is `{}`. A full 80 by 24 screen
@@ -301,8 +308,11 @@ lines re-wrap when the width shrinks, as in alacritty and VTE; xterm truncates t
 
 ## Errors
 
-An error is one line: `{"cmd":"error","message":"..."}`. `vtee --connect` still exits 0 when it prints one.
-Messages you will see:
+An error is one line: `{"cmd":"error","message":"..."}`. `vtee --connect` still exits 0 for a refused command
+(the `write commands aren't allowed...`/`write access not held...`/`resize`/`acquire_write` messages below). A
+line the session could not parse at all (every `bad command: ...` message - the line wasn't valid JSON, or `cmd`
+wasn't a known command) is different: it makes `--connect` exit 65, so a garbled script is not reported as a
+pass. Messages you will see:
 
 | Message | Cause |
 | --- | --- |
@@ -323,7 +333,11 @@ Messages you will see:
 | --- | --- |
 | Length of one command line | 1 MiB. A longer line closes the connection. |
 | Terminal size | 1 to 1000 on each side, for `--cols`/`--rows` at startup and for `resize`. |
-| Simultaneous connections per socket | 64. Extra connections are dropped. |
+| Simultaneous connections per socket | 64. A connection past the limit is closed immediately, with no reply at all - not even an error line. |
+
+When the holder itself exits, every open connection's socket is simply closed (EOF), with no final message.
+An `exit_status`/`wait_exit` right before disconnecting is how a client finds out why, rather than reading
+anything from the close itself.
 
 ## Using the socket without `vtee --connect`
 
