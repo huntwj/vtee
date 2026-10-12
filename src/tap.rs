@@ -23,6 +23,25 @@ use crate::{RawLog, Snapshot, keys, snapshot};
 /// unbounded remote resize could otherwise OOM the whole session.
 pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
 
+/// The one place `Tap::spawn` and `Tap::resize` both check a requested size against: below 1x1
+/// (`alacritty_terminal` panics on a zero-sized grid) or above `MAX_TERMINAL_DIMENSION` on either
+/// side. `replay` deliberately does not use this - see its own doc comment.
+pub(crate) fn check_terminal_size(cols: u16, rows: u16) -> io::Result<()> {
+    if cols == 0 || rows == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("terminal size {cols}x{rows} is below the 1x1 minimum"),
+        ));
+    }
+    if cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("terminal size {cols}x{rows} exceeds the {MAX_TERMINAL_DIMENSION}x{MAX_TERMINAL_DIMENSION} limit"),
+        ));
+    }
+    Ok(())
+}
+
 /// How often `wait`/`wait_exit` poll the child; also the worst-case added latency to noticing an exit.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -269,9 +288,8 @@ pub struct Tap {
 impl Tap {
     /// Spawn `program args...` in a pty per `opts`, and start forwarding immediately.
     pub fn spawn(program: &str, args: &[String], opts: SpawnOptions) -> io::Result<Self> {
-        // alacritty_terminal panics on a zero-sized grid.
-        let cols = opts.cols.max(1);
-        let rows = opts.rows.max(1);
+        check_terminal_size(opts.cols, opts.rows)?;
+        let (cols, rows) = (opts.cols, opts.rows);
 
         // Who answers the child's terminal queries (`ESC[6n` and friends)? A human's terminal
         // does, when it sees the child's output *and* its answers come back through our stdin.
@@ -350,20 +368,7 @@ impl Tap {
 
     /// Resize the child's pty and the emulator together so they never disagree.
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        if cols == 0 || rows == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("terminal size {cols}x{rows} is below the 1x1 minimum"),
-            ));
-        }
-        if cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "terminal size {cols}x{rows} exceeds the {MAX_TERMINAL_DIMENSION}x{MAX_TERMINAL_DIMENSION} limit"
-                ),
-            ));
-        }
+        check_terminal_size(cols, rows)?;
         self.master
             .lock_unpoisoned()
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })

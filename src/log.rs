@@ -113,7 +113,12 @@ impl RawLog {
 /// Rebuild a snapshot by replaying a log written by [`RawLog`], ignoring its timestamps
 /// entirely. `cols`/`rows` must match the size the log was recorded at - a replay at the wrong
 /// size would reproduce a different (wrong) layout, not an error, so callers should read the
-/// header themselves if they don't already know the size.
+/// header themselves if they don't already know the size. Unlike `Tap::spawn`/`Tap::resize`,
+/// `cols`/`rows` here are not bounded by `MAX_TERMINAL_DIMENSION`: a replay is a one-shot,
+/// caller-controlled reconstruction, not a live session whose resource use an unbounded remote
+/// resize could otherwise run away with - and the test suite's own conformance tests replay a
+/// synthetic, deliberately oversized grid (one row per measured character) to tabulate character
+/// widths efficiently, with no terminal and no resize involved at all.
 pub fn replay(path: &Path, cols: u16, rows: u16) -> io::Result<Snapshot> {
     let cols = cols.max(1);
     let rows = rows.max(1);
