@@ -16,9 +16,11 @@ status to track per-requirement rather than as one blob.
    without the session having been started with `--listen` in anticipation of that, and
    inject input too - with `--writable` when no human is competing (`WritePolicy::Open`), or with
    `--writable=exclusive`/`exclusive-shared` when one is, via an explicit `acquire_write`/`release_write` handoff
-   (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). What's still open:
-   free-for-all and mutually-exclusive-with-a-human remain unbuilt modes of the same `WritePolicy` enum
-   (nobody's needed them yet). "Without a human" is now a declared mode, not an accident of environment
+   (`WritePolicy::Exclusive`, full duplex stage 3b, `roadmap.md`/`architecture.md`). Free-for-all turned out to
+   already be built (`WritePolicy::Open`, confirmed against a human typing concurrently, `roadmap.md` "Done,
+   2026-10-08"). What's still open: a single mutually-exclusive-with-a-human mode that locks a human out
+   entirely, as part of the still-unbuilt, unified `--input-policy` (deferred to 0.2.0, `decisions.md`,
+   2026-10-11). "Without a human" is now a declared mode, not an accident of environment
    detection: `--headless` (`decisions.md`) turns off human stdin/stdout forwarding and the raw-mode/signal
    machinery outright, rather than leaving it to whatever `is_terminal()` happens to see. A human in a
    *separate* process can now attach to a live session too (on Linux and on Windows), not just query it - named sessions,
@@ -35,7 +37,7 @@ status to track per-requirement rather than as one blob.
 3. **Full state exposure.** Every cell attribute (including dim, italic, strikethrough, underline styles), cursor
    shape and visibility, active modes, both screen buffers, scroll regions, scrollback, title.
    **Mostly met.** Underline styles (single, double, curly, dotted, dashed) and the underline colour are in the
-   snapshot, and snapshots carry a `schema_version`. Open gaps: blink is structurally absent from
+   snapshot, and snapshots carry a `schema_version` and a `semantics_version`. Open gaps: blink is structurally absent from
    `alacritty_terminal` (accepted, see `decisions.md`);
    **only the active screen buffer is exposed, not both** - deferred, 2026-10-07, a verified `alacritty_terminal`
    API gap rather than something to build around right now (`decisions.md`, `roadmap.md`).
@@ -45,8 +47,9 @@ status to track per-requirement rather than as one blob.
    **Mostly met.** The byte-offset-stamped, race-free snapshot exists (`Tap::snapshot()`, `TapState`), and
    `Command::WaitFor`/`Tap::wait_for_text` (`architecture.md`) covers "wait for a condition" and marker
    synchronisation for the scoped-down case TinyFugue actually needs ("this text appears"), woken via a
-   `Condvar` rather than polling. Open gaps: no arbitrary predicate beyond text containment (v1, `roadmap.md`),
-   and masking volatile regions (a clock) doesn't exist yet - a snapshot-comparison concern, not `Tap`'s job.
+   `Condvar` rather than polling. Masking volatile regions (a clock) for golden comparisons is built
+   (`[masks]`, `guide/golden-format.md`) - a snapshot-comparison concern, not `Tap`'s job. Open gap: no arbitrary
+   predicate beyond text containment for `wait_for` itself (v1, `roadmap.md`).
 5. **Raw-stream capture and replay.** Record the bytes the program wrote, and replay them into an emulator later,
    so a golden test is "emulator state after these bytes" and timing drops out.
    **Met.** `RawLog` (asciicast v2) + `replay()`, verified byte-for-byte against the live snapshot for all 15
@@ -71,7 +74,7 @@ status to track per-requirement rather than as one blob.
    startup cursor query went unanswered (a stdin read begun in cooked mode, or nobody to answer in
    `--script`/`--headless`). Raw mode now comes before the spawn and the tap answers the child's terminal queries
    when no human terminal can. Resize (console-size polling) and Ctrl-C work, and named sessions, `attach`, `ls`,
-   `kill` and both sockets run over AF_UNIX sockets (`architecture.md`, "Named sessions on Windows"). Remaining
+   `kill` and both sockets run over AF_UNIX sockets (`architecture.md`, "Named sessions on Windows").
    `RawModeGuard` also sets the console's virtual-terminal input and output flags (restored on exit), and continuous
    integration passes on a hosted `windows-latest` runner. Remaining Windows gap: no terminal-restore watchdog if
    the holder is force-killed (`roadmap.md`, "Beta readiness").

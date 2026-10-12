@@ -11,13 +11,15 @@ State as of 2026-10-09. The core feature set works on Linux and Windows. What is
 - [x] **First CI run.** `.github/workflows/ci.yml` ran on real runners on 2026-10-09 and all six jobs passed
   (lint, MSRV, and the fast and pty jobs on `ubuntu-latest` and `windows-latest`). See `development/ci.md`.
 - [x] **A license.** `MIT OR Apache-2.0`, in `LICENSE-MIT` and `LICENSE-APACHE`.
-- [ ] **Release automation.** Versions follow commit messages; the automation is described in `releasing.md`. Its
-  first run failed with "GitHub Actions is not permitted to create or approve pull requests", so the repository
-  setting listed in `releasing.md` must be turned on before the first release PR can open.
-- [ ] **A live read-only socket rejecting writes.** `Command::authorize` has a table test over every policy and
-  command, but no integration test sends `send` to a read-only session and checks the error. The other test gaps
-  listed earlier (snapshot attributes, the `redraw_sequence` round trip, `--log` through the CLI, the config file,
-  terminal restore after a signal) now have tests.
+- [x] **Release automation.** Versions follow commit messages; the automation is described in `releasing.md`. Its
+  first run failed with "GitHub Actions is not permitted to create or approve pull requests"; with the repository
+  setting turned on, the full path has since run and succeeded through `v0.1.0`: release PR, tag, GitHub Release
+  with binaries, and crates.io via Trusted Publishing.
+- [x] **A live read-only socket rejecting writes.** `Command::authorize` has a table test over every policy and
+  command; `tests/linux_sessions.rs`'s `a_script_run_against_a_read_only_session_stops_at_a_refused_write` covers
+  the live wiring, via `--connect --script` against a real read-only session. The other test gaps listed earlier
+  (snapshot attributes, the `redraw_sequence` round trip, `--log` through the CLI, the config file, terminal
+  restore after a signal) now have tests too.
 - [ ] **Mouse and bracketed-paste input.** The modes are tracked in snapshots; there is no way to send mouse or
   paste events. On Windows ConPTY hides the mouse modes from the emulator (`guide/windows.md`).
 - [x] **Underline styles.** Snapshot cells carry `underline` as one style string (none, single, double, curly,
@@ -138,7 +140,7 @@ behaved. It covers the first integration."
 
 ## Done, 2026-10-07: a shared command core, driving the batch CLI now and (later) the live protocol
 
-TF's answers describe *half* of what this project exists for (HANDOFF.md §1): scripted, non-interactive testing.
+TF's answers describe *half* of what this project exists for (docs/handoff.md §1): scripted, non-interactive testing.
 The other half - an agent driving or watching a *live* session - still needs the same primitives eventually
 (send input, resize, wait for a condition, snapshot), just driven from a different place and running
 indefinitely instead of to completion. Building the batch CLI as a one-off, TF-shaped tool would have meant
@@ -189,7 +191,7 @@ work, whenever it happens, extends the same `Command` core rather than inventing
 ## v1 (scoped, not built - the live/interactive half): crawl, walk, run
 
 TF is one real consumer, asking from a testing perspective; the user is the other, asking from a "connect and
-watch an active session" perspective (2026-10-07) - HANDOFF.md §1's third original use case ("letting an agent
+watch an active session" perspective (2026-10-07) - docs/handoff.md §1's third original use case ("letting an agent
 watch while a human uses one"), now with an actual stakeholder behind it rather than a speculative one. Staged
 by the user explicitly, in this order, after hardening:
 
@@ -212,7 +214,7 @@ one of them has an open question attached to it.
 
 **3a. Remote-only control - no human competing.** ~~No policy question, buildable now~~ **Done, 2026-10-07**
 (`vtee --listen <path> --writable`, `Command::authorize`, `WritePolicy`, `architecture.md`). When nothing else
-is writing to the pty, a `--connect` client writing has no one to collide with. This is HANDOFF.md §1's *second*
+is writing to the pty, a `--connect` client writing has no one to collide with. This is docs/handoff.md §1's *second*
 use case, finally served live rather than only as a fixed batch script: "an AI agent see and drive a full-screen
 program." Mechanically was almost free, as scoped: `Tap::send_bytes`'s shared, lock-guarded writer already
 handled any number of concurrent callers without corruption; this was lifting the gate for connections that
@@ -317,7 +319,8 @@ Windows"); named pipes were rejected.
 ## Later
 
 An MCP front end (wraps whichever protocol v1 picks), Windows polish (ConPTY itself works now - see
-`decisions.md`; still open: a terminal-restore watchdog and the VT console-mode flags for `attach`). Multiple sessions - **substantially addressed, 2026-10-08, without actually needing a
+`decisions.md`; the VT console-mode flags for `attach` are done, see "Beta readiness" above; still open: a
+terminal-restore watchdog). Multiple sessions - **substantially addressed, 2026-10-08, without actually needing a
 daemon**: named sessions, `vtee ls`/`attach`/`kill` (`docs/architecture.md`, "Named sessions and `vtee
 attach`") give most of the practical value multiple-sessions-behind-one-process would have (discoverability,
 attach-by-name, several clients per session) while staying one process per `Tap` - a socket per process really
