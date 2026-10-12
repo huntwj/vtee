@@ -67,6 +67,15 @@ fn attach(name: &str, tty_sock: &Path) -> ExitCode {
                 }
             }
         }
+        // The main thread is blocked reading our own stdin, which has no portable way to be
+        // interrupted from here (there is no data to read, and stdin isn't a socket we can
+        // shut down) - so when the session ends, exit directly rather than leave the process
+        // sitting in raw mode until the next keystroke makes a write fail. Mirrors how a
+        // console-close/SIGTERM handler already has to exit without running destructors.
+        let _ = crossterm::terminal::disable_raw_mode();
+        #[cfg(windows)]
+        vtee::restore_console_modes();
+        std::process::exit(0);
     });
 
     // Raw reads, not `.lines()`: control bytes and escape sequences must pass through untouched.
