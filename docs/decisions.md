@@ -1,6 +1,6 @@
 # Decisions
 
-Dated, one-way-door choices. See `HANDOFF.md` for the research behind each, `requirements.md` for what each is
+Dated, one-way-door choices. See `docs/handoff.md` for the research behind each, `requirements.md` for what each is
 judged against, and `architecture.md`/`roadmap.md` for how they turned into the current build and what's next.
 
 ## 2026-10-06: emulator crate is `alacritty_terminal`
@@ -546,12 +546,17 @@ for the originating invocation and made the new socket purely additive instead (
 full mechanics) - a case where the architecturally "purer" design turned out to be the wrong one once actually
 built and checked against what it would cost, not just how it looked on paper.
 
-## Open
+## Open (superseded by later entries - kept for history, not current)
 
-- **Protocol**, **licence**: unchanged from README's "Open decisions."
-- **Input merging**: substantially decided and built 2026-10-07 (exclusive handoff, both `HumanPriority`
-  settings - `roadmap.md`/`architecture.md`). Still open: free-for-all and mutually-exclusive-with-a-human as
-  unbuilt modes of the same enum, and which mode/`HumanPriority` is the default when none is requested.
+- **Protocol**, **licence**: unchanged from README's "Open decisions" *at the time this was written*. Both have
+  since been decided: the wire protocol is a Unix socket (noted above), and the licence is `MIT OR Apache-2.0`
+  (2026-10-10, see the licence entry below).
+  - **Input merging**: substantially decided and built 2026-10-07 (exclusive handoff, both `HumanPriority`
+  settings - `roadmap.md`/`architecture.md`). *At the time this was written*, free-for-all and
+  mutually-exclusive-with-a-human were still unbuilt modes of the same enum. Free-for-all was found to already
+  be built the next day (`roadmap.md`, "Done, 2026-10-08" under 3b(a)) and mutually-exclusive is still unbuilt
+  (`--input-policy`, deferred to 0.2.0, 2026-10-11 below) - so as of 2026-10-11 only the default-mode question
+  remains genuinely open.
 
 ## 2026-10-08: adversarial review of the attach work - three real bugs found and fixed
 
@@ -1011,3 +1016,20 @@ kind of client it is arbitrating before it can arbitrate), but does not answer i
 
 Both halves are recorded here as input to the `--input-policy` design doc, which is still unwritten. Neither is
 decided.
+
+## 2026-10-12: `exclusive-shared` now also revokes from `attach`, writes themselves still aren't gated
+
+A review found that `HumanPriority::Participant` (`--writable=exclusive-shared`) only ever revoked the remote
+holder from `forward_input`, the session's own stdin thread - never from `serve_tty_connection`, which `attach`
+goes through. Under `--headless`, `attach` is the *only* way a human can type, so `exclusive-shared` was silently
+indistinguishable from plain `exclusive`: nothing a human did through `attach` ever took the pen back. Fixed by
+having `serve_tty_connection` call the same `ExclusiveLock::revoke()` after a successful write, gated on the same
+`human_revokes_lock` flag `forward_input` already checks - `attach` is exactly "a human typing" in the framing the
+rest of the docs already use for it, so this extends the existing `Participant` semantics to it rather than adding
+a new one.
+
+This does not touch the thing the entry above calls deliberately unsolved: writes through the tty socket are
+still never gated by `WritePolicy`/`ExclusiveLock` (`serve_tty` is still called with a hardcoded `Open`, `attach`
+still always types). Only whether a tty write *also revokes a remote holder* changed, which only matters when
+`exclusive-shared` is in effect. The N-terminal-clients x M-command-clients write-arbitration problem recorded
+above is still fully open.

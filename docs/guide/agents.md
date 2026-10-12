@@ -172,7 +172,10 @@ The other replies print as one line in text mode. These are the real forms:
 - **Forgetting `--writable`.** `send` fails with `write commands aren't allowed on this connection`, and `--connect`
   still exits 0. Check result lines for `"cmd":"error"`.
 - **Two writers.** If a human is also attached, both of you can type into the same program. Use
-  `--writable=exclusive` and `acquire_write` if you need to be the only writer.
+  `--writable=exclusive` and `acquire_write` to be the only writer *among JSON-socket clients*. A human typing in
+  the session's own terminal, or through `attach`, always reaches the program regardless - nothing in `vtee` can
+  stop it (see [security](security.md)). `exclusive-shared` additionally revokes your access the moment that
+  happens, so you find out (your next write is refused) instead of silently typing over a human.
 - **Writing to `<name>.tty.sock` instead of `<name>.sock`.** The two sockets are not interchangeable: `<name>.sock`
   parses JSON commands, but `<name>.tty.sock` (the raw socket `attach` uses) has no protocol at all - every byte it
   receives is forwarded straight to the program's input, exactly as if a human typed it, and it always accepts

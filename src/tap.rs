@@ -577,35 +577,39 @@ impl Tap {
         drop((apply, observed));
     }
 
-    /// Catch `SIGTERM`: restore the terminal mode, kill the child, exit. Uses `clone_killer`
-    /// because the thread that owns the `Tap` may be blocked in `wait()`. On Windows the trigger is
-    /// a console close, break or shutdown event; session files are left for `ls`/`kill` to clean.
+    /// Catch `SIGTERM` and `SIGHUP`: restore the terminal mode, kill the child, exit. `SIGHUP` is
+    /// included because this is exactly what the kernel sends a foreground process when its
+    /// controlling terminal closes, and its default disposition (like `SIGKILL`'s) runs no
+    /// destructors at all. Uses `clone_killer` because the thread that owns the `Tap` may be
+    /// blocked in `wait()`. On Windows the trigger is a console close, break or shutdown event;
+    /// session files are left for `ls`/`kill` to clean.
     pub fn watch_sigterm(&self) {
         self.watch_sigterm_removing(&[]);
     }
 
     /// As [`watch_sigterm`](Self::watch_sigterm), and on Unix also delete `files` (a session's pid
     /// record and sockets) before exiting: `process::exit` skips destructors, so an external
-    /// `kill <pid>` would otherwise leave them behind for `ls` to show as stale. Ignored on Windows.
+    /// `kill <pid>` or a closed terminal would otherwise leave them behind for `ls` to show as
+    /// stale. Ignored on Windows.
     pub fn watch_sigterm_removing(&self, files: &[PathBuf]) {
         #[cfg(not(unix))]
         let _ = files;
         #[cfg(unix)]
         {
-            use signal_hook::consts::SIGTERM;
+            use signal_hook::consts::{SIGHUP, SIGTERM};
             use signal_hook::iterator::Signals;
 
             let mut killer = self.child.lock_unpoisoned().clone_killer();
-            let Ok(mut signals) = Signals::new([SIGTERM]) else { return };
+            let Ok(mut signals) = Signals::new([SIGTERM, SIGHUP]) else { return };
             let files = files.to_vec();
             thread::spawn(move || {
-                if signals.forever().next().is_some() {
+                if let Some(signal) = signals.forever().next() {
                     for file in &files {
                         let _ = std::fs::remove_file(file);
                     }
                     let _ = crossterm::terminal::disable_raw_mode();
                     let _ = killer.kill();
-                    std::process::exit(143); // 128 + SIGTERM
+                    std::process::exit(128 + signal);
                 }
             });
         }

@@ -19,8 +19,8 @@ session with the same name: a stale entry does not count as a duplicate, and its
 
 If the holder process is killed with `SIGKILL` (`kill -9`), it has no chance to stop the program it wraps. The
 program is orphaned: it keeps running with no one reading its output and is no longer reachable through
-`vtee`. This is a known gap. A normal `SIGTERM` (the program and the session files are both cleaned up),
-`vtee kill`, a closed terminal and a program that exits by itself all clean up properly.
+`vtee`. This is a known gap. A normal `SIGTERM`, a closed controlling terminal (`SIGHUP`), `vtee kill` and a
+program that exits by itself all clean up properly - the program and the session files are both removed.
 
 To find and stop an orphan, look for the program by name (`ps`, or Task Manager on Windows) and end it yourself,
 then run `vtee kill <name>` to clear the stale files. On Windows, ConPTY ends the wrapped program when the
@@ -77,6 +77,7 @@ in the meantime.
 | `vtee: failed to open FILE: ...` / `vtee: FILE is not an asciicast v2 recording: ...` | `vtee replay` could not open the file (exit 66) or the file is not a `--log` recording (exit 65). |
 | `--- error: bad command: expected value at line 1 column 1 ---` (or `{"cmd":"error","message":"bad command: ..."}`) from `--connect` | The line was not valid JSON, and `--connect` exits 65. Leading byte-order marks are not the cause any more: they are removed. See [PowerShell and the byte-order mark](windows.md#powershell-and-the-byte-order-mark) for the tested cases. |
 | `... has unsafe permissions (group/other access) - refusing to use it as the default session dir` | The per-user session directory exists but is readable by others, or belongs to another user, or is not a plain directory. Fix its owner and mode (`chmod 700`) or remove it. |
+| `%LOCALAPPDATA% isn't set to an absolute path - no private place for sessions` | Windows only: `%LOCALAPPDATA%` is unset or relative. There is no temp-dir fallback, since that directory can be shared. Set `%LOCALAPPDATA%` for the `vtee` process. |
 | `vtee: ignoring unreadable config file: ...` | The config file is not valid TOML or has the wrong type. The setting is treated as off. Fix or delete the file (see [Sessions](sessions.md#--attach-if-exists)). |
 | `session name "NAME" is too long: its socket path would be 174 bytes (limit 107); with this session directory a name can be at most 3 bytes` | Windows only: shorten the name (or `%LOCALAPPDATA%`, which sets how much room is left). Exits 71. |
 | `the session directory path is 139 bytes, which leaves no room for a socket: sessions need <directory>\<name>.tty.sock to fit in 107 bytes. Shorten %LOCALAPPDATA%` | Windows only: the profile path itself is too long for any session. Starting a session exits 71; `kill` of any name exits 68 with the same text after `no session named "NAME":`. |

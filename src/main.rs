@@ -173,7 +173,8 @@ struct Cli {
     /// Let clients of the command socket write (send text and keys, resize), not just read. MODE
     /// is `open` (anyone, no arbitration; the default), `exclusive` (one writer at a time, who
     /// takes access with `acquire_write`) or `exclusive-shared` (as `exclusive`, and typing at
-    /// this session's own terminal takes access back). Write it as `--writable=MODE`.
+    /// this session's own terminal, or through `attach`, takes access back). Write it as
+    /// `--writable=MODE`.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "open", value_name = "MODE", conflicts_with = "no_listen")]
     writable: Option<WritableMode>,
 
