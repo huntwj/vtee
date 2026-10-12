@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use crate::net::{UnixListener, UnixStream, bind_private, peer_is_trusted};
 use crate::tap::{LockExt, SinkQueue};
@@ -89,7 +90,14 @@ fn accept_loop(
     let handler = Arc::new(handler);
     thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+            let Ok(stream) = stream else {
+                // A transient per-connection error (a client that reset before the handshake
+                // finished) is normal and rare; a persistent one (EMFILE/ENFILE: too many open
+                // files) is not, and without this `incoming()` would return it immediately on
+                // every iteration forever, pegging this thread's core at 100% doing nothing.
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            };
             if !peer_is_trusted(&stream) {
                 ::log::debug!("refused a connection from another user");
                 continue;
