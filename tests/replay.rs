@@ -49,3 +49,22 @@ fn replay_matches_live_for_every_probe() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `Tap::resize` already refuses a size outside 1 to `MAX_TERMINAL_DIMENSION`; a library caller
+/// of `Tap::spawn` bypasses the CLI's own `--cols`/`--rows` validation entirely, so `spawn` must
+/// enforce the same bound itself rather than silently clamping (it previously only did this for
+/// 0, via `.max(1)`, and never checked the upper bound at all). Unlike `resize`, `replay` is
+/// deliberately not bounded this way - see its own doc comment.
+#[test]
+fn spawn_enforces_the_same_terminal_size_bound_as_resize() {
+    for (cols, rows) in
+        [(0, 24), (80, 0), (vtee::MAX_TERMINAL_DIMENSION + 1, 24), (80, vtee::MAX_TERMINAL_DIMENSION + 1)]
+    {
+        let opts =
+            vtee::SpawnOptions { cols, rows, log_path: None, forward_input: false, forward_output: false, env: &[] };
+        match vtee::Tap::spawn(cat_path(), &[], opts) {
+            Ok(_) => panic!("{cols}x{rows} should be refused"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{cols}x{rows}: {e}"),
+        }
+    }
+}
