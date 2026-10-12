@@ -33,8 +33,9 @@ conditions.
 
 ## Install
 
-There are no binary releases yet. Build from source with a current stable Rust toolchain (the minimum is Rust
-1.89, set as `rust-version` in `Cargo.toml`):
+Download a binary from the [releases page](https://github.com/huntwj/vtee/releases) (Linux x86_64 and Windows
+x86_64), or install from crates.io with `cargo install vtee`, or build from source with a current stable Rust
+toolchain (the minimum is Rust 1.89, set as `rust-version` in `Cargo.toml`):
 
 ```
 cargo build --release
