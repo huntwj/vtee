@@ -1152,6 +1152,28 @@ fn a_script_run_against_a_read_only_session_stops_at_a_refused_write() {
     let _ = std::fs::remove_file(script);
 }
 
+/// A refusal over the socket caused by bad data in the script line (an unknown `send_key` name,
+/// a `resize` outside 1 to 1000) is not a permission problem, unlike a write refused by the
+/// session's policy (the test above): it must exit DATAERR, not NOPERM, so a caller can tell
+/// "fix the script" apart from "the session won't let you do that."
+#[test]
+fn a_script_refusal_from_bad_data_exits_dataerr_not_noperm() {
+    let s = Session::start("scripted-baddata", &["--writable"], &["sh", "-c", "echo ready; sleep 60"]);
+    let script = script_file(&[r#"{"cmd":"send_key","key":"Banana"}"#]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::DATAERR), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown key") && stderr.contains("Banana"), "{stderr}");
+    let _ = std::fs::remove_file(script);
+
+    let script = script_file(&[r#"{"cmd":"resize","cols":0,"rows":24}"#]);
+    let out = vtee_in(&s.tmp).arg("--connect").arg(s.sock()).arg("--script").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(exitcode::DATAERR), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("below the 1x1 minimum"), "{stderr}");
+    let _ = std::fs::remove_file(script);
+}
+
 #[test]
 fn a_timed_out_wait_fails_a_script_run_against_a_live_session_too() {
     let s = Session::start("scripted-wait", &[], &["sh", "-c", "echo ready; sleep 60"]);

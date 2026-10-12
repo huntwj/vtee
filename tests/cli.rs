@@ -1180,6 +1180,27 @@ mod unix_behavior {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// acquire_write/release_write only mean something arbitrating between several connections
+    /// to a live session - a freshly-spawned --script program has no other connection to
+    /// arbitrate against. Command::execute's own handling for these is a silent no-op by design
+    /// (the socket path intercepts them first), which must not leak through as a script that
+    /// looks like it succeeded while actually doing nothing.
+    #[test]
+    fn acquire_write_against_a_spawned_program_is_a_script_error() {
+        let dir = isolated_tmpdir();
+        let script = script_file(&dir, &[r#"{"cmd":"acquire_write"}"#]);
+        vtee()
+            .arg("--script")
+            .arg(&script)
+            .args(["--", "cat"])
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .failure()
+            .code(exitcode::DATAERR)
+            .stderr(predicate::str::contains("only mean something against a live session"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_childs_exit_code_becomes_vtees_own() {
         for code in [0, 1, 7, 200] {
