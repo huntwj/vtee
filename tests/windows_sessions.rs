@@ -446,6 +446,27 @@ fn the_attach_subcommand_relays_both_ways() {
     assert!(ok && out.contains("att") && out.contains("live"), "the session should outlive its client: {out:?}");
 }
 
+/// `attach`'s reader thread sees EOF as soon as the session ends, but the main thread is blocked
+/// reading attach's own stdin with no portable way to wake it up early - so when the session
+/// ends, attach must exit by itself rather than sit in raw mode until the next keystroke.
+#[test]
+fn attach_exits_by_itself_once_the_session_ends() {
+    let _guard = serial();
+    let env = Env::new();
+    let _holder = Holder::start(&env, "ends-under-attach");
+    let mut attach = common::PtyProc::spawn(env.cmd().args(["attach", "ends-under-attach"]));
+    let text = |attach: &common::PtyProc| strip_ansi(attach.text().as_bytes());
+    assert!(wait_until(Duration::from_secs(20), || text(&attach).contains("ready?")), "{:?}", text(&attach));
+
+    let (ok, _, err) = env.run(&["kill", "ends-under-attach"]);
+    assert!(ok, "kill failed: {err}");
+
+    assert!(
+        wait_until(Duration::from_secs(20), || attach.has_exited()),
+        "attach did not exit on its own after the session ended"
+    );
+}
+
 #[test]
 fn kill_removes_the_files_and_ends_the_holder_and_its_child() {
     let _guard = serial();

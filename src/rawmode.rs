@@ -63,10 +63,12 @@ impl Drop for RawModeGuard {
     }
 }
 
-/// Puts back the console modes saved by the guard. For the console control handler, which exits the
-/// process without running destructors. A no-op if no guard is active.
+/// Puts back the console modes saved by the guard. For a path that exits the process without
+/// running destructors (a console control handler, or a client ending itself once its peer is
+/// gone while another thread is blocked reading stdin with no portable way to interrupt it). A
+/// no-op if no guard is active.
 #[cfg(windows)]
-pub(crate) fn restore_console_modes() {
+pub fn restore_console_modes() {
     console::restore();
 }
 

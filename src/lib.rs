@@ -70,6 +70,8 @@ mod tap;
 pub use command::{Command, CommandResult, Denied, HumanPriority, WritePolicy};
 pub use log::{RawLog, replay};
 pub use rawmode::RawModeGuard;
+#[cfg(windows)]
+pub use rawmode::restore_console_modes;
 #[cfg(unix)]
 pub use rawmode::run_tty_guard;
 pub use serve::ServeOptions;

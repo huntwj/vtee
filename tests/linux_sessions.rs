@@ -980,6 +980,20 @@ fn bare_attach_picks_the_session_attached_to_most_recently() {
     bare("MARK-OLDER", "MARK-NEWER");
 }
 
+/// `attach`'s reader thread sees EOF as soon as the session ends, but the main thread is blocked
+/// reading attach's own stdin with no portable way to wake it up early - so when the session
+/// ends, attach must exit by itself rather than sit in raw mode until the next keystroke.
+#[test]
+fn attach_exits_by_itself_once_the_session_ends() {
+    let session = Session::start("ends-under-attach", &[], &["cat"]);
+    let mut attach = common::PtyProc::spawn(vtee_in(&session.tmp).arg("attach"));
+    assert!(attach.wait_for("\x1b[2J", Duration::from_secs(10)), "no redraw: {:?}", attach.text());
+
+    assert!(vtee_in(&session.tmp).args(["kill", "ends-under-attach"]).status().unwrap().success());
+
+    wait_until("attach to exit by itself after the session ended", || attach.has_exited());
+}
+
 // ---- exit_status / wait_exit over the socket ----------------------------------------------------
 
 /// Both commands are reads, so a default (read-only) session answers them. The holder itself sits
