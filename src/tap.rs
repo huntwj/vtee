@@ -718,6 +718,9 @@ fn forward_output(
         // waiting `snapshot()` caller ever gets scheduled, starving it.
         thread::yield_now();
     }
+    if let Some(log) = log.as_mut() {
+        let _ = log.finish();
+    }
 }
 
 fn forward_input(writer: SharedWriter, exclusive_lock: Arc<ExclusiveLock>, human_revokes_lock: Arc<AtomicBool>) {

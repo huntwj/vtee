@@ -17,6 +17,13 @@ use crate::{ObserverListener, Size};
 pub struct RawLog {
     writer: BufWriter<File>,
     start: Instant,
+    /// A UTF-8 sequence's leading bytes, held back from the end of one chunk because they were
+    /// incomplete, waiting for the rest in the next one. The child's output is read and logged
+    /// in fixed-size chunks with no regard for character boundaries, so a character can (and in
+    /// practice does) split across two chunks; converting each chunk to text independently would
+    /// turn one real character into up to two replacement characters, corrupting the log in a way
+    /// `replay` would then reproduce as a *different* screen than the live session actually showed.
+    pending: Vec<u8>,
 }
 
 impl RawLog {
@@ -32,14 +39,71 @@ impl RawLog {
                 .unwrap_or(0),
         });
         writeln!(writer, "{header}")?;
-        Ok(RawLog { writer, start: Instant::now() })
+        Ok(RawLog { writer, start: Instant::now(), pending: Vec::new() })
     }
 
-    /// Record one chunk of the child's output. Non-UTF8 bytes are replaced lossily, which is
-    /// fine for a replay log; the forwarded bytes themselves are never touched.
+    /// Record one chunk of the child's output. A UTF-8 sequence split between this chunk and the
+    /// next is reassembled rather than corrupted (see `pending`); genuinely invalid bytes are
+    /// still replaced lossily, which is fine for a replay log. The forwarded bytes themselves are
+    /// never touched either way - only what lands in the log.
     pub fn write_event(&mut self, data: &[u8]) -> io::Result<()> {
+        let text = self.convert(data);
+        if text.is_empty() {
+            return Ok(());
+        }
         let t = self.start.elapsed().as_secs_f64();
-        let text = String::from_utf8_lossy(data);
+        let event = serde_json::json!([t, "o", text]);
+        writeln!(self.writer, "{event}")?;
+        self.writer.flush()
+    }
+
+    /// `data`, prefixed with any leftover from the last call, converted to text. A UTF-8 sequence
+    /// still incomplete at the very end is held back in `pending` instead of being emitted (call
+    /// [`finish`](Self::finish) to flush it lossily once no more bytes are coming); a genuinely
+    /// invalid byte sequence becomes one U+FFFD, the same as `String::from_utf8_lossy`.
+    fn convert(&mut self, data: &[u8]) -> String {
+        let mut input = std::mem::take(&mut self.pending);
+        input.extend_from_slice(data);
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input.as_slice();
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    break;
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    // SAFETY/correctness: `valid_up_to` is exactly the boundary `from_utf8`
+                    // validated, so this prefix is always valid UTF-8.
+                    out.push_str(std::str::from_utf8(&rest[..valid_up_to]).unwrap());
+                    match e.error_len() {
+                        // A real invalid byte sequence, not just a truncated one: replace it and
+                        // keep going with whatever follows it in this same chunk.
+                        Some(len) => {
+                            out.push('\u{FFFD}');
+                            rest = &rest[valid_up_to + len..];
+                        }
+                        // Ran out of bytes mid-sequence: it may complete in the next chunk.
+                        None => {
+                            self.pending.extend_from_slice(&rest[valid_up_to..]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Flushes any held-back partial UTF-8 sequence lossily, once no more bytes are coming (the
+    /// child exited with less than a full character trailing its last chunk). A no-op otherwise.
+    pub fn finish(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
+        let t = self.start.elapsed().as_secs_f64();
         let event = serde_json::json!([t, "o", text]);
         writeln!(self.writer, "{event}")?;
         self.writer.flush()
@@ -80,4 +144,83 @@ pub fn replay(path: &Path, cols: u16, rows: u16) -> io::Result<Snapshot> {
     }
 
     Ok(snapshot::build(&term, byte_offset, listener.current_title()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn events(path: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(path).unwrap();
+        text.lines()
+            .skip(1) // header
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                v.get(2).and_then(|t| t.as_str()).unwrap().to_string()
+            })
+            .collect()
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vtee-log-test-{name}-{}.cast", std::process::id()))
+    }
+
+    /// A 4-byte character ("🎉", `F0 9F 8E 89`) split across two chunks, as a real pty read
+    /// could split it, must come back as one character, not two replacement characters.
+    #[test]
+    fn a_character_split_across_two_chunks_is_reassembled() {
+        let path = scratch("split");
+        let mut log = RawLog::create(&path, 80, 24).unwrap();
+        let emoji = "🎉".as_bytes();
+        log.write_event(&[b"before:", &emoji[..2]].concat()).unwrap();
+        log.write_event(&[&emoji[2..], b":after"].concat()).unwrap();
+        log.finish().unwrap();
+
+        assert_eq!(events(&path), vec!["before:", "🎉:after"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A character split across three chunks (one byte each) is still reassembled, and nothing
+    /// is emitted for a chunk that contributed only a partial character.
+    #[test]
+    fn a_character_split_across_three_chunks_emits_nothing_until_complete() {
+        let path = scratch("split3");
+        let mut log = RawLog::create(&path, 80, 24).unwrap();
+        let emoji = "🎉".as_bytes();
+        log.write_event(&emoji[..1]).unwrap();
+        log.write_event(&emoji[1..2]).unwrap();
+        log.write_event(&emoji[2..]).unwrap();
+
+        assert_eq!(events(&path), vec!["🎉"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A genuinely invalid byte (not just a truncated character) is still replaced, matching
+    /// `String::from_utf8_lossy`.
+    #[test]
+    fn a_genuinely_invalid_byte_is_replaced_not_held_back() {
+        let path = scratch("invalid");
+        let mut log = RawLog::create(&path, 80, 24).unwrap();
+        log.write_event(b"a\xffb").unwrap();
+
+        assert_eq!(events(&path), vec!["a\u{FFFD}b"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A character left incomplete at the very end (the child exited mid-write) is flushed
+    /// lossily by `finish`, rather than silently lost. The complete, non-dependent part of the
+    /// same chunk ("end:") is written immediately, without waiting for `finish`.
+    #[test]
+    fn finish_flushes_a_trailing_incomplete_character_lossily() {
+        let path = scratch("trailing");
+        let mut log = RawLog::create(&path, 80, 24).unwrap();
+        let emoji = "🎉".as_bytes();
+        log.write_event(&[b"end:", &emoji[..2]].concat()).unwrap();
+        assert_eq!(events(&path), vec!["end:"], "the complete prefix must not wait for the incomplete tail");
+        log.finish().unwrap();
+
+        let want = String::from_utf8_lossy(&emoji[..2]).into_owned();
+        assert_eq!(events(&path), vec!["end:".to_string(), want]);
+        let _ = std::fs::remove_file(&path);
+    }
 }
