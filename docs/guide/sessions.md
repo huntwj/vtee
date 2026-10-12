@@ -61,8 +61,10 @@ Like `tmux new-session -A`: if the name is taken by a live session, attach to it
 vtee --attach-if-exists --name build -- bash
 ```
 
-The first call creates the session; later calls attach to it. This only makes sense for an interactive terminal.
-With stdout redirected the attach just streams the redraw and output to stdout.
+The first call creates the session; later calls attach to it. This only makes sense for an interactive terminal:
+`attach` refuses outright if either stdin or stdout is not one (see
+[troubleshooting](troubleshooting.md#vtee-attach-says-it-needs-a-terminal)), rather than streaming the redraw
+and output to a redirected stdout.
 
 To make this the default, set it in the config file. `--attach-if-exists` and `--no-attach-if-exists` override the
 file in either direction.
