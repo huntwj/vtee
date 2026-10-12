@@ -219,6 +219,14 @@ collapsing every non-zero outcome to a fixed value, the way `env`/`time` do, sin
 `vtee` (CI, TF's harness) is more likely to care which code the wrapped program actually exited with than
 whether `vtee` itself has an opinion about it.
 
+**A signal-killed child always propagates as exit code 1, not the shell's `128 + signal`
+convention.** `portable_pty::ExitStatus` (what `Tap::wait()` returns) only ever hardcodes `code: 1` for a
+signalled child and exposes the signal as a human-readable name (`"Terminated"`, `"Killed"`), not the
+original number - there is no numeric signal to compute `128 + N` from by the time it reaches `vtee`. The
+JSON protocol's `exit_status`/`wait_exit` already report the signal by name separately (`signal: "Terminated"`,
+`protocol.md`), which is the only way a caller learns *which* signal; `vtee`'s own process exit code cannot
+carry that distinction without a change to `portable_pty` itself.
+
 ## Observation: `vtee --listen <path>` and `vtee --connect <path>` (2026-10-07)
 
 "Connect and watch during active use" (`roadmap.md`'s crawl/walk/run plan, stage 2) - a separate process reading
@@ -480,7 +488,16 @@ ANSI before the live feed starts, so attaching mid-session shows the current pic
 `tmux attach` does - checked directly against `alacritty_terminal` 0.26.0's own source first: no existing API
 does this (it only ever consumes ANSI, never re-emits it), so this is new code, not a missed library feature.
 Scope, deliberately: visual state only (cells + cursor); restoring input-affecting modes (app-cursor-keys,
-mouse reporting) for a freshly-attached client's own keystrokes is a smaller, known follow-on.
+mouse reporting) for a freshly-attached client's own keystrokes is a smaller, known follow-on. The pen is
+reset to default both before erasing (so background-colour-erase can't fill with a colour left over from
+whatever was on the client's screen before it attached) and after the redraw (closer to a neutral state than
+leaving it at the last drawn cell's attributes, though a `Snapshot` has no way to capture the program's actual
+current pen if nothing is drawn under it - a pen set but not yet used). Output-affecting modes that would
+visibly matter until the next full repaint - the scroll region, auto-wrap, insert mode - are not restored
+either: `Term` exposes no public accessor for the scroll region at all (checked against `alacritty_terminal`
+0.26.0's source), and the other two aren't in `Snapshot`'s own frozen `modes` list, which adding them to would
+be a `semantics_version` bump (`guide/versioning.md`), not a plain bug fix - left as a separately-scoped
+follow-on alongside the input-affecting modes above, not solved here.
 
 **`vtee ls`/`kill`** read/signal via the pidfile record. `kill` signals only after the recorded NDJSON socket
 answers, then cleans up the pidfile and the recorded sockets itself rather than relying on the holder's own

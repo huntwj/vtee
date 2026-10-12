@@ -438,10 +438,16 @@ pub(crate) fn logical_lines(term: &Term<ObserverListener>) -> Vec<String> {
 /// has no API that re-emits ANSI.
 ///
 /// Visual state only (cells, cursor); input-affecting modes such as app-cursor-keys and mouse
-/// reporting are not restored. Emits SGR per cell rather than only on change, which is correct
-/// but not compact.
+/// reporting, and output-affecting ones such as the scroll region (`Term` exposes no public
+/// accessor for it) and auto-wrap/insert mode, are not restored - the live feed itself is
+/// unaffected, only a client that attached mid-session until the program's next full repaint.
+/// Emits SGR per cell rather than only on change, which is correct but not compact.
 pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
     let mut out = Vec::new();
+    // Reset the pen before erasing: on a terminal with background-colour-erase, `2J` fills with
+    // the *current* background, which must not be whatever was last on the client's screen
+    // before it attached.
+    out.extend_from_slice(b"\x1b[0m");
     if snap.alt_screen {
         out.extend_from_slice(b"\x1b[?1049h");
     }
@@ -489,6 +495,11 @@ pub fn redraw_sequence(snap: &Snapshot) -> Vec<u8> {
             out.extend_from_slice(cell.ch.as_bytes());
         }
     }
+    // The pen is otherwise left at the last cell's attributes, not the program's actual current
+    // one (which a Snapshot has no way to capture: a program can set a pen with nothing drawn
+    // under it yet). Resetting to default is no worse, and doesn't risk the next real,
+    // unstyled output the program writes inheriting an arbitrary stale style.
+    out.extend_from_slice(b"\x1b[0m");
     out.extend_from_slice(format!("\x1b[{};{}H", snap.cursor.row + 1, snap.cursor.col + 1).as_bytes());
     out.extend_from_slice(if snap.cursor.hidden { b"\x1b[?25l" } else { b"\x1b[?25h" });
     out
@@ -972,6 +983,19 @@ mod emulator_tests {
     fn redraw_reproduces_plain_text_and_the_cursor() {
         assert_round_trips(b"hello\r\nworld\x1b[2;3H", 20, 4);
         assert_round_trips(b"line\x1b[?25l", 20, 4);
+    }
+
+    /// The pen is reset to default both before erasing (so background-colour-erase on a real
+    /// terminal can't fill with whatever colour was on the attaching client's screen already,
+    /// which a round trip through a fresh emulator - always starting from default - can't catch)
+    /// and after the last cell (so the program's next, unstyled output doesn't inherit the last
+    /// drawn cell's attributes).
+    #[test]
+    fn redraw_resets_the_pen_before_erasing_and_after_the_last_cell() {
+        let before = snap(b"\x1b[1;31mred bold", 10, 2);
+        let out = redraw_sequence(&before);
+        assert!(out.starts_with(b"\x1b[0m"), "{out:?}");
+        assert!(out.ends_with(b"\x1b[0m\x1b[1;9H\x1b[?25h"), "{out:?}");
     }
 
     #[test]
