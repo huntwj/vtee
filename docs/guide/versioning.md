@@ -2,7 +2,7 @@
 
 `vtee` is pre-1.0. This page says what you can rely on across versions and what you cannot, for each thing a
 user or a program can depend on. It states the project's policy; where the policy is a plan and not yet a track
-record, it says so. There has been no release yet.
+record, it says so.
 
 ## How a version number is chosen
 
@@ -64,9 +64,8 @@ Tests fail if any of it changes without `SEMANTICS_VERSION` going up; see
 
 ## Pinning
 
-Until there are releases, pin a commit: build that revision from source, and name it in your test configuration.
-Once releases exist, pin the tag (`v0.1.0` and so on). Either way, keep the pinned version and both snapshot version numbers
-next to anything you store.
+Pin a tag (`v0.1.0` and so on) in your test configuration. Keep the pinned version and both snapshot version
+numbers next to anything you store.
 
 ## Platforms and toolchain
 

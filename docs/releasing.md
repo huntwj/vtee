@@ -4,11 +4,12 @@ Versions, `CHANGELOG.md`, git tags and GitHub Releases are generated from [Conve
 on `main` by [release-plz](https://release-plz.dev/). Merging a release PR also publishes the crate to crates.io through
 Trusted Publishing, with no stored token ([Publishing to crates.io](#publishing-to-cratesio)). The very first upload
 (`0.0.1`) was manual.
-Status: the `CI` workflow has run on GitHub and is green. The `Release` workflow has run once, on a push to `main`:
-it failed at the step that opens the release PR with "GitHub Actions is not permitted to create or approve pull
-requests", which is the repository setting in the [checklist](#one-time-repository-setup-maintainer-checklist) below.
-The rest of the release path (the pull request itself, the tag, the GitHub Release and the binary archives) has not
-run yet; treat the first release as the test of it.
+Status: the `CI` workflow has run on GitHub and is green. The `Release` workflow's very first run, on a push to
+`main`, failed at the step that opens the release PR with "GitHub Actions is not permitted to create or approve
+pull requests" - the repository setting in the [checklist](#one-time-repository-setup-maintainer-checklist) below
+was off at the time. Since then the full path has run and succeeded: PR #1 ("chore: release v0.1.0", merged
+2026-10-11) opened and was merged, which cut the `v0.1.0` tag, published the GitHub Release with Linux and Windows
+binary archives, and published `vtee 0.1.0` to crates.io through Trusted Publishing.
 
 ## How the version is computed
 
