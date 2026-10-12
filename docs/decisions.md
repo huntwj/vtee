@@ -970,3 +970,44 @@ out-of-tree build that copies only `Cargo.toml`, `Cargo.lock` and `src/` fails. 
 change the frozen vector manifest, so it stays and the README states the build requirement. The `--update=bogus` message
 lists `migrate` although it is not available in 0.1.0; that wording is the design's and stays. `cli-reference.md` no
 longer claims the version is `0.0.0`.
+
+## 2026-10-11: agent-safety motivation for `--input-policy`, and that it is two separate problems
+
+A same-session incident (TF running inside vtee; a second, same-user AI session legitimately told it could observe
+the TF session) showed the two sockets' real failure mode: the second session connected to `<name>.tty.sock`
+instead of `<name>.sock` and wrote a JSON command line to it. Nothing rejected this - `serve_tty_connection`
+(`src/sockets.rs:211`) parses nothing and forwards every byte straight to `Tap::send_bytes`, so the literal command
+text was typed into TF and relayed to the MUD server over TF's own connection, exactly as if a human had typed it.
+The connecting process was never unauthorized - the same-user trust model (`security.md`) worked exactly as
+intended - it simply spoke the wrong protocol to the wrong socket, with nothing on either side to catch the
+mismatch. The motivating case for `--input-policy`'s design is therefore an agent whose *intent* is trusted but
+whose *protocol use* can be wrong, not an untrusted party to exclude - a different motivation than the one
+`--writable`'s existing arbitration was built for, and worth keeping distinct so a design doc does not conflate
+them.
+
+That is two separable problems, and a fix for one does not touch the other.
+
+**Protocol disambiguation (not designed, not scoped).** Collapsing discovery onto one socket, with a required,
+validated role declaration as the first thing a client sends (something like `{"cmd":"hello","role":"attach"}` vs
+`{"cmd":"hello","role":"command"}`) before anything else is interpreted, turns a wrong choice into an explicit
+protocol error instead of either silent JSON rejection (today's `.sock` on an unrecognized command) or literal
+keystroke injection (today's `.tty.sock`, which validates nothing at all). This only has to intercept the first
+line a client sends inbound; it does not touch the server's own output stream, so it does not cost attach's
+no-framing, exact-passthrough guarantee (requirement 7) on the direction that guarantee is actually about.
+Recorded here as the shape a fix would take, nothing more - not designed in any depth, not a decision.
+
+**Write arbitration across both kinds of client (the half `--input-policy` was already deferred for, still fully
+open).** Role declaration only identifies what a connection is; it says nothing about who is allowed to write once
+more than one client, of either kind, is connected at once. The existing arbitration machinery - `WritePolicy`,
+`ExclusiveLock`, `HumanPriority` (`AlwaysWins`/`Participant`), built and verified 2026-10-07/08 (`roadmap.md` stage
+3b) - only ever governs the local human's `forward_input` thread against remote JSON command clients. It was never
+extended to attach/tty clients: `serve_tty` is called with a hardcoded `WritePolicy::Open` regardless of the
+session's own policy (`src/main.rs:571`), and `architecture.md:454-464` records why - unifying it into the
+exclusive-lock machinery during implementation would have made `WritePolicy::Exclusive` stop meaning anything the
+moment a human attached via tty instead of owning the original stdio, so it was deliberately left unsolved rather
+than solved badly. This is exactly the N-terminal-clients x M-command-clients policy `--input-policy` was deferred
+for (2026-10-11, above); role declaration is a plausible building block for it (the policy needs to know which
+kind of client it is arbitrating before it can arbitrate), but does not answer it by itself.
+
+Both halves are recorded here as input to the `--input-policy` design doc, which is still unwritten. Neither is
+decided.

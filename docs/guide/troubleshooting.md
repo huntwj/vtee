@@ -96,6 +96,25 @@ and fails to spawn it. Write `--listen=/tmp/x.sock`.
 
 See [the agents guide](agents.md#choosing-what-to-wait-for).
 
+## A command was typed into the program instead of run by vtee
+
+A session's two sockets are not interchangeable. `<name>.sock` parses NDJSON commands. `<name>.tty.sock`, the raw
+socket `attach` uses, has no protocol at all: every byte it receives is forwarded straight to the program's input,
+exactly as if a human typed it, and - unlike the JSON socket - it always accepts writes, no matter what
+`--writable` policy the session was started with (`serve_tty` is always given `WritePolicy::Open`).
+
+If a client writes a JSON command line to `<name>.tty.sock` by mistake, vtee does not reject it: it types the
+literal text, including the trailing newline, into the program as keystrokes. The program then does whatever it
+normally does with typed input - a shell runs it as a command, a MUD client sends it to the server over the
+connection it already has open - and you see that program's ordinary response to garbage input (echoed back,
+appearing inside its existing session), not a vtee error. Nothing about vtee's same-user trust check distinguishes
+this from a real human typing, because from that check's point of view, that is exactly what happened.
+
+Get the JSON socket's path from `vtee ls` (it prints `sock=<path>` for a session started with `--listen=<path>`)
+and use `vtee --connect`, which always targets `<name>.sock`, or open `<name>.sock` directly if connecting without
+it (see [Using the socket without `vtee --connect`](protocol.md#using-the-socket-without-vtee---connect)). Never
+write a command to `<name>.tty.sock`.
+
 ## `send` seems to do nothing
 
 - The session was not started with `--writable`; the command returned an error line and `--connect` still exited 0.
