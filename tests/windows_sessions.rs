@@ -631,6 +631,59 @@ fn a_killed_listen_session_is_stale_and_kill_cleans_it_without_signalling_anythi
     assert!(!custom.exists() && !pidfile.exists(), "the stale files should be cleaned up");
 }
 
+/// `--listen=<path>` naming a path that is already a live socket must be refused, not stolen from
+/// the session already listening there.
+#[test]
+fn listen_refuses_to_take_over_a_path_that_is_already_a_live_socket() {
+    let _guard = serial();
+    let env = Env::new();
+    let custom = env.local.join("custom.sock");
+    let _first = Holder::start_listening(&env, "listen-live", &custom);
+
+    let env2 = Env::new();
+    let (ok, _, err) = env2.run(&[
+        "--headless",
+        "--name",
+        "listen-live-2",
+        &format!("--listen={}", custom.display()),
+        "--",
+        "cmd",
+        "/c",
+        "exit",
+    ]);
+    assert!(!ok, "a live socket was silently taken over");
+    assert!(err.contains("already in use by a live session"), "stderr: {err}");
+
+    // The first session must be untouched: still there, still answering.
+    assert!(custom.exists());
+    assert!(UnixStream::connect(&custom).is_ok());
+}
+
+/// `--listen=<path>` naming a path that is an ordinary file must be refused, not deleted to make
+/// room for the socket.
+#[test]
+fn listen_refuses_to_delete_a_path_that_is_not_a_socket() {
+    let _guard = serial();
+    let env = Env::new();
+    std::fs::create_dir_all(&env.local).unwrap();
+    let custom = env.local.join("custom.sock");
+    std::fs::write(&custom, "do not touch me\r\n").unwrap();
+
+    let (ok, _, err) = env.run(&[
+        "--headless",
+        "--name",
+        "listen-not-a-socket",
+        &format!("--listen={}", custom.display()),
+        "--",
+        "cmd",
+        "/c",
+        "exit",
+    ]);
+    assert!(!ok, "a non-socket file was silently deleted");
+    assert!(err.contains("is not a socket"), "stderr: {err}");
+    assert_eq!(std::fs::read_to_string(&custom).unwrap(), "do not touch me\r\n", "the file must be left alone");
+}
+
 /// A file holding only the pid, as older versions wrote it, still resolves to the conventional
 /// sockets.
 #[test]

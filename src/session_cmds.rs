@@ -179,17 +179,12 @@ pub fn run_kill(name: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// A stale record's socket path may since have been reused for something else, so on Unix only an
-/// actual socket is removed.
+/// A stale record's socket path may since have been reused for something else, so only an actual
+/// socket is removed (`crate::net::path_is_socket`, checked on both platforms).
 fn remove_socket_file(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
-            return;
-        }
+    if vtee::net::path_is_socket(path) {
+        let _ = std::fs::remove_file(path);
     }
-    let _ = std::fs::remove_file(path);
 }
 
 #[cfg(unix)]
