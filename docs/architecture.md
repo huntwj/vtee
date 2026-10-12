@@ -523,15 +523,19 @@ Sessions, `attach`/`ls`/`kill` and both sockets work on native Windows. The piec
 
 - **Transport:** AF_UNIX sockets (Windows 10 1803+) through `uds_windows`, re-exported by `src/net.rs` so the
   servers and clients are written once. Named pipes were rejected (`decisions.md`).
-- **Session directory:** `%LOCALAPPDATA%\vtee` (temp dir if unset), private to the user by the profile's ACL; a
-  reparse point or non-directory there is refused. Session names are capped so `<name>.tty.sock` stays under the
-  107-byte AF_UNIX path limit.
+- **Session directory:** `%LOCALAPPDATA%\vtee` (an error if `LOCALAPPDATA` is unset or not absolute - no temp-dir
+  fallback, since that directory can be shared), private to the user by the profile's ACL; a reparse point or
+  non-directory there is refused. Session names are capped so `<name>.tty.sock` stays under the 107-byte AF_UNIX
+  path limit.
 - **`kill`:** after the same liveness check as Unix, `OpenProcess` + `TerminateProcess` on the holder; ConPTY reaps
-  the wrapped program. Files are removed by `kill` itself. There is no PID-reuse guard beyond the liveness check.
+  the wrapped program. Files are removed by `kill` itself. A PID-reuse guard compares the target process's creation
+  time (`GetProcessTimes`) against the pidfile's mtime: a process created after the pidfile was last written cannot
+  be the holder and is left alone.
 - **Termination events:** `watch_sigterm` registers a console control handler for close/break/shutdown that kills
   the child and exits 143. Session files are left for `ls`/`kill`, as after a `SIGKILL`.
 - **No terminal-restore watchdog:** nothing restores console modes if the holder is force-killed (shells reset
-  them at the next prompt). `RawModeGuard` is a plain raw-mode toggle on Windows.
+  them at the next prompt). `RawModeGuard` also turns on `ENABLE_VIRTUAL_TERMINAL_INPUT`/`_PROCESSING` so escape
+  sequences are interpreted rather than printed, restoring the original console modes on drop.
 - **Handle inheritance:** not an issue. The child is spawned before any socket exists, and `portable-pty`'s ConPTY
   spawn calls `CreateProcessW` with `bInheritHandles = FALSE` (measured, `tests/windows_sessions.rs`).
 

@@ -25,7 +25,7 @@ library. Named pipes were not used because the protocol relies on half-closing a
 
 | Item | Location |
 | --- | --- |
-| Session directory | `%LOCALAPPDATA%\vtee` (the temp directory if `LOCALAPPDATA` is unset) |
+| Session directory | `%LOCALAPPDATA%\vtee` (an error if `LOCALAPPDATA` is unset or not absolute - there is no temp-dir fallback, since that directory can be shared) |
 | Session files | `<name>.sock`, `<name>.tty.sock`, `<name>.pid` |
 | Config file | `%APPDATA%\vtee\config\default-config.toml` |
 

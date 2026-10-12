@@ -8,12 +8,17 @@ measurements behind each choice are in [decisions.md](../decisions.md).
 
 | File | What | Why it is needed |
 | --- | --- | --- |
-| `src/rawmode.rs` | `tcgetattr`, `tcsetattr`, and reading a `termios` back from bytes | Saving and restoring the terminal mode. The read uses `read_unaligned` because a byte array is only 1-byte aligned and `termios` needs more. |
+| `src/rawmode.rs` | `tcgetattr`, `tcsetattr`, and reading a `termios` back from bytes (Unix); `GetConsoleMode`, `SetConsoleMode` (Windows) | Saving and restoring the terminal/console mode. The Unix read uses `read_unaligned` because a byte array is only 1-byte aligned and `termios` needs more. |
 | `src/session.rs` | `libc::getuid()` | To name and check the per-user session directory. |
-| `src/session_cmds.rs` | `libc::kill` (Unix); `OpenProcess`, `TerminateProcess` (Windows) | Ending a session's holder process. |
+| `src/session_cmds.rs` | `libc::kill` (Unix); `OpenProcess`, `TerminateProcess`, `GetProcessTimes` (Windows) | Ending a session's holder process, and checking it's not a reused PID first. |
 | `src/tap.rs` | `SetConsoleCtrlHandler` (Windows) | Resetting Ctrl-C handling, and handling console close, Ctrl-Break and shutdown. |
+| `src/net.rs` | `libc::umask` (Unix); `libc::geteuid`, `libc::getpeereid` (Unix); `WSAIoctl` with `SIO_AF_UNIX_GETPEERPID`, `OpenProcess`, `GetCurrentProcess`, `OpenProcessToken`, `GetTokenInformation`, `GetLengthSid`, `CloseHandle` (Windows) | Binding a socket no one else can open, and checking the uid/SID of whoever connected. |
 
-Each block is a single system call with no pointers held across calls.
+Most blocks are a single system call with no pointers held across calls. The exception is
+`net.rs::windows_peer::token_user_sid`, which reads a `TOKEN_USER` into a byte buffer and then holds a raw pointer
+into that same buffer (the SID `GetTokenInformation` placed inside it) across `GetLengthSid` and the final
+`slice::from_raw_parts` - safe only because the buffer outlives both calls, but worth knowing about before moving
+code around it.
 
 ## Terminal restore (Unix)
 
@@ -35,8 +40,9 @@ panics, `RawModeGuard` restores it when dropped. A `SIGKILL` runs no code at all
 `SIGTERM` is handled in the ordinary way (`Tap::watch_sigterm`, through `signal-hook`): the handler restores the
 terminal, kills the child, and exits. This does not need the helper.
 
-There is no Windows equivalent. `RawModeGuard` is a plain raw-mode toggle there. A shell normally resets the
-console at its next prompt.
+There is no Windows equivalent. `RawModeGuard` there also turns on `ENABLE_VIRTUAL_TERMINAL_INPUT`/`_PROCESSING`
+on top of raw mode, restoring the original console modes on drop; nothing restores them if the holder is
+force-killed. A shell normally resets the console at its next prompt.
 
 ## Known gap: a `SIGKILL`ed holder orphans its program (Unix)
 
@@ -88,8 +94,9 @@ stdout is not a terminal. This also helps on Linux, for programs that ask the te
   (`shutdown(Write)`), which pipes lack.
 - **Session directory.** `%LOCALAPPDATA%\vtee`. A reparse point or non-directory is refused. Names are capped so
   the socket path stays under the 107-byte AF_UNIX limit.
-- **`kill`.** After the liveness check, `OpenProcess` and `TerminateProcess`. There is no process-id-reuse guard
-  beyond the liveness check.
+- **`kill`.** After the liveness check, `OpenProcess` and `TerminateProcess`. A process-id-reuse guard compares the
+  target's creation time (`GetProcessTimes`) against the pidfile's mtime and leaves alone anything created after
+  the pidfile was last written.
 - **Handle inheritance.** Not an issue: the child is spawned before any socket is created, and `portable-pty`'s ConPTY
   spawn passes `bInheritHandles = FALSE`. A test pins this (`tests/windows_sessions.rs`).
 - **Resize.** No `SIGWINCH` on Windows, so `Tap::watch_resize` polls the console size every 200 ms.
@@ -107,7 +114,8 @@ validated in the one function that turns a name into paths, so every caller is c
 
 All shared state (the emulator, the byte count, and the list of attached terminals) sits behind one lock, so
 "snapshot the screen and start receiving future output" is one atomic step for a newly attached client; it can
-never see a chunk twice or miss one. Each attached terminal has a bounded queue (256 chunks of up to 8 KiB) drained
-by its own writer thread; the output loop only does a non-blocking `try_send` under the lock. A client that stops
-reading fills its queue and is dropped from the broadcast instead of blocking everyone. After each chunk the output
-loop yields, because the standard mutex is not fair and a flooding program could otherwise starve `snapshot()`.
+never see a chunk twice or miss one. Each attached terminal has its own `SinkQueue`, drained by its own writer
+thread, bounded in bytes rather than in chunk count (`SINK_QUEUE_BYTES`, 2 MiB). A client that stops reading fills
+its queue; instead of being dropped from the broadcast, its entire backlog is replaced with one redraw of the
+current screen, so it resynchronises instead of going stale or blocking everyone. After each chunk the output loop
+yields, because the standard mutex is not fair and a flooding program could otherwise starve `snapshot()`.
