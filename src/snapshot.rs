@@ -302,6 +302,32 @@ pub struct Snapshot {
     pub producer: Producer,
 }
 
+/// Each row's text only - the `Snapshot::lines` part of [`build`] without the per-cell colour
+/// and attribute data, for a caller that only needs to check the text (`wait_for`'s match check,
+/// run on every wake while a client waits) and would otherwise pay for a full `Cell` grid it's
+/// going to throw away on every iteration that doesn't match.
+pub(crate) fn row_lines(term: &Term<ObserverListener>) -> Vec<String> {
+    let grid = term.grid();
+    let cols = grid.columns();
+    let rows = grid.screen_lines();
+    let mut lines = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let line = Line(r as i32);
+        let mut text = String::new();
+        for c in 0..cols {
+            let cell = &grid[Point::new(line, Column(c))];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                text.push(display_char(cell.c));
+                if let Some(zw) = cell.zerowidth() {
+                    text.extend(zw);
+                }
+            }
+        }
+        lines.push(text);
+    }
+    lines
+}
+
 pub(crate) fn build(term: &Term<ObserverListener>, byte_offset: u64, title: Option<String>) -> Snapshot {
     let grid = term.grid();
     let cols = grid.columns();
@@ -609,6 +635,23 @@ mod emulator_tests {
 
     fn row_text(s: &Snapshot, row: usize) -> String {
         s.lines[row].trim_end().to_string()
+    }
+
+    /// `row_lines` is `build`'s text column pulled out on its own for `wait_for`'s match check;
+    /// it must always agree with `Snapshot::lines`, or a wait could match (or fail to match)
+    /// something a full snapshot of the same screen wouldn't.
+    #[test]
+    fn row_lines_agrees_with_a_full_snapshots_lines() {
+        for bytes in [
+            &b"hello\r\nworld"[..],
+            b"\x1b[1;31mred\x1b[0m plain",
+            "wi\u{0301}de\u{3042}".as_bytes(), // combining mark, then a wide (East Asian) character
+        ] {
+            let listener = ObserverListener::new();
+            let mut term = Term::new(Config::default(), &Size { cols: 20, rows: 4 }, listener.clone());
+            Processor::<vte::ansi::StdSyncHandler>::new().advance(&mut term, bytes);
+            assert_eq!(row_lines(&term), build(&term, 0, None).lines, "{bytes:?}");
+        }
     }
 
     #[test]

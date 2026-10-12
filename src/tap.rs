@@ -495,18 +495,20 @@ impl Tap {
         let deadline = Instant::now() + timeout;
         let mut guard = self.shared.state.lock_unpoisoned();
         loop {
-            let snap = snapshot::build(&guard.term, guard.bytes_seen, self.title.current_title());
+            // Only the row text is needed to check for a match - building the full `Snapshot`
+            // (every cell's colour and attributes) on every wake, for every waiter, just to throw
+            // it away on every iteration that doesn't match, is wasted work under the same lock
+            // the pty reader needs. It's built for real exactly once below, only once this call
+            // is actually about to return.
             let found = if join_wrapped {
                 snapshot::logical_lines(&guard.term).iter().any(|l| l.contains(text))
             } else {
-                snap.lines.iter().any(|l| l.contains(text))
+                snapshot::row_lines(&guard.term).iter().any(|l| l.contains(text))
             };
-            if found {
-                return (true, snap);
-            }
             let now = Instant::now();
-            if now >= deadline {
-                return (false, snap);
+            if found || now >= deadline {
+                let snap = snapshot::build(&guard.term, guard.bytes_seen, self.title.current_title());
+                return (found, snap);
             }
             let (g, _) =
                 self.shared.changed.wait_timeout(guard, deadline - now).unwrap_or_else(PoisonError::into_inner);
