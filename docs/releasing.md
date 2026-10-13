@@ -7,9 +7,9 @@ Trusted Publishing, with no stored token ([Publishing to crates.io](#publishing-
 Status: the `CI` workflow has run on GitHub and is green. The `Release` workflow's very first run, on a push to
 `main`, failed at the step that opens the release PR with "GitHub Actions is not permitted to create or approve
 pull requests" - the repository setting in the [checklist](#one-time-repository-setup-maintainer-checklist) below
-was off at the time. Since then the full path has run and succeeded: PR #1 ("chore: release v0.1.0", merged
-2026-10-11) opened and was merged, which cut the `v0.1.0` tag, published the GitHub Release with Linux and Windows
-binary archives, and published `vtee 0.1.0` to crates.io through Trusted Publishing.
+was off at the time. Since then the full path has run and succeeded twice: PR #1 ("chore: release v0.1.0", merged
+2026-10-11) and PR #2 ("chore: release v0.1.1", merged 2026-10-12) each cut their tag, published the GitHub Release
+with Linux and Windows binary archives, and published the crate to crates.io through Trusted Publishing.
 
 ## How the version is computed
 
@@ -63,7 +63,10 @@ because the locked `uuid 1.27.0` requires 1.89. Windows was only built on curren
 - [ ] Settings > Actions > General > Workflow permissions: enable **Allow GitHub Actions to create and approve pull requests**.
 - [ ] Optional but recommended: create a fine-grained personal access token (or GitHub App) with `contents: write` and
       `pull-requests: write` on this repo and store it as the secret `RELEASE_PLZ_TOKEN`. Without it, the release PR is
-      opened by `GITHUB_TOKEN`, and GitHub does not run CI on PRs created that way.
+      opened by `GITHUB_TOKEN`: the `CI` and `Conventional Commits` runs on it come up `action_required` rather than
+      running on their own, and each one needs a one-time manual approval before it executes - confirmed on PR #2
+      (`chore: release v0.1.1`), approved by hand with `gh api repos/<owner>/<repo>/actions/runs/<id>/approve -X POST`
+      for each gated run. Setting the token avoids this step on every future release PR.
 - [ ] Settings > General > Pull Requests: allow squash merging (and make "Default to PR title" the squash message).
 - [ ] Settings > Branches: protect `main` and require the `Conventional Commits` and CI checks if you want enforcement.
 - [x] License: `MIT OR Apache-2.0` (the Rust convention), as `LICENSE-MIT`, `LICENSE-APACHE` and the `license` field
@@ -101,11 +104,13 @@ the job still has `id-token: write`. As a fallback, publish by hand as in steps 
 make sure the tag `vX.Y.Z` and the GitHub Release exist (re-running the failed job after a manual publish skips the
 upload and creates them).
 
-**Unverified.** The first real run of this path is the `0.1.0` release merge. Not yet exercised: the OIDC exchange
-from the release-plz action, `cargo publish` from CI, and `release-plz release` end to end (it needs a GitHub token,
-so it was not dry-run). What was checked locally with release-plz 0.3.171: `update` computes `0.0.1 -> 0.1.0` with and
-without `git_only`, finds `vtee 0.0.1` on the registry without it, and `actionlint` passes on all workflows. The
-re-run-after-manual-publish behaviour in the paragraph above comes from release-plz's documented design, not from a test.
+**Verified.** The `0.1.0` and `0.1.1` release merges both ran this path for real: the OIDC exchange from the
+release-plz action, `cargo publish` from CI, and `release-plz release` end to end all succeeded on both, confirmed
+afterward against the live GitHub Release and the crates.io index (not a dry run - `release-plz release` needs a
+real GitHub token). What was additionally checked locally with release-plz 0.3.171 before the first release: `update`
+computes `0.0.1 -> 0.1.0` with and without `git_only`, finds `vtee 0.0.1` on the registry without it, and
+`actionlint` passes on all workflows. The re-run-after-manual-publish behaviour in the paragraph above comes from
+release-plz's documented design, not from a test - that fallback path itself hasn't been needed yet.
 
 `cargo package` ships the source, tests, fixtures and docs, about 1.1 MB over roughly 200 files. The `exclude` list
 in `Cargo.toml` leaves out CI configuration, the Docker test image, `HANDOFF.md`, `release-plz.toml` and the oracle
